@@ -1,0 +1,16 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: syntax gate
+        run: |
+          for f in scripts/*.sh scripts/lib/*.sh tests/*.sh; do bash -n "$f"; done
+      - name: regression tests
+        run: ./tests/review-test.sh
