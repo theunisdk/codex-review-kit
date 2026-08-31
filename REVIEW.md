@@ -59,8 +59,9 @@ hazards, and a fire drill to prove the result. By hand, the bootstrap is:
 # From a local hub clone — no download, and the default path:
 REVIEW_KIT_DIR=~/dev/private/codex-review-kit \
   bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
-# Without one, pin the fetch to a reviewed commit rather than the mutable `main`,
-# and read it before running it — the next line executes whatever it downloaded.
+# Without one, the updater fetches the hub's latest release tag — never the
+# mutable `main` — or the tag/full-SHA in $REVIEW_KIT_REF; read what it fetched
+# before the next line, which executes it.
 ./scripts/review-install.sh          # per-machine setup
 # then adapt the repo-owned files — all of them live under .review/:
 #   .review/rubric.md  .review/learnings.md  .review/config.sh
@@ -75,7 +76,8 @@ Everything repo-specific is committed; the only per-machine artifact is
 never overwrites. `--check` verifies without changing anything.
 
 **Picking up kit improvements:** `./scripts/review-update.sh` in any spoke —
-it overwrites the synced half, records the hub commit in `.review/kit-version`,
+it overwrites the synced half, prints the source and revision it installs,
+records them (ref and commit) in `.review/kit-version`,
 and leaves the repo-owned half alone. Fix a machinery bug or add a generic
 lesson once, in the hub; every repo inherits it on its next sync.
 
@@ -184,7 +186,7 @@ isn't reproducible this way — which is fine, since it's still your final gate.
   prompts.local/       REPO-OWNED  per-lens hazard overlays, appended at run time
   adjudication.md      synced      verify → FIX/LOG/REJECT/ESCALATE → verdict
   learnings-shared.md  synced      kit-wide memory, edited only in the hub
-  kit-version          synced      which hub commit this repo last pulled
+  kit-version          synced      which hub ref + commit this repo last pulled
   schema.json          synced      enforced output shape via codex --output-schema
   prompts/             synced      the shared lens prompts — never edit in a repo
     _common.md         role, method, hard exclusions, calibration
