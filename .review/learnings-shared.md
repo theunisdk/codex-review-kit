@@ -27,3 +27,13 @@ before this file dilutes the prompts it feeds.
   copy asserting the old narrower set — when a diff widens a selectable or
   returnable set, re-read every consumer of the selection for baked-in
   assumptions about the old shape.
+- 2026-09-01: a documentation diff was verified as *true* and passed; three real
+  defects were findable only by asking whether *following* it works — a value the
+  reader was told to copy from a command's output differed from the example, and
+  a troubleshooting step attributed a multi-cause symptom to a single cause.
+  Prose that instructs is code: trace it, don't just fact-check it.
+- 2026-09-01: a change that adds guidance premised on a broader configuration can
+  falsify unchanged text elsewhere in the same file — the contradiction sat two
+  paragraphs from the hunk and survived because the lens read the diff and its
+  immediate context. When a diff relaxes or widens an assumption, re-read the
+  whole file for sentences written under the narrower one.

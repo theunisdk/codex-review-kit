@@ -26,3 +26,11 @@ Hunt specifically for:
 - **Regex** — unanchored patterns used for validation, catastrophic backtracking,
   greedy quantifiers on user input, missing escapes.
 - **Copy-paste artefacts** — a duplicated block where one variable was not updated.
+- **Operator-facing procedures** — when the diff contains steps a human will follow
+  (setup, deploy, runbook, troubleshooting), check that they *execute*, not merely
+  that they are true. Run them in your head as a first-time reader: a value copied
+  out of a command's real output carries that output's formatting (trailing dots on
+  fully-qualified names, quotes, units, wrapped lines); a step naming one cause for
+  a symptom that has several sends the reader down one branch and stops them
+  looking; and a prerequisite stated only further down the page is not stated at the
+  moment it is needed.
