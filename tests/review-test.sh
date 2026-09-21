@@ -389,19 +389,193 @@ test_init_respects_other_config_spellings() {
   done
 }
 
-test_tracked_review_sources_survive_filter
-test_nonzero_rc_lens_marked_failed
-test_all_lenses_failed_with_output_still_merges
-test_update_reports_source_and_revision
-test_update_network_pins_to_latest_tag
-test_update_network_honors_explicit_ref
-test_update_network_refuses_without_pin
-test_update_warns_on_stale_local_clone
-test_init_seeds_coderabbit_config
-test_init_never_overwrites_existing_config
-test_init_respects_other_config_spellings
-test_install_check_reports_gate_state
-test_install_check_fails_on_unwired_gate
+# --- installer fixtures ----------------------------------------------------
+make_installed_spoke() { # <dir> — a spoke with the kit synced and seeded
+  local dir="$1"
+  make_spoke "$dir"
+  ( cd "$dir" && env -i HOME="$WORK/nohome" PATH="$PATH" REVIEW_KIT_DIR="$KIT" \
+      bash "$KIT/scripts/review-update.sh" --init ) >/dev/null 2>&1
+}
+
+make_synced_spoke() { # <dir> — synced but NOT seeded, for bring-your-own configs
+  local dir="$1"
+  make_spoke "$dir"
+  ( cd "$dir" && env -i HOME="$WORK/nohome" PATH="$PATH" REVIEW_KIT_DIR="$KIT" \
+      bash "$KIT/scripts/review-update.sh" ) >/dev/null 2>&1
+}
+
+run_install_check() { # <spoke> — --check output in $LOG (stubbed codex on PATH)
+  local dir="$1"
+  LOG="$dir.install.log"
+  mkdir -p "$WORK/nohome"
+  ( cd "$dir" && env -i HOME="$WORK/nohome" PATH="$WORK/bin:$PATH" \
+      bash scripts/review-install.sh --check ) > "$LOG" 2>&1
+}
+
+run_install_full() { # <spoke> — full install, so --check has nothing else to fail on
+  local dir="$1"
+  mkdir -p "$WORK/nohome"
+  ( cd "$dir" && env -i HOME="$WORK/nohome" PATH="$WORK/bin:$PATH" \
+      bash scripts/review-install.sh ) >/dev/null 2>&1
+}
+
+write_cfg() { printf '%s\n' "$2" > "$1/.coderabbit.yaml"; }
+
+# --- installer tests -------------------------------------------------------
+# The PR-gate section is the installer's only repo-state-dependent check, and
+# its job is to notice a gate that is present but not actually wired to the
+# rubric — the state that otherwise looks identical to a configured one.
+test_install_check_reports_gate_state() {
+  local spoke="$WORK/i1-spoke"
+  make_installed_spoke "$spoke"
+
+  run_install_check "$spoke"
+  assert     "i1: wired config reported wired" \
+    grep -qF 'wires inheritance and both guideline mappings' "$LOG"
+  assert_not "i1: no inheritance complaint when wired" grep -q "omits 'inheritance: true'" "$LOG"
+  assert_not "i1: no mapping complaint when wired" grep -q 'has no knowledge_base' "$LOG"
+
+  # absent entirely — advisory, since a repo may deliberately not use CodeRabbit
+  mv "$spoke/.coderabbit.yaml" "$spoke/held.yaml"
+  run_install_check "$spoke"
+  assert "i2: missing config reported" grep -qF 'no CodeRabbit config' "$LOG"
+  mv "$spoke/held.yaml" "$spoke/.coderabbit.yaml"
+
+  # a TypeScript config is the active one; it must never be reported verified
+  local ts="$WORK/i5-spoke"
+  make_synced_spoke "$ts"
+  : > "$ts/.coderabbit.config.ts"
+  run_install_check "$ts"
+  assert "i5: typescript config reported uninspected" grep -qF 'is NOT inspected here' "$LOG"
+
+  # The seed guard refuses to seed alongside an undotted name, so detection
+  # must not advise seeding one — nor vouch for a file that is absent from
+  # CodeRabbit's documented discovery.
+  local un="$WORK/i12-spoke"
+  make_synced_spoke "$un"
+  : > "$un/coderabbit.yaml"
+  run_install_check "$un"
+  assert     "i12: undotted config reported present" grep -qF 'not one of CodeRabbit' "$LOG"
+  assert_not "i12: does not advise seeding alongside it" grep -qF 'no CodeRabbit config' "$LOG"
+  assert_not "i12: does not vouch for its wiring" grep -qF 'wires inheritance' "$LOG"
+}
+
+# A gate that is present but silently unwired must FAIL --check, not merely
+# warn: onboarding requires wiring a pre-existing config and requires --check
+# to pass, so an advisory-only result lets that requirement go unmet. A
+# missing config stays advisory — declining to use CodeRabbit is a choice.
+test_install_check_fails_on_unwired_gate() {
+  local spoke="$WORK/i6-spoke" rc
+  make_installed_spoke "$spoke"
+  run_install_full "$spoke"
+
+  run_install_check "$spoke"; rc=$?
+  assert "i6: fully wired repo passes --check" test "$rc" -eq 0
+  cp "$spoke/.coderabbit.yaml" "$WORK/i6-held.yaml"
+
+  # the live rubric mapping deleted, comments left intact: the state a
+  # substring search called correctly wired
+  python3 - "$spoke/.coderabbit.yaml" <<'EOF'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+p.write_text(p.read_text().replace('      - files: ".review/rubric.md"\n        applyTo: "**/*"\n', ''))
+EOF
+  run_install_check "$spoke"; rc=$?
+  assert "i3: unwired rubric fails --check" test "$rc" -ne 0
+  assert "i3: unwired rubric named" grep -qF 'entry mapping .review/rubric.md' "$LOG"
+  assert "i3: rubric.md still present in comments" grep -qF '.review/rubric.md' "$spoke/.coderabbit.yaml"
+
+  # inheritance dropped: the file then replaces the org's settings silently
+  cp "$WORK/i6-held.yaml" "$spoke/.coderabbit.yaml"
+  python3 - "$spoke/.coderabbit.yaml" <<'EOF'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+p.write_text(p.read_text().replace('inheritance: true', '# inheritance removed'))
+EOF
+  run_install_check "$spoke"; rc=$?
+  assert "i4: missing inheritance fails --check" test "$rc" -ne 0
+  assert "i4: missing inheritance named" grep -q "omits 'inheritance: true'" "$LOG"
+
+  # only the learnings mapping removed — must also be caught
+  cp "$WORK/i6-held.yaml" "$spoke/.coderabbit.yaml"
+  python3 - "$spoke/.coderabbit.yaml" <<'EOF'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+p.write_text(p.read_text().replace('      - files: ".review/learnings.md"\n        applyTo: "**/*"\n', ''))
+EOF
+  run_install_check "$spoke"; rc=$?
+  assert "i7: unwired learnings fails --check" test "$rc" -ne 0
+  assert "i7: unwired learnings named" grep -qF 'entry mapping .review/learnings.md' "$LOG"
+
+  # the right pair in the wrong section is not a guideline at all
+  write_cfg "$spoke" 'inheritance: true
+reviews:
+  path_instructions:
+    - files: ".review/rubric.md"
+      applyTo: "**/*"'
+  run_install_check "$spoke"; rc=$?
+  assert "i8: mapping under path_instructions fails --check" test "$rc" -ne 0
+
+  # a valid config that merely quotes differently must NOT be called broken
+  write_cfg "$spoke" 'inheritance: true
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - applyTo: 0**/*0
+        files: 0.review/rubric.md0
+      - {files: .review/learnings.md, applyTo: 0**/*0}'
+  sed -i "s/0/'/g" "$spoke/.coderabbit.yaml"
+  run_install_check "$spoke"; rc=$?
+  assert     "i9: differently quoted config passes --check" test "$rc" -eq 0
+  assert_not "i9: differently quoted config not called broken" grep -q 'has no knowledge_base' "$LOG"
+
+  # mapped but switched off: CodeRabbit applies neither file, so the mappings
+  # being present proves nothing
+  write_cfg "$spoke" 'inheritance: true
+knowledge_base:
+  code_guidelines:
+    enabled: false
+    filePatterns:
+      - files: ".review/rubric.md"
+        applyTo: "**/*"
+      - files: ".review/learnings.md"
+        applyTo: "**/*"'
+  run_install_check "$spoke"; rc=$?
+  assert "i11: disabled code_guidelines fails --check" test "$rc" -ne 0
+  assert "i11: disabled code_guidelines named" grep -qF 'enabled to false' "$LOG"
+
+  # an unparseable config discards everything CodeRabbit would have read
+  printf 'inheritance: true\n  bad: [unclosed\n' > "$spoke/.coderabbit.yaml"
+  run_install_check "$spoke"; rc=$?
+  assert "i10: unparseable config fails --check" test "$rc" -ne 0
+  assert "i10: unparseable config named as such" grep -qF 'does not parse' "$LOG"
+}
+
+run_tests() {
+  local t
+  for t in "$@"; do
+    if declare -F "$t" >/dev/null 2>&1; then
+      "$t"
+    else
+      fail "harness: test '$t' is listed but not defined"
+    fi
+  done
+}
+
+run_tests \
+  test_tracked_review_sources_survive_filter \
+  test_nonzero_rc_lens_marked_failed \
+  test_all_lenses_failed_with_output_still_merges \
+  test_update_reports_source_and_revision \
+  test_update_network_pins_to_latest_tag \
+  test_update_network_honors_explicit_ref \
+  test_update_network_refuses_without_pin \
+  test_update_warns_on_stale_local_clone \
+  test_init_seeds_coderabbit_config \
+  test_init_never_overwrites_existing_config \
+  test_init_respects_other_config_spellings \
+  test_install_check_reports_gate_state \
+  test_install_check_fails_on_unwired_gate
 
 echo
 if [ "$FAILURES" -gt 0 ]; then

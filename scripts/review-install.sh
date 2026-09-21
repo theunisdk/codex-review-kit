@@ -58,6 +58,8 @@ if d.get("inheritance") is not True:
 
 kb = d.get("knowledge_base") or {}
 cg = kb.get("code_guidelines") if isinstance(kb, dict) else None
+if isinstance(cg, dict) and cg.get("enabled") is False:
+    print("sets knowledge_base.code_guidelines.enabled to false - the mappings below are inert and the gate applies neither the rubric nor the learnings")
 pats = (cg or {}).get("filePatterns") or [] if isinstance(cg, dict) else []
 for g in (".review/rubric.md", ".review/learnings.md"):
     if not any(isinstance(e, dict) and e.get("files") == g and e.get("applyTo") == "**/*"
@@ -176,7 +178,13 @@ cr_cfg=""
 for f in .coderabbit.yaml .coderabbit.yml .coderabbit.config.ts; do
   [ -f "$f" ] && { cr_cfg="$f"; break; }
 done
-if [ -z "$cr_cfg" ]; then
+cr_undoc=""
+for f in coderabbit.yaml coderabbit.yml; do
+  [ -f "$f" ] && { cr_undoc="$f"; break; }
+done
+if [ -z "$cr_cfg" ] && [ -n "$cr_undoc" ]; then
+  skip "$cr_undoc present — not one of CodeRabbit's documented config names, so it is not inspected here; if it is your active config verify its wiring by hand. --init will not seed alongside it"
+elif [ -z "$cr_cfg" ]; then
   skip "no CodeRabbit config — the gate runs on its defaults, not this repo's rubric; seed one with scripts/review-update.sh --init"
 elif [ "$cr_cfg" = .coderabbit.config.ts ]; then
   skip "$cr_cfg is the active config and is NOT inspected here — verify its inheritance and rubric wiring by hand, and do not add a .coderabbit.yaml (YAML overrides it outright)"

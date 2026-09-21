@@ -59,6 +59,11 @@ The record so far, all found before the first paid review ran:
   discarded, lint "ran" and reported nothing.
 - Codex 0.149 removed `--ask-for-approval`; every lens would have failed
   with a usage error, each one non-fatally.
+- An edit to `tests/review-test.sh` deleted two test functions but left their
+  names in the runner list. Bash printed `command not found`, returned 127, and
+  recorded nothing — so the suite reported "all tests passed" with 17
+  assertions missing, and CI agreed. The runner now fails on a listed test it
+  cannot find.
 
 The pattern: broken looks identical to clean. Treat an empty findings list on
 a substantial diff as suspicious, not reassuring, and check the raw logs. A
