@@ -20,6 +20,7 @@ trap 'rm -rf "$WORK"' EXIT
 FAILURES=0
 pass() { printf 'ok   - %s\n' "$*"; }
 fail() { FAILURES=$((FAILURES + 1)); printf 'FAIL - %s\n' "$*"; }
+skip_test() { printf 'skip - %s\n' "$*"; }
 assert()     { local d="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$d"; else fail "$d"; fi; }
 assert_not() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then fail "$d"; else pass "$d"; fi; }
 
@@ -194,6 +195,32 @@ run_update() { # run_update <spoke> [VAR=val ...] — output in $LOG
       bash "$KIT/scripts/review-update.sh" ) > "$LOG" 2>&1
 }
 
+run_update_init() { # run_update_init <spoke> [VAR=val ...] — --init run, output in $LOG
+  local dir="$1"; shift
+  LOG="$dir.log"
+  mkdir -p "$WORK/nohome"
+  ( cd "$dir" && env -i HOME="$WORK/nohome" PATH="$PATH" "$@" \
+      bash "$KIT/scripts/review-update.sh" --init ) > "$LOG" 2>&1
+}
+
+# YAML well-formedness, when a parser is available. A malformed seeded config
+# is worse than none: CodeRabbit discards the whole file and silently falls
+# back to defaults, taking any inherited org settings down with it.
+yaml_parses() { python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$1"; }
+have_yaml_parser() { python3 -c 'import yaml' 2>/dev/null; }
+
+# Assert a parsed property of a config. Text greps cannot do this job: the
+# template mentions rubric.md and applyTo in its own comments, so a substring
+# match reports an unwired mapping as wired.
+cfg_holds() { # cfg_holds <file> <python expression over `d`>
+  python3 -c 'import sys, yaml
+d = yaml.safe_load(open(sys.argv[1]))
+sys.exit(0 if eval(sys.argv[2]) else 1)' "$1" "$2"
+}
+
+# In CI a missing parser is a failure, not a silent skip.
+require_yaml_parser() { [ "${REVIEW_TEST_REQUIRE_YAML:-0}" = 1 ]; }
+
 # --- updater tests ---------------------------------------------------------
 assert "review-update.sh parses (bash -n)" bash -n "$KIT/scripts/review-update.sh"
 
@@ -283,6 +310,85 @@ test_update_warns_on_stale_local_clone() {
   assert "u5: stale clone warns it is behind" grep -q 'behind' "$LOG"
 }
 
+# --init seeds repo-owned files that are missing. Nothing seeds without it,
+# and nothing already in the repo is overwritten. `.coderabbit.yaml` is the
+# case that bites: it configures the PR gate, and CodeRabbit resolves exactly
+# one configuration source — a file we drop in outranks central and org-level
+# settings, so overwriting (or duplicating) a repo's own config silently
+# disables whatever it was inheriting.
+test_init_seeds_coderabbit_config() {
+  local spoke="$WORK/u6-spoke"
+  make_spoke "$spoke"
+
+  run_update "$spoke" REVIEW_KIT_DIR="$KIT"; local rc=$?
+  assert     "u6: plain sync exits 0" test "$rc" -eq 0
+  assert_not "u6: plain sync seeds no config" test -f "$spoke/.coderabbit.yaml"
+  assert_not "u6: plain sync seeds no rubric" test -f "$spoke/.review/rubric.md"
+
+  run_update_init "$spoke" REVIEW_KIT_DIR="$KIT"; rc=$?
+  assert "u6: --init exits 0" test "$rc" -eq 0
+  assert "u6: --init seeds the config" test -f "$spoke/.coderabbit.yaml"
+  assert "u6: --init seeds the rubric" test -f "$spoke/.review/rubric.md"
+
+  local cfg="$spoke/.coderabbit.yaml"
+  if ! have_yaml_parser; then
+    if require_yaml_parser; then
+      fail "u6: python3 yaml module required (REVIEW_TEST_REQUIRE_YAML=1) but missing"
+    else
+      skip_test "u6: seeded-config assertions (no python3 yaml module)"
+    fi
+    return
+  fi
+
+  assert "u6: seeded config is well-formed YAML" yaml_parses "$cfg"
+  # Without inheritance, seeding this file silently drops the org's settings.
+  assert "u6: seeded config opts into inheritance" \
+    cfg_holds "$cfg" 'd.get("inheritance") is True'
+  # Default is 5, which pauses auto-review mid branch; a paused gate reads as
+  # a clean one.
+  assert "u6: seeded config disables the auto-review pause" \
+    cfg_holds "$cfg" 'd["reviews"]["auto_review"]["auto_pause_after_reviewed_commits"] == 0'
+  # The rubric lives outside the source tree, so it governs nothing without an
+  # explicit repo-wide applyTo ON ITS OWN entry.
+  assert "u6: rubric mapped repo-wide in code_guidelines" \
+    cfg_holds "$cfg" 'any(e.get("files") == ".review/rubric.md" and e.get("applyTo") == "**/*" for e in d["knowledge_base"]["code_guidelines"]["filePatterns"])'
+  assert "u6: learnings mapped repo-wide in code_guidelines" \
+    cfg_holds "$cfg" 'any(e.get("files") == ".review/learnings.md" and e.get("applyTo") == "**/*" for e in d["knowledge_base"]["code_guidelines"]["filePatterns"])'
+}
+
+# A second --init must not clobber the repo's own edits to a seeded file.
+test_init_never_overwrites_existing_config() {
+  local spoke="$WORK/u7-spoke"
+  make_spoke "$spoke"
+  printf 'reviews:\n  profile: assertive\n' > "$spoke/.coderabbit.yaml"
+
+  run_update_init "$spoke" REVIEW_KIT_DIR="$KIT"; local rc=$?
+  assert "u7: run exits 0" test "$rc" -eq 0
+  assert "u7: existing config left untouched" \
+    grep -qF 'profile: assertive' "$spoke/.coderabbit.yaml"
+  assert_not "u7: template did not overwrite it" \
+    grep -qE '^inheritance: *true' "$spoke/.coderabbit.yaml"
+}
+
+# CodeRabbit also reads `.coderabbit.yml`, and YAML in either spelling beats
+# `.coderabbit.config.ts` outright. Seeding alongside any of them would leave
+# the repo with a second config it never asked for and cannot see losing.
+test_init_respects_other_config_spellings() {
+  local rc name spoke
+  # The first three are CodeRabbit's documented names; the undotted pair is
+  # guarded defensively, since seeding over a live gate config is silent.
+  for name in .coderabbit.yml .coderabbit.config.ts coderabbit.yaml coderabbit.yml; do
+    spoke="$WORK/u8-$name-spoke"
+    make_spoke "$spoke"
+    : > "$spoke/$name"
+
+    run_update_init "$spoke" REVIEW_KIT_DIR="$KIT"; rc=$?
+    assert     "u8: --init exits 0 with $name present" test "$rc" -eq 0
+    assert_not "u8: no .coderabbit.yaml seeded alongside $name" \
+      test -f "$spoke/.coderabbit.yaml"
+  done
+}
+
 test_tracked_review_sources_survive_filter
 test_nonzero_rc_lens_marked_failed
 test_all_lenses_failed_with_output_still_merges
@@ -291,6 +397,11 @@ test_update_network_pins_to_latest_tag
 test_update_network_honors_explicit_ref
 test_update_network_refuses_without_pin
 test_update_warns_on_stale_local_clone
+test_init_seeds_coderabbit_config
+test_init_never_overwrites_existing_config
+test_init_respects_other_config_spellings
+test_install_check_reports_gate_state
+test_install_check_fails_on_unwired_gate
 
 echo
 if [ "$FAILURES" -gt 0 ]; then

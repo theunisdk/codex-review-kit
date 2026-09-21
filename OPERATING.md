@@ -43,6 +43,8 @@ For the first few runs, look under the hood:
 - `.review/raw/analyzers.txt` — does it contain real sections for your stack?
 - `.review/raw/prompt-<lens>.md` — is your `prompts.local/` overlay and both
   learnings files present in the assembled prompt?
+- `@coderabbitai configuration` on the first PR — is the `.coderabbit.yaml`
+  you committed the config that actually graded the diff?
 
 ## What to be aware of
 
@@ -61,6 +63,32 @@ The record so far, all found before the first paid review ran:
 The pattern: broken looks identical to clean. Treat an empty findings list on
 a substantial diff as suspicious, not reassuring, and check the raw logs. A
 single lens dying is a warning line, not an abort.
+
+### The gate may not be running the config you committed
+
+`.coderabbit.yaml` is one of eight configuration sources CodeRabbit resolves,
+and it resolves exactly one of them — they do not merge. Two consequences
+before you trust the gate:
+
+- A repo file **replaces** the org's central config and UI settings instead of
+  adding to them, and any key it omits falls back to the schema default rather
+  than the org's value. The seeded template sets `inheritance: true` to opt
+  into merging; drop that line and the repo quietly stops honouring org policy.
+- One invalid key makes CodeRabbit discard the **entire file** and review with
+  defaults — taking the rubric pointer down with it. That is reported at the
+  top of its PR summary, but nested keys are not schema-validated: a
+  nonexistent tool under `reviews.tools`, or a misspelt key under
+  `auto_review`, validates clean and does nothing.
+
+`@coderabbitai configuration` on any PR prints the fully-resolved config and
+names which source won each value. It is the only way to confirm the file you
+committed is the one grading your diff.
+
+One default deserves its own mention: `auto_pause_after_reviewed_commits` is 5,
+so automatic review pauses after five reviewed commits on a branch. Review →
+fix → push reaches that routinely, and a paused gate is indistinguishable from
+a clean one — the same trap as reading a green status check instead of the
+verdict. The template sets it to 0.
 
 ### Adjudication bias
 
@@ -90,8 +118,11 @@ point of the design. Findings applied unverified are worse than no review.
 
 - **Repo-owned, in full — this list is the short one, so learn it instead:**
   `.review/rubric.md`, `.review/learnings.md`, `.review/config.sh`,
-  `.review/analyzers.local.sh`, and `.review/prompts.local/`. These five are seeded once
-  on `--init` and never touched again.
+  `.review/analyzers.local.sh`, `.review/prompts.local/`, and the CodeRabbit
+  config at the repo root (`.coderabbit.yaml`). These six are seeded once on
+  `--init` and never touched again — and the gate config is not seeded at all
+  when the repo already has one, so hub improvements to it never arrive
+  automatically.
 - **Everything else the kit installs is synced and will be overwritten** by the next
   `review-update.sh`, silently: the four kit scripts (`scripts/review.sh`,
   `scripts/review-install.sh`, `scripts/review-update.sh`, `scripts/make-plugin.sh`) and

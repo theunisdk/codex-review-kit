@@ -1,0 +1,77 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit's configuration — the gate at the end of the pipeline. Commit it.
+# Repo-owned: `review-update.sh --init` seeds this once and no later sync
+# touches it, so your edits are safe.
+#
+# Two properties of this file fail silently, and both shape what is below:
+#
+#  1. CodeRabbit resolves ONE configuration source rather than merging them,
+#     and this file outranks central config and the org's UI settings. A key
+#     you leave unset falls back to the schema default, not the org's value —
+#     so `inheritance: true` is not optional here.
+#  2. One invalid key discards the WHOLE file and reverts to defaults. That is
+#     reported on the PR, but nested keys are not schema-checked: a nonexistent
+#     `reviews.tools.tsc` and a typo'd `auto_review.enabld` both validate clean
+#     and do nothing. Keep the active key surface small, and confirm with
+#     `@coderabbitai configuration` on a PR — it prints the resolved config and
+#     names which source won each value.
+
+# Merge with the org/central config rather than silently replacing it.
+inheritance: true
+
+reviews:
+  auto_review:
+    # Default is 5: automatic review PAUSES after five reviewed commits since
+    # the last pause. Review → fix → push is this pipeline's normal shape, and
+    # a gate that quietly stopped reviewing looks exactly like a clean one.
+    auto_pause_after_reviewed_commits: 0
+
+  # Standards that apply to SOME paths. Inline text only, `path` and
+  # `instructions` both required, globs are minimatch. `/review-onboard` fills
+  # this from the house rules in .review/rubric.md. Never name a guidelines
+  # file here — that tells CodeRabbit to review the file as changed code, not
+  # to obey it; the pointer at the bottom of this file is the way to do that.
+  # path_instructions:
+  #   - path: "src/api/**"
+  #     instructions: |
+  #       - Every handler scopes database reads to the caller's tenant.
+
+  # Paths review should ignore. CodeRabbit already ignores ~200 patterns
+  # (dist, node_modules, generated, lock files), so add only what is specific
+  # to this repo — the vendored and duplicate-checkout directories recorded in
+  # .review/learnings.md are the usual ones.
+  # Use "!" entries ONLY: a single bare pattern turns the list into an
+  # allowlist and silently drops every unmatched file from review.
+  # path_filters:
+  #   - "!**/vendor/**"
+
+  # Every tool defaults to enabled, and most auto-skip when the same tool runs
+  # in your CI. Disable one only when an ENFORCED CI check already covers it.
+  # Never disable a tool just because .review/analyzers.local.sh runs it: that
+  # pass is optional, skips missing tools silently, and the lenses are told not
+  # to re-report it — so switching it off here removes its findings from the
+  # last place they were reported. Keys are case-sensitive as spelled.
+  # tools:
+  #   shellcheck:
+  #     enabled: false
+  #   semgrep:
+  #     enabled: false
+  #   gitleaks:
+  #     enabled: false
+
+knowledge_base:
+  code_guidelines:
+    # On by default. Set explicitly so the pointers below still work in an org
+    # that turned guidelines off.
+    enabled: true
+    # CodeRabbit finds AGENTS.md and CLAUDE.md by itself, but a guidelines file
+    # governs only its own directory and below — the rubric living in .review/
+    # would otherwise apply to nothing but .review/. `applyTo` makes it
+    # repo-wide, and pointing at these files instead of copying their rules is
+    # what keeps this gate and the local lenses grading one standard.
+    filePatterns:
+      - files: ".review/rubric.md"
+        applyTo: "**/*"
+      - files: ".review/learnings.md"
+        applyTo: "**/*"
