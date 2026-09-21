@@ -60,7 +60,12 @@ kb = d.get("knowledge_base") or {}
 cg = kb.get("code_guidelines") if isinstance(kb, dict) else None
 if isinstance(cg, dict) and cg.get("enabled") is False:
     print("sets knowledge_base.code_guidelines.enabled to false - the mappings below are inert and the gate applies neither the rubric nor the learnings")
-pats = (cg or {}).get("filePatterns") or [] if isinstance(cg, dict) else []
+pats = cg.get("filePatterns") if isinstance(cg, dict) else []
+if pats is None:
+    pats = []
+if not isinstance(pats, list):
+    print("sets knowledge_base.code_guidelines.filePatterns to a %s rather than a list - CodeRabbit cannot read the mappings from it" % type(pats).__name__)
+    pats = []
 for g in (".review/rubric.md", ".review/learnings.md"):
     if not any(isinstance(e, dict) and e.get("files") == g and e.get("applyTo") == "**/*"
                for e in pats):
@@ -191,7 +196,9 @@ elif [ "$cr_cfg" = .coderabbit.config.ts ]; then
 elif ! have_yaml_parser; then
   skip "$cr_cfg present, but no python3 yaml module here to verify its wiring — check inheritance and the rubric/learnings mappings by hand"
 else
-  cr_problems="$(cfg_diagnose "$cr_cfg")"
+  if ! cr_problems="$(cfg_diagnose "$cr_cfg")"; then
+    cr_problems="could not be inspected — the wiring check failed on its contents; verify inheritance and the rubric/learnings mappings by hand"
+  fi
   if [ -z "$cr_problems" ]; then
     ok "$cr_cfg wires inheritance and both guideline mappings"
   else

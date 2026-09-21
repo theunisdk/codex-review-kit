@@ -544,6 +544,16 @@ knowledge_base:
   assert "i11: disabled code_guidelines fails --check" test "$rc" -ne 0
   assert "i11: disabled code_guidelines named" grep -qF 'enabled to false' "$LOG"
 
+  # valid YAML of the wrong shape: the wiring check used to raise, and with
+  # stderr discarded an empty result read as "no problems found"
+  write_cfg "$spoke" 'inheritance: true
+knowledge_base:
+  code_guidelines:
+    filePatterns: 1'
+  run_install_check "$spoke"; rc=$?
+  assert "i13: wrong-shaped filePatterns fails --check" test "$rc" -ne 0
+  assert "i13: wrong-shaped filePatterns named" grep -qF 'rather than a list' "$LOG"
+
   # an unparseable config discards everything CodeRabbit would have read
   printf 'inheritance: true\n  bad: [unclosed\n' > "$spoke/.coderabbit.yaml"
   run_install_check "$spoke"; rc=$?
