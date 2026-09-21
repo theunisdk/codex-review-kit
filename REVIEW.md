@@ -49,6 +49,7 @@ alongside the files that are its own and never synced:
 | runner, lens prompts, schema, adjudication, commands, skill, hooks | hub → synced into every spoke | `scripts/review-update.sh` |
 | `learnings-shared.md` (generic + stack lessons) | hub → synced read-only | same |
 | `rubric.md`, `config.sh`, `learnings.md`, `prompts.local/`, `analyzers.local.sh` | spoke only | never |
+| `.coderabbit.yaml` (the PR gate) | spoke only, seeded once by `--init` | never |
 
 **New repo:** say `/review-onboard` in Claude Code — it bootstraps the files
 and, more importantly, does the adaptation properly: a rubric grounded in code
@@ -63,10 +64,15 @@ REVIEW_KIT_DIR=~/dev/private/codex-review-kit \
 # mutable `main` — or the tag/full-SHA in $REVIEW_KIT_REF; read what it fetched
 # before the next line, which executes it.
 ./scripts/review-install.sh          # per-machine setup
-# then adapt the repo-owned files — all of them live under .review/:
+# then adapt the repo-owned files — .review/, plus the gate at the root:
 #   .review/rubric.md  .review/learnings.md  .review/config.sh
 #   .review/analyzers.local.sh  .review/prompts.local/
+# --init seeds .coderabbit.yaml only when the repo had no CodeRabbit config,
+# so stage whichever one it actually has rather than assuming that name.
 git add .review scripts .claude .codex .githooks .claude-plugin REVIEW.md OPERATING.md AGENTS.md CLAUDE.md
+for f in .coderabbit.yaml .coderabbit.yml .coderabbit.config.ts; do
+  if [ -f "$f" ]; then git add "$f"; fi
+done
 git commit -m "chore: add codex pre-PR review pipeline"
 ```
 
@@ -128,7 +134,9 @@ agent sees descriptions, then loads the full `SKILL.md` when it judges a match.
 But `scripts/review.sh` calls `codex exec "<the entire prompt>"`. We already know
 what we want and pass it in full, so a skill would be pure indirection: same
 tokens, plus a new failure mode where it fails to trigger. The layer Codex
-actually reads automatically is `AGENTS.md`, which the installer writes.
+actually reads automatically is `AGENTS.md`, which the installer writes — and
+CodeRabbit detects a root `AGENTS.md` with no configuration at all, so it is
+the one file that reaches every grader for free.
 
 `.codex/skills/repo-review-standards/` ships anyway, for when you drive Codex
 interactively (`/review` in the TUI, ad-hoc critique) and want the same rubric
@@ -208,6 +216,7 @@ scripts/               all synced
 .codex/                synced: optional interactive-Codex skill
 .claude-plugin/        synced: plugin manifests
 .githooks/pre-push     synced: warns on a stale verdict; never blocks
+.coderabbit.yaml       REPO-OWNED  the PR gate; points CodeRabbit at rubric.md
 templates/             hub only: seeds for the repo-owned files (--init)
 ```
 

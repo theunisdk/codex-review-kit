@@ -90,7 +90,59 @@ vendored, or duplicate checkouts (double-counted greps); clients that must be
 generated before typecheck; known-weak areas that are pre-existing (report
 only when a diff touches them).
 
-## 6 — Verify, then fire-drill
+## 6 — `.coderabbit.yaml` the PR gate
+
+**First check which case you are in.** `--init` seeds `.coderabbit.yaml` only
+when the repo has no CodeRabbit config at all; it deliberately leaves an
+existing `.coderabbit.yaml`, `.coderabbit.yml`, or `.coderabbit.config.ts`
+alone. So:
+
+- **Seeded** — the rubric is already wired: `knowledge_base.code_guidelines`
+  points at `.review/rubric.md` with `applyTo: "**/*"`, and every house rule
+  from step 3 reaches CodeRabbit without being copied.
+- **Pre-existing config** — nothing was wired. Add the `code_guidelines`
+  mappings for `.review/rubric.md` and `.review/learnings.md` (both with
+  `applyTo: "**/*"`) to that file yourself, in its own format, and confirm
+  `inheritance` is set. Until you do, the gate grades against different
+  standards than the lenses — which is the exact split this step exists to
+  close.
+
+Either way, do not paste rules into this file. A second copy drifts, and naming
+a guidelines file in `path_instructions` tells CodeRabbit to *review* that file
+rather than obey it.
+
+What is left to fill in is optional and grounded the same way as everything else
+— if you cannot name the evidence, leave the block commented out:
+
+- **`reviews.path_instructions`** — only a rule that applies to SOME paths and
+  would misfire elsewhere. `path` is minimatch, `instructions` is inline text.
+  Anything holding repo-wide is already covered by the rubric pointer.
+- **`reviews.tools.<key>.enabled: false`** — rarely, and never to deduplicate
+  against the local pass. CodeRabbit already skips a tool it can see running
+  in your CI, so genuine duplication is mostly handled. And the local
+  analyzer pass is not a gate: `analyzers.local.sh` tools are optional and
+  skipped silently when absent, the lenses are told not to re-report anything
+  the analyzers already flagged, and the pre-push hook warns without blocking.
+  Disable a tool here only when an *enforced* CI check covers it — otherwise
+  you remove its findings from the only gate that was still reporting them.
+- **`reviews.path_filters`** — the vendored, generated, and duplicate-checkout
+  directories from step 5. `!` entries ONLY: one bare pattern converts the list
+  into an allowlist and silently drops every unmatched file from review.
+
+Two properties of this file to respect while editing. A repo-level config
+outranks the org's settings and does not merge with them, so `inheritance: true`
+must survive whatever you change; and one invalid key discards the entire file
+back to defaults, taking the rubric pointer with it. Confirm on the first PR
+with `@coderabbitai configuration`, which prints the resolved config and names
+the source of each value — the only way to see that this file actually won.
+
+While you are here: if `AGENTS.md` holds nothing but the installer's pointer
+block, add the stack facts from step 1 — package manager, build/lint/typecheck/
+test commands, default branch. Codex reads it on every lens run and CodeRabbit
+picks up a root `AGENTS.md` with no configuration at all, so it is the one file
+that reaches both graders for free.
+
+## 7 — Verify, then fire-drill
 
 `./scripts/review-install.sh --check` must pass. Then prove the pipeline on a
 scratch branch: plant 2–3 deliberate violations of the rubric you just wrote
@@ -98,10 +150,12 @@ scratch branch: plant 2–3 deliberate violations of the rubric you just wrote
 planted violation the lenses miss is a prompt problem — fix it now, cheaply.
 See OPERATING.md.
 
-## 7 — Commit
+## 8 — Commit
 
 Commit `.review/`, `scripts/`, `.claude/`, `.codex/`, `.githooks/`,
-`.claude-plugin/`, `REVIEW.md`, `OPERATING.md`, and the AGENTS.md/CLAUDE.md
-pointer blocks. Run artifacts are already gitignored. Report to the user:
+`.claude-plugin/`, `REVIEW.md`, `OPERATING.md`, the AGENTS.md/CLAUDE.md
+pointer blocks, and whichever CodeRabbit config step 6 found — do not `git add
+.coderabbit.yaml` blind, it is fatal in a repo where `--init` correctly created
+no such file. Run artifacts are already gitignored. Report to the user:
 the house rules you wrote (with their evidence), what you could NOT ground,
 and the fire-drill results.

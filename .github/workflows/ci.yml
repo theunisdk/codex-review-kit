@@ -9,8 +9,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: yaml parser
+        run: python3 -m pip install --quiet pyyaml
       - name: syntax gate
         run: |
           for f in scripts/*.sh scripts/lib/*.sh tests/*.sh; do bash -n "$f"; done
       - name: regression tests
+        env:
+          # a missing parser must fail here, not silently skip the config checks
+          REVIEW_TEST_REQUIRE_YAML: "1"
         run: ./tests/review-test.sh

@@ -12,7 +12,9 @@
 #                          .claude/commands+skill, .codex/skills, .githooks,
 #                          .claude-plugin/, REVIEW.md
 #   repo-owned (never):    .review/rubric.md, config.sh, learnings.md,
-#                          prompts.local/, analyzers.local.sh
+#                          prompts.local/, analyzers.local.sh, and the root
+#                          .coderabbit.yaml (seeded only when the repo has no
+#                          CodeRabbit config in any supported spelling)
 #
 #   ./scripts/review-update.sh           # sync machinery from the hub
 #   ./scripts/review-update.sh --init    # also seed repo-owned files that are
@@ -136,6 +138,18 @@ if [ "$INIT" = 1 ]; then
   done
   [ -f .review/analyzers.local.sh ] || cp "$KIT/templates/analyzers.local.sh" .review/
   [ -f .review/prompts.local/README.md ] || cp "$KIT/templates/prompts.local/README.md" .review/prompts.local/
+  # CodeRabbit resolves a single config source, and YAML in either spelling
+  # outranks .coderabbit.config.ts — so a file seeded next to an existing one
+  # would quietly take over the gate. Only seed a repo that configures nothing.
+  # The two undotted names are not in CodeRabbit's documented discovery order;
+  # they are checked anyway because the costs are lopsided — skipping a repo
+  # that needed seeding is visible, overriding a live gate config is not.
+  seed_gate=1
+  for f in .coderabbit.yaml .coderabbit.yml .coderabbit.config.ts \
+           coderabbit.yaml coderabbit.yml; do
+    [ -f "$f" ] && { seed_gate=0; break; }
+  done
+  [ "$seed_gate" = 1 ] && cp "$KIT/templates/coderabbit.yaml" .coderabbit.yaml
 fi
 
 # --- record what we synced to ----------------------------------------------
