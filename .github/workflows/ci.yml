@@ -6,11 +6,15 @@ on:
 
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: yaml parser
-        run: python3 -m pip install --quiet pyyaml
+        run: python3 -m pip install --quiet --break-system-packages pyyaml
       - name: syntax gate
         run: |
           for f in scripts/*.sh scripts/lib/*.sh tests/*.sh; do bash -n "$f"; done
