@@ -11,27 +11,30 @@ rule is worse than none.**
 
 ## 0 — Bootstrap the files
 
-If the kit isn't present yet:
+If the kit isn't present yet, prefer a local hub clone — `$REVIEW_KIT_DIR` or
+`~/dev/private/codex-review-kit`. That path downloads nothing:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/theunisdk/codex-review-kit/main/scripts/review-update.sh -o /tmp/ru.sh
-bash /tmp/ru.sh --init          # syncs machinery, seeds repo-owned templates
+bash "${REVIEW_KIT_DIR:-$HOME/dev/private/codex-review-kit}/scripts/review-update.sh" --init
 ./scripts/review-install.sh     # per-machine setup (profile, hooks, pointers)
 ```
-Prefer a local hub clone when one exists — `$REVIEW_KIT_DIR` or
-`~/dev/private/codex-review-kit` — and run its `review-update.sh --init`
-directly. That path involves no download at all and is the one to use by default.
 
-The curl above fetches `main`, a mutable branch, and the next line executes it.
-Anything that changes what `main` points at — a force-push, a compromised
-account — runs as you, on your machine. If you must use it, pin the fetch to a
-commit you have looked at and check what you got before running it:
+Without a clone, fetch the hub's latest release tag. Never `main`: it is a
+mutable branch, the next line executes what it fetched as you, and anything
+that moves `main` — a force-push, a compromised account — chooses what runs.
+Read what you got first, or pin harder with `REVIEW_KIT_REF`.
 
 ```bash
-REV=<commit-sha>                     # not `main`
-curl -fsSL "https://raw.githubusercontent.com/theunisdk/codex-review-kit/$REV/scripts/review-update.sh" -o /tmp/ru.sh
-shasum -a 256 /tmp/ru.sh             # compare against the sha you expect
-less /tmp/ru.sh                      # read it
-bash /tmp/ru.sh --init
+KIT=https://github.com/theunisdk/codex-review-kit
+# Same selector the updater uses: numeric release tags only, so a vNext or an
+# rc cannot outrank the latest release in a command that executes what it fetched.
+LATEST=$(git ls-remote --tags --refs "$KIT" 'v[0-9]*' \
+  | sed -n 's|.*refs/tags/v\([0-9][0-9.]*\)$|\1|p' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+REF="${REVIEW_KIT_REF:-v$LATEST}"
+curl -fsSL "https://raw.githubusercontent.com/theunisdk/codex-review-kit/$REF/scripts/review-update.sh" -o /tmp/ru.sh
+less /tmp/ru.sh                 # read it before it runs
+REVIEW_KIT_REF="$REF" bash /tmp/ru.sh --init   # syncs machinery, seeds templates
+./scripts/review-install.sh
 ```
 
 If `core.hooksPath` was already set, check whether it points somewhere real

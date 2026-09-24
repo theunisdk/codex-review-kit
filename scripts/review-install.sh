@@ -42,8 +42,38 @@ cfg_diagnose() {
   python3 - "$1" 2>/dev/null <<'PYCFG'
 import sys, yaml
 
+
+class DuplicateKey(yaml.constructor.ConstructorError):
+    pass
+
+
+# PyYAML keeps the LAST of a duplicated key and says nothing, so a file whose
+# real wiring sits in an overridden block would be vouched for here on the
+# strength of a block the gate may never apply. Only literal keys are compared:
+# `<<` merge keys are resolved by SafeLoader's own flattening, which this
+# delegates to — rejecting them here would fail a valid anchored config.
+class StrictLoader(yaml.SafeLoader):
+    def construct_mapping(self, node, deep=False):
+        seen = set()
+        for key_node, _value_node in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                continue
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                if key in seen:
+                    raise DuplicateKey(None, None, "duplicate key %r" % (key,),
+                                       key_node.start_mark)
+                seen.add(key)
+            except TypeError:
+                continue  # unhashable key — SafeLoader reports it in its own terms
+        return super().construct_mapping(node, deep=deep)
+
 try:
-    d = yaml.safe_load(open(sys.argv[1])) or {}
+    with open(sys.argv[1]) as fh:
+        d = yaml.load(fh, Loader=StrictLoader) or {}
+except DuplicateKey as e:
+    print("has a %s - this check reads the last one and other YAML parsers reject the file outright, so what the gate applies is not what was checked here" % e.problem)
+    sys.exit(0)
 except Exception as e:
     msg = str(e).splitlines()[0][:100]
     print("does not parse (%s) - CodeRabbit discards the whole file and reviews with defaults" % msg)
@@ -200,7 +230,7 @@ else
     cr_problems="could not be inspected — the wiring check failed on its contents; verify inheritance and the rubric/learnings mappings by hand"
   fi
   if [ -z "$cr_problems" ]; then
-    ok "$cr_cfg wires inheritance and both guideline mappings"
+    ok "$cr_cfg wires inheritance and both guideline mappings (no other key is schema-checked here)"
   else
     while IFS= read -r cr_line; do
       [ -n "$cr_line" ] || continue
