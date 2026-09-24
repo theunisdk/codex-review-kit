@@ -517,14 +517,13 @@ reviews:
   assert "i8: mapping under path_instructions fails --check" test "$rc" -ne 0
 
   # a valid config that merely quotes differently must NOT be called broken
-  write_cfg "$spoke" 'inheritance: true
+  write_cfg "$spoke" "inheritance: true
 knowledge_base:
   code_guidelines:
     filePatterns:
-      - applyTo: 0**/*0
-        files: 0.review/rubric.md0
-      - {files: .review/learnings.md, applyTo: 0**/*0}'
-  sed -i "s/0/'/g" "$spoke/.coderabbit.yaml"
+      - applyTo: '**/*'
+        files: '.review/rubric.md'
+      - {files: .review/learnings.md, applyTo: '**/*'}"
   run_install_check "$spoke"; rc=$?
   assert     "i9: differently quoted config passes --check" test "$rc" -eq 0
   assert_not "i9: differently quoted config not called broken" grep -q 'has no knowledge_base' "$LOG"
