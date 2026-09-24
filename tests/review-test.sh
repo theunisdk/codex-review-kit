@@ -258,6 +258,21 @@ test_update_marks_a_dirty_local_hub() {
     grep -q '^ref: .*-dirty$' "$spoke/.review/kit-version"
 }
 
+# The copies are globs and whole directories, so an untracked file in the hub
+# ships into the spoke too — and `git diff` alone calls that hub clean.
+test_update_marks_an_untracked_hub_file() {
+  local hub="$WORK/u11-hub" spoke="$WORK/u11-spoke"
+  make_hub "$hub"; make_spoke "$spoke"
+  printf '# untracked helper\n' > "$hub/scripts/lib/extra.sh"
+  run_update "$spoke" REVIEW_KIT_DIR="$hub"; local rc=$?
+
+  assert "u11: run exits 0" test "$rc" -eq 0
+  assert "u11: the untracked file was installed" test -f "$spoke/scripts/lib/extra.sh"
+  assert "u11: dirty hub warned about" grep -qF 'uncommitted changes' "$LOG"
+  assert "u11: kit-version marks the commit dirty" \
+    grep -q '^kit: .*-dirty$' "$spoke/.review/kit-version"
+}
+
 # The counterpart: a clean hub must not be labelled dirty.
 test_update_leaves_a_clean_local_hub_unmarked() {
   local hub="$WORK/u10-hub" spoke="$WORK/u10-spoke"
@@ -606,6 +621,24 @@ knowledge_base:
   run_install_check "$spoke"; rc=$?
   assert "i14: duplicate mapping key fails --check" test "$rc" -ne 0
   assert "i14: duplicate key named" grep -qF 'duplicate key' "$LOG"
+
+  # Anchors and `<<` merges are valid YAML that SafeLoader flattens. The
+  # duplicate-key check must not see the merge pseudo-key as a parse error and
+  # call a correctly wired config broken.
+  write_cfg "$spoke" 'defaults: &d
+  enabled: true
+inheritance: true
+knowledge_base:
+  code_guidelines:
+    <<: *d
+    filePatterns:
+      - files: ".review/rubric.md"
+        applyTo: "**/*"
+      - files: ".review/learnings.md"
+        applyTo: "**/*"'
+  run_install_check "$spoke"; rc=$?
+  assert     "i15: merged-anchor config passes --check" test "$rc" -eq 0
+  assert_not "i15: merged-anchor config not called unparseable" grep -q 'does not parse' "$LOG"
 }
 
 # `git push origin HEAD~1:refs/heads/feature` hands the hook a commit
@@ -683,6 +716,7 @@ run_tests \
   test_all_lenses_failed_with_output_still_merges \
   test_update_reports_source_and_revision \
   test_update_marks_a_dirty_local_hub \
+  test_update_marks_an_untracked_hub_file \
   test_update_leaves_a_clean_local_hub_unmarked \
   test_update_network_pins_to_latest_tag \
   test_update_network_honors_explicit_ref \

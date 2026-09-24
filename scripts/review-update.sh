@@ -110,9 +110,12 @@ fi
 KIT_COMMIT="$(git -C "$KIT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 # The copy below installs the hub's WORKING TREE. Uncommitted edits there are
 # real content going into this repo, and a bare HEAD in kit-version would name a
-# commit that cannot reproduce what was installed.
+# commit that cannot reproduce what was installed. Untracked files count: the
+# copies are globs and whole directories, so a new prompt or skill ships too —
+# `git diff` alone would call that hub clean. Ignored paths do not count, which
+# keeps the kit's own generated review artifacts from marking every hub dirty.
 if [ -z "$TMP_CLONE" ] && [ "$KIT_COMMIT" != unknown ] \
-   && ! git -C "$KIT" diff --quiet HEAD 2>/dev/null; then
+   && [ -n "$(git -C "$KIT" status --porcelain --untracked-files=all 2>/dev/null)" ]; then
   KIT_COMMIT="$KIT_COMMIT-dirty"
   KIT_DESC="$KIT_DESC-dirty"
   echo "warn: hub at $KIT has uncommitted changes — installing them; recorded as $KIT_COMMIT" >&2

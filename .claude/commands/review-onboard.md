@@ -15,7 +15,7 @@ If the kit isn't present yet, prefer a local hub clone — `$REVIEW_KIT_DIR` or
 `~/dev/private/codex-review-kit`. That path downloads nothing:
 
 ```bash
-bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
+bash "${REVIEW_KIT_DIR:-$HOME/dev/private/codex-review-kit}/scripts/review-update.sh" --init
 ./scripts/review-install.sh     # per-machine setup (profile, hooks, pointers)
 ```
 
@@ -26,10 +26,14 @@ Read what you got first, or pin harder with `REVIEW_KIT_REF`.
 
 ```bash
 KIT=https://github.com/theunisdk/codex-review-kit
-TAG=$(git ls-remote --tags --refs --sort=-v:refname "$KIT" 'v*' | head -1 | sed 's|.*refs/tags/||')
-curl -fsSL "https://raw.githubusercontent.com/theunisdk/codex-review-kit/$TAG/scripts/review-update.sh" -o /tmp/ru.sh
+# Same selector the updater uses: numeric release tags only, so a vNext or an
+# rc cannot outrank the latest release in a command that executes what it fetched.
+LATEST=$(git ls-remote --tags --refs "$KIT" 'v[0-9]*' \
+  | sed -n 's|.*refs/tags/v\([0-9][0-9.]*\)$|\1|p' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+REF="${REVIEW_KIT_REF:-v$LATEST}"
+curl -fsSL "https://raw.githubusercontent.com/theunisdk/codex-review-kit/$REF/scripts/review-update.sh" -o /tmp/ru.sh
 less /tmp/ru.sh                 # read it before it runs
-bash /tmp/ru.sh --init          # syncs machinery, seeds repo-owned templates
+REVIEW_KIT_REF="$REF" bash /tmp/ru.sh --init   # syncs machinery, seeds templates
 ./scripts/review-install.sh
 ```
 
