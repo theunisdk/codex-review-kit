@@ -11,27 +11,26 @@ rule is worse than none.**
 
 ## 0 — Bootstrap the files
 
-If the kit isn't present yet:
+If the kit isn't present yet, prefer a local hub clone — `$REVIEW_KIT_DIR` or
+`~/dev/private/codex-review-kit`. That path downloads nothing:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/theunisdk/codex-review-kit/main/scripts/review-update.sh -o /tmp/ru.sh
-bash /tmp/ru.sh --init          # syncs machinery, seeds repo-owned templates
+bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
 ./scripts/review-install.sh     # per-machine setup (profile, hooks, pointers)
 ```
-Prefer a local hub clone when one exists — `$REVIEW_KIT_DIR` or
-`~/dev/private/codex-review-kit` — and run its `review-update.sh --init`
-directly. That path involves no download at all and is the one to use by default.
 
-The curl above fetches `main`, a mutable branch, and the next line executes it.
-Anything that changes what `main` points at — a force-push, a compromised
-account — runs as you, on your machine. If you must use it, pin the fetch to a
-commit you have looked at and check what you got before running it:
+Without a clone, fetch the hub's latest release tag. Never `main`: it is a
+mutable branch, the next line executes what it fetched as you, and anything
+that moves `main` — a force-push, a compromised account — chooses what runs.
+Read what you got first, or pin harder with `REVIEW_KIT_REF`.
 
 ```bash
-REV=<commit-sha>                     # not `main`
-curl -fsSL "https://raw.githubusercontent.com/theunisdk/codex-review-kit/$REV/scripts/review-update.sh" -o /tmp/ru.sh
-shasum -a 256 /tmp/ru.sh             # compare against the sha you expect
-less /tmp/ru.sh                      # read it
-bash /tmp/ru.sh --init
+KIT=https://github.com/theunisdk/codex-review-kit
+TAG=$(git ls-remote --tags --refs --sort=-v:refname "$KIT" 'v*' | head -1 | sed 's|.*refs/tags/||')
+curl -fsSL "https://raw.githubusercontent.com/theunisdk/codex-review-kit/$TAG/scripts/review-update.sh" -o /tmp/ru.sh
+less /tmp/ru.sh                 # read it before it runs
+bash /tmp/ru.sh --init          # syncs machinery, seeds repo-owned templates
+./scripts/review-install.sh
 ```
 
 If `core.hooksPath` was already set, check whether it points somewhere real
