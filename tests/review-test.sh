@@ -716,6 +716,16 @@ test_prepush_reads_the_verdict_header() {
   ( cd "$repo" && REVIEW_STRICT=1 git push "$remote" 'HEAD:refs/heads/feature3' ) > "$out" 2>&1
   rc=$?
   assert "h2: an unreadable header is stale" test "$rc" -ne 0
+  printf '# Review verdict — feature — %s — 2026-01-01\n' "${head:0:4}" > "$repo/.review/verdict.md"
+  ( cd "$repo" && REVIEW_STRICT=1 git push "$remote" 'HEAD:refs/heads/feature4' ) > "$out" 2>&1
+  rc=$?
+  assert "h2: git's shortest abbreviation covers its commit" test "$rc" -eq 0
+
+  printf '# Review verdict — feature — 0000000 — note — %s — 2026-01-01\n' "$short" \
+    > "$repo/.review/verdict.md"
+  ( cd "$repo" && REVIEW_STRICT=1 git push "$remote" 'HEAD:refs/heads/feature5' ) > "$out" 2>&1
+  rc=$?
+  assert "h2: a SHA in a later header field does not cover it" test "$rc" -ne 0
 }
 
 # A destination that denies listing looks empty to `ls -A`, and empty is the one
