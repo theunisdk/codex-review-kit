@@ -31,10 +31,14 @@ while read -r _local_ref local_sha remote_ref _remote_sha; do
 
   if [ ! -f .review/verdict.md ]; then
     stale_refs="$stale_refs\n  $branch — no review verdict found"
-  elif ! grep -q "${local_sha:0:10}" .review/verdict.md 2>/dev/null; then
-    # The verdict must name the commit being pushed. File mtime is not evidence:
-    # it says when the file was written, not which commit it judged.
-    stale_refs="$stale_refs\n  $branch — verdict does not cover ${local_sha:0:10}"
+  else
+    # Only the header names the judged commit (adjudication.md), at whatever
+    # length git abbreviated it; a SHA quoted in the body is not a verdict, and
+    # file mtime says when the file was written, not which commit it judged.
+    judged=$(sed -n '1s/^# Review verdict — .* — \([0-9a-f]\{7,40\}\) — .*$/\1/p' .review/verdict.md)
+    if [ -z "$judged" ] || [ "${local_sha#"$judged"}" = "$local_sha" ]; then
+      stale_refs="$stale_refs\n  $branch — verdict does not cover ${local_sha:0:10}"
+    fi
   fi
 done
 

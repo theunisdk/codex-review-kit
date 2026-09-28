@@ -30,16 +30,20 @@ KIT=https://github.com/theunisdk/codex-review-kit
 # rc cannot outrank the latest release in a command that executes what it fetched.
 LATEST=$(git ls-remote --tags --refs "$KIT" 'v[0-9]*' \
   | sed -n 's|.*refs/tags/v\([0-9][0-9.]*\)$|\1|p' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
-REF="${REVIEW_KIT_REF:-v$LATEST}"
+REF="${REVIEW_KIT_REF:-${LATEST:+v$LATEST}}"
 # One commit for both fetches: a tag resolved twice can move in between. An
 # annotated tag's commit is its ^{} line; a full SHA passed in resolves to itself.
 SHA=$(git ls-remote "$KIT" "refs/tags/$REF" "refs/tags/$REF^{}" | sort -k2 | awk '{s=$1} END{print s}')
 SHA="${SHA:-$REF}"
-curl -fsSL "https://raw.githubusercontent.com/theunisdk/codex-review-kit/$SHA/scripts/review-update.sh" -o /tmp/ru.sh
-less /tmp/ru.sh                 # read it before it runs
-REVIEW_KIT_REF="$SHA" bash /tmp/ru.sh --init   # syncs machinery, seeds templates
-less scripts/review-install.sh  # and the installer it just copied, before that runs too
-./scripts/review-install.sh
+# One chain: no tag, a failed download or a failed sync stops it there, and a
+# private temp file means nothing stale or planted at a fixed path gets run.
+[ -n "$REF" ] && RU=$(mktemp) \
+  && curl -fsSL "https://raw.githubusercontent.com/theunisdk/codex-review-kit/$SHA/scripts/review-update.sh" -o "$RU" \
+  && less "$RU" \
+  && REVIEW_KIT_REF="$SHA" bash "$RU" --init \
+  && less scripts/review-install.sh \
+  && ./scripts/review-install.sh \
+  || echo "stopped: no release tag found, or a step above failed" >&2
 ```
 
 If `core.hooksPath` was already set, check whether it points somewhere real
