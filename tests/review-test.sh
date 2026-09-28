@@ -239,6 +239,51 @@ test_update_reports_source_and_revision() {
   assert "u1: kit-version records the source" grep -qF "source: $KIT" "$spoke/.review/kit-version"
 }
 
+# A local hub is installed from its WORKING TREE, so uncommitted edits there are
+# real content in the spoke — and a bare HEAD in kit-version would name a commit
+# that cannot reproduce what was installed.
+test_update_marks_a_dirty_local_hub() {
+  local hub="$WORK/u9-hub" spoke="$WORK/u9-spoke"
+  make_hub "$hub"; make_spoke "$spoke"
+  printf '\n# uncommitted hub edit\n' >> "$hub/scripts/review.sh"
+  run_update "$spoke" REVIEW_KIT_DIR="$hub"; local rc=$?
+
+  assert "u9: run exits 0" test "$rc" -eq 0
+  assert "u9: the uncommitted edit was installed" \
+    grep -qF 'uncommitted hub edit' "$spoke/scripts/review.sh"
+  assert "u9: dirty hub warned about" grep -qF 'uncommitted changes' "$LOG"
+  assert "u9: kit-version marks the commit dirty" \
+    grep -q '^kit: .*-dirty$' "$spoke/.review/kit-version"
+  assert "u9: kit-version marks the ref dirty" \
+    grep -q '^ref: .*-dirty$' "$spoke/.review/kit-version"
+}
+
+# The copies are globs and whole directories, so an untracked file in the hub
+# ships into the spoke too — and `git diff` alone calls that hub clean.
+test_update_marks_an_untracked_hub_file() {
+  local hub="$WORK/u11-hub" spoke="$WORK/u11-spoke"
+  make_hub "$hub"; make_spoke "$spoke"
+  printf '# untracked helper\n' > "$hub/scripts/lib/extra.sh"
+  run_update "$spoke" REVIEW_KIT_DIR="$hub"; local rc=$?
+
+  assert "u11: run exits 0" test "$rc" -eq 0
+  assert "u11: the untracked file was installed" test -f "$spoke/scripts/lib/extra.sh"
+  assert "u11: dirty hub warned about" grep -qF 'uncommitted changes' "$LOG"
+  assert "u11: kit-version marks the commit dirty" \
+    grep -q '^kit: .*-dirty$' "$spoke/.review/kit-version"
+}
+
+# The counterpart: a clean hub must not be labelled dirty.
+test_update_leaves_a_clean_local_hub_unmarked() {
+  local hub="$WORK/u10-hub" spoke="$WORK/u10-spoke"
+  make_hub "$hub"; make_spoke "$spoke"
+  run_update "$spoke" REVIEW_KIT_DIR="$hub"; local rc=$?
+
+  assert     "u10: run exits 0" test "$rc" -eq 0
+  assert_not "u10: kit-version not marked dirty" grep -q -- '-dirty' "$spoke/.review/kit-version"
+  assert_not "u10: no dirty warning" grep -qF 'uncommitted changes' "$LOG"
+}
+
 # With no local hub, the fetch must pin to the highest release tag — never the
 # default branch tip. v0.10.0 vs v0.9.0 also guards the numeric tag sort.
 # Regression for the unpinned `git clone --depth 1` of the default branch.
@@ -558,6 +603,100 @@ knowledge_base:
   run_install_check "$spoke"; rc=$?
   assert "i10: unparseable config fails --check" test "$rc" -ne 0
   assert "i10: unparseable config named as such" grep -qF 'does not parse' "$LOG"
+
+  # PyYAML keeps the LAST of a duplicated key, so wiring in an overridden block
+  # would be vouched for here; parsers that reject duplicates outright discard
+  # the file entirely. Either way the gate applies something else.
+  write_cfg "$spoke" 'inheritance: true
+knowledge_base:
+  code_guidelines:
+    enabled: false
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - files: ".review/rubric.md"
+        applyTo: "**/*"
+      - files: ".review/learnings.md"
+        applyTo: "**/*"'
+  run_install_check "$spoke"; rc=$?
+  assert "i14: duplicate mapping key fails --check" test "$rc" -ne 0
+  assert "i14: duplicate key named" grep -qF 'duplicate key' "$LOG"
+
+  # Anchors and `<<` merges are valid YAML that SafeLoader flattens. The
+  # duplicate-key check must not see the merge pseudo-key as a parse error and
+  # call a correctly wired config broken.
+  write_cfg "$spoke" 'defaults: &d
+  enabled: true
+inheritance: true
+knowledge_base:
+  code_guidelines:
+    <<: *d
+    filePatterns:
+      - files: ".review/rubric.md"
+        applyTo: "**/*"
+      - files: ".review/learnings.md"
+        applyTo: "**/*"'
+  run_install_check "$spoke"; rc=$?
+  assert     "i15: merged-anchor config passes --check" test "$rc" -eq 0
+  assert_not "i15: merged-anchor config not called unparseable" grep -q 'does not parse' "$LOG"
+}
+
+# `git push origin HEAD~1:refs/heads/feature` hands the hook a commit
+# expression as <local ref>; selecting branches by it matched no refs/heads/*
+# and skipped the check, so REVIEW_STRICT could not block that push.
+test_prepush_judges_destination_ref() {
+  local repo="$WORK/h1" remote="$WORK/h1-remote.git" out="$WORK/h1.push.log" rc=0
+  git init -q --bare "$remote"
+  git init -q -b main "$repo"
+  (
+    cd "$repo" || exit 1
+    git config user.email review-test@example.invalid
+    git config user.name review-test
+    git config core.hooksPath .githooks
+    mkdir -p scripts .githooks
+    cp "$KIT/.githooks/pre-push" .githooks/
+    cp "$KIT/scripts/review.sh" scripts/
+    printf 'seed\n' > f.txt
+    git add -A && git commit -qm c1
+    printf 'more\n' >> f.txt && git commit -qam c2
+  )
+
+  ( cd "$repo" && REVIEW_STRICT=1 git push "$remote" 'HEAD~1:refs/heads/feature' ) > "$out" 2>&1
+  rc=$?
+  assert "h1: commit-expression push is gated" test "$rc" -ne 0
+  assert "h1: the hook names the destination branch" \
+    grep -qF 'feature — no review verdict found' "$out"
+
+  # A tag's sha is the tag object, never a reviewed commit, so a verdict could
+  # never match it — blocking every tag push is the failure to avoid here.
+  ( cd "$repo" && git tag -a v9.9.9 -m t \
+      && REVIEW_STRICT=1 git push "$remote" refs/tags/v9.9.9 ) > "$out" 2>&1
+  rc=$?
+  assert "h1: tag push not gated" test "$rc" -eq 0
+
+  ( cd "$repo" && REVIEW_STRICT=1 git push "$remote" 'HEAD:refs/heads/main' ) > "$out" 2>&1
+  rc=$?
+  assert "h1: main exempt by destination name" test "$rc" -eq 0
+}
+
+# A destination that denies listing looks empty to `ls -A`, and empty is the one
+# state this guard lets through — into the rm -rf of commands/skills/scripts.
+test_make_plugin_refuses_an_unlistable_destination() {
+  if [ "$(id -u)" = 0 ]; then
+    skip_test "m1: unlistable-destination guard (root ignores the directory mode)"
+    return
+  fi
+  local dest="$WORK/m1-dest" out="$WORK/m1.log" rc=0
+  mkdir -p "$dest/commands"
+  printf 'precious\n' > "$dest/commands/keep.md"
+  chmod 300 "$dest"
+  ( cd "$KIT" && bash scripts/make-plugin.sh "$dest" ) > "$out" 2>&1
+  rc=$?
+  chmod 700 "$dest"
+
+  assert "m1: unlistable destination refused" test "$rc" -ne 0
+  assert "m1: refusal names the cause" grep -qF 'cannot list' "$out"
+  assert "m1: existing content survives" test -f "$dest/commands/keep.md"
 }
 
 run_tests() {
@@ -576,6 +715,9 @@ run_tests \
   test_nonzero_rc_lens_marked_failed \
   test_all_lenses_failed_with_output_still_merges \
   test_update_reports_source_and_revision \
+  test_update_marks_a_dirty_local_hub \
+  test_update_marks_an_untracked_hub_file \
+  test_update_leaves_a_clean_local_hub_unmarked \
   test_update_network_pins_to_latest_tag \
   test_update_network_honors_explicit_ref \
   test_update_network_refuses_without_pin \
@@ -584,7 +726,9 @@ run_tests \
   test_init_never_overwrites_existing_config \
   test_init_respects_other_config_spellings \
   test_install_check_reports_gate_state \
-  test_install_check_fails_on_unwired_gate
+  test_install_check_fails_on_unwired_gate \
+  test_prepush_judges_destination_ref \
+  test_make_plugin_refuses_an_unlistable_destination
 
 echo
 if [ "$FAILURES" -gt 0 ]; then

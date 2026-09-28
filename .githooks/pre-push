@@ -11,18 +11,22 @@ cd "$REPO_ROOT" || exit 0
 # Judge the refs git is actually pushing, read from stdin as
 # "<local_ref> <local_sha> <remote_ref> <remote_sha>". Using the checked-out
 # branch instead would clear `git push origin other-branch` on the strength of
-# the current branch's verdict, and REVIEW_STRICT would not block it.
+# the current branch's verdict, and REVIEW_STRICT would not block it. The
+# verdict is still matched against local_sha — the commit being pushed.
 ZERO="0000000000000000000000000000000000000000"
 stale_refs=""
 
-while read -r local_ref local_sha _remote_ref _remote_sha; do
-  [ -n "${local_ref:-}" ] || continue
+while read -r _local_ref local_sha remote_ref _remote_sha; do
+  [ -n "${remote_ref:-}" ] || continue
   [ "$local_sha" = "$ZERO" ] && continue          # branch deletion
-  # Branches only. A tag's local_sha is the tag object, never a reviewed commit,
-  # so a verdict could never match and REVIEW_STRICT would block every tag push.
-  case "$local_ref" in refs/heads/*) ;; *) continue ;; esac
+  # Branches only, judged by the DESTINATION ref: `git push origin
+  # HEAD~1:refs/heads/feature` passes the commit expression as <local ref>, so a
+  # refs/heads/* test against it matches nothing and the push goes unchecked.
+  # A tag push has a refs/tags/* destination and is still skipped: its local_sha
+  # is the tag object, never a reviewed commit.
+  case "$remote_ref" in refs/heads/*) ;; *) continue ;; esac
 
-  branch="${local_ref#refs/heads/}"
+  branch="${remote_ref#refs/heads/}"
   case "$branch" in main|master|develop) continue ;; esac
 
   if [ ! -f .review/verdict.md ]; then
