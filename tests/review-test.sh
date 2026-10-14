@@ -54,7 +54,7 @@ make_repo() { # make_repo <dir> — kit installed, one commit on main, branch `c
     git config user.name review-test
     mkdir -p scripts/lib .review/prompts .review/raw
     cp "$KIT/scripts/review.sh" scripts/
-    cp "$KIT/scripts/lib/common.sh" scripts/lib/
+    cp "$KIT/scripts/lib/common.sh" "$KIT/scripts/lib/analyzers.sh" scripts/lib/
     cp "$KIT/.review/schema.json" .review/
     cp "$KIT/.review/prompts/_common.md" "$KIT/.review/prompts/correctness.md" \
        "$KIT/.review/prompts/security.md" .review/prompts/
@@ -337,6 +337,347 @@ test_spec_path_with_space() {
   run_review "$repo" "$stub" --spec 'docs/my specs' --lenses correctness; rc=$?
   assert "spec-space: directory path exits 0" test "$rc" -eq 0
   assert "spec-space: directory's file listed" grep -qxF 'docs/my specs/a b.md' "$repo/.review/raw/changed-files.txt"
+}
+
+# --- analyzer stubs --------------------------------------------------------
+# CI has no gitleaks/eslint/tsc, so every tool the analyzer pass reaches for is
+# a stub in $WORK/abin, first on PATH. Behaviour comes from $ANALYZER_STUB_DIR.
+mkdir -p "$WORK/abin"
+# gitleaks: logs its args to gitleaks.calls. The history scan (no --pipe) prints
+# gitleaks-history.out and exits gitleaks-history.rc; --pipe uses gitleaks-pipe.*.
+# Without those files it reports a clean scan.
+cat > "$WORK/abin/gitleaks" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$ANALYZER_STUB_DIR/gitleaks.calls"
+case " $* " in *" --pipe "*) kind=pipe; cat > /dev/null ;; *) kind=history ;; esac
+if [ -f "$ANALYZER_STUB_DIR/gitleaks-$kind.out" ]; then
+  cat "$ANALYZER_STUB_DIR/gitleaks-$kind.out"
+  exit "$(cat "$ANALYZER_STUB_DIR/gitleaks-$kind.rc" 2>/dev/null || echo 0)"
+fi
+[ "$kind" = history ] && echo "1:00PM INF 1 commits scanned."
+echo "1:00PM INF no leaks found"
+EOF
+# npx / pnpm / yarn / bun: log "<runner> <args>" to runner.calls, strip the
+# runner's own verb, and resolve <tool> only if this runner is the one named in
+# `runner` and <tool>.rc exists. Then run <tool>.sh if present, else print
+# <tool>.out and exit <tool>.rc. Copied into node_modules/.bin as eslint/tsc it
+# is the bin-dir runner, named `bin` in `runner`.
+cat > "$WORK/abin/npx" <<'EOF'
+#!/usr/bin/env bash
+me="$(basename "$0")"
+case "$me" in
+  npx|pnpm|yarn|bun)
+    printf '%s %s\n' "$me" "$*" >> "$ANALYZER_STUB_DIR/runner.calls"
+    while [ $# -gt 0 ]; do
+      case "$1" in --no-install|--silent|exec|run) shift ;; *) break ;; esac
+    done ;;
+  *) printf 'node_modules/.bin/%s %s\n' "$me" "$*" >> "$ANALYZER_STUB_DIR/runner.calls"
+     set -- "$me" "$@"; me=bin ;;
+esac
+tool="$1"; shift
+if [ "$me" != "$(cat "$ANALYZER_STUB_DIR/runner" 2>/dev/null)" ] || [ ! -f "$ANALYZER_STUB_DIR/$tool.rc" ]; then
+  echo "$me: $tool: command not found" >&2; exit 1
+fi
+[ "${1:-}" = --version ] && { echo v0.0.0-stub; exit 0; }
+[ -f "$ANALYZER_STUB_DIR/$tool.sh" ] && exec bash "$ANALYZER_STUB_DIR/$tool.sh" "$@"
+cat "$ANALYZER_STUB_DIR/$tool.out" 2>/dev/null
+exit "$(cat "$ANALYZER_STUB_DIR/$tool.rc")"
+EOF
+for r in pnpm yarn bun; do cp "$WORK/abin/npx" "$WORK/abin/$r"; done
+# semgrep: records its argv in semgrep.args; prints semgrep.out (default: no
+# results), semgrep.err on stderr, and exits semgrep.rc (default 0).
+cat > "$WORK/abin/semgrep" <<'EOF'
+#!/usr/bin/env bash
+d="$ANALYZER_STUB_DIR"
+printf '%s\n' "$@" > "$d/semgrep.args"
+[ -f "$d/semgrep.err" ] && cat "$d/semgrep.err" >&2
+if [ -f "$d/semgrep.out" ]; then cat "$d/semgrep.out"; else echo '{"results":[],"errors":[]}'; fi
+exit "$(cat "$d/semgrep.rc" 2>/dev/null || echo 0)"
+EOF
+chmod +x "$WORK"/abin/*
+
+analyzer_repo() { # analyzer_repo <id> — fixture repo + stub dir in $AREPO/$ASTUB
+  AREPO="$WORK/$1"; ASTUB="$WORK/$1-stub"
+  make_repo "$AREPO"; mkdir -p "$ASTUB"
+  printf '{"findings":[]}' > "$ASTUB/correctness.json"
+}
+
+run_review_analyzers() { # run_review_analyzers <dir> <stubdir> <review.sh args...>; output in $LOG
+  local dir="$1" stub="$2"; shift 2
+  LOG="$dir.log"
+  (
+    cd "$dir" && PATH="$WORK/abin:$WORK/bin:$PATH" CODEX_STUB_DIR="$stub" ANALYZER_STUB_DIR="$stub" \
+      REVIEW_SKIP_AUTH_CHECK=1 bash scripts/review.sh --lenses correctness "$@"
+  ) > "$LOG" 2>&1
+}
+
+section_body() { # section_body <report> <title> — the lines under "### <title>"
+  awk -v h="### $2" '$0 == h { on = 1; next } /^### / { on = 0 } on' "$1"
+}
+
+bin_stubs() { # bin_stubs — eslint/tsc stubs in ./node_modules/.bin
+  mkdir -p node_modules/.bin
+  cp "$WORK/abin/npx" node_modules/.bin/eslint; cp "$WORK/abin/npx" node_modules/.bin/tsc
+}
+
+section_nonempty() { [ -n "$(section_body "$1" "$2" | tr -d '[:space:]')" ]; }
+
+# --- analyzer tests: secrets ----------------------------------------------
+# Branch mode must scan each commit in the range, not only the net diff — a
+# token added then removed on the branch is absent from diff.patch. Regression
+# for #9. The net-diff scan stays alongside it.
+test_gitleaks_scans_branch_history() {
+  analyzer_repo g1
+  ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  local mb; mb="$(git -C "$AREPO" merge-base main HEAD)"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  local report="$AREPO/.review/raw/analyzers.txt"
+
+  assert     "g1: history scan given --log-opts=<merge-base>..HEAD" grep -qF -- "--log-opts=$mb..HEAD" "$ASTUB/gitleaks.calls"
+  assert     "g1: net diff still scanned with --pipe" grep -qF -- '--pipe' "$ASTUB/gitleaks.calls"
+  assert     "g1: both scans labelled in the report" \
+    sh -c 'grep -qF -- "-- commit history" "$1" && grep -qF -- "-- net diff" "$1"' _ "$report"
+  assert     "g1: clean scan reports no leaks" grep -qF 'no leaks found' "$report"
+  assert_not "g1: clean scan is not SCAN FAILED" grep -qF 'SCAN FAILED' "$report"
+}
+
+# rc 1 is not "findings": a broken .gitleaks.toml exits 1 with only an FTL line.
+test_gitleaks_fatal_is_scan_failed() {
+  analyzer_repo g2
+  ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  printf '1:00PM FTL unable to load gitleaks config\n' > "$ASTUB/gitleaks-history.out"
+  printf '1\n' > "$ASTUB/gitleaks-history.rc"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+
+  assert "g2: FTL + rc 1 is SCAN FAILED" grep -qF 'SCAN FAILED (rc=1' "$AREPO/.review/raw/analyzers.txt"
+}
+
+# A bad --log-opts range logs ERR, scans 0 commits, says "no leaks found", rc 0.
+test_gitleaks_error_line_is_scan_failed() {
+  analyzer_repo g3
+  ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  printf '%s\n' "1:00PM ERR [git] fatal: ambiguous argument 'nosuchref..HEAD'" \
+    '1:00PM INF 0 commits scanned.' '1:00PM INF no leaks found' > "$ASTUB/gitleaks-history.out"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+
+  assert "g3: ERR + 0 commits + rc 0 is SCAN FAILED" grep -qF 'SCAN FAILED' "$AREPO/.review/raw/analyzers.txt"
+}
+
+# Zero commits scanned on a range that adds lines is a failed scan even with no
+# ERR line; on a deletion-only range it is the honest count, not a failure.
+test_gitleaks_commit_count_checked() {
+  analyzer_repo g4
+  ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  printf '%s\n' '1:00PM INF 0 commits scanned.' '1:00PM INF no leaks found' > "$ASTUB/gitleaks-history.out"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  assert "g4: 0 commits scanned on an adding range is SCAN FAILED" \
+    grep -qF 'SCAN FAILED (0 commits scanned)' "$AREPO/.review/raw/analyzers.txt"
+
+  analyzer_repo g4b
+  ( cd "$AREPO" && : > src.txt && git add -A && git commit -qm 'delete only' )
+  printf '%s\n' '1:00PM INF 0 commits scanned.' '1:00PM INF no leaks found' > "$ASTUB/gitleaks-history.out"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  assert_not "g4: 0 commits scanned on a deletion-only range is not a failure" \
+    grep -qF 'SCAN FAILED' "$AREPO/.review/raw/analyzers.txt"
+  assert     "g4: deletion-only range was scanned" \
+    grep -qF -- '-- commit history' "$AREPO/.review/raw/analyzers.txt"
+}
+
+test_gitleaks_leaks_reported() {
+  analyzer_repo g5
+  ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  printf '%s\n' 'Finding:     REDACTED' 'RuleID:      github-pat' 'File:        s.txt' \
+    '1:00PM INF 1 commits scanned.' '1:00PM WRN leaks found: 1' > "$ASTUB/gitleaks-history.out"
+  printf '3\n' > "$ASTUB/gitleaks-history.rc"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  local report="$AREPO/.review/raw/analyzers.txt"
+
+  assert     "g5: rc 3 reports the finding" grep -qF 'RuleID:      github-pat' "$report"
+  assert_not "g5: rc 3 is not SCAN FAILED" grep -qF 'SCAN FAILED' "$report"
+}
+
+test_gitleaks_uncommitted_scans_diff_only() {
+  analyzer_repo g6
+  ( cd "$AREPO" && printf 'change\n' >> src.txt )
+  run_review_analyzers "$AREPO" "$ASTUB" --uncommitted
+  assert_not "g6: uncommitted mode has no history scan" grep -qF -- '--log-opts' "$ASTUB/gitleaks.calls"
+  assert     "g6: uncommitted mode scans the diff" grep -qF -- '--pipe' "$ASTUB/gitleaks.calls"
+}
+
+# The changed-file list is newline-delimited: a name with a space is one path.
+test_semgrep_gets_whole_paths() {
+  analyzer_repo sg1
+  ( cd "$AREPO" && printf 'x\n' > 'a b.txt' && git add -A && git commit -qm 'spaced name' )
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  assert     "sg1: spaced name passed as one argument" grep -qxF 'a b.txt' "$ASTUB/semgrep.args"
+  assert_not "sg1: name not split" grep -qxF 'a' "$ASTUB/semgrep.args"
+  assert     "sg1: clean run says so" grep -qF 'semgrep: no findings in' "$AREPO/.review/raw/analyzers.txt"
+}
+
+# semgrep_case <id> <rc> <stdout> [stderr] — one run with a scripted semgrep
+semgrep_case() {
+  analyzer_repo "$1"
+  printf '%s\n' "$2" > "$ASTUB/semgrep.rc"
+  printf '%s' "$3" > "$ASTUB/semgrep.out"
+  [ -z "${4:-}" ] || printf '%s\n' "$4" > "$ASTUB/semgrep.err"
+  ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  SG_REPORT="$AREPO/.review/raw/analyzers.txt"
+}
+
+# With --error, rc 1 is findings; rc 2+ or output that isn't semgrep JSON is a
+# failed scan, which used to leave the section empty — read as clean.
+test_semgrep_failure_is_named() {
+  semgrep_case sg2 1 '{"results":[{"path":"src.txt","start":{"line":1},"check_id":"rule.x","extra":{"message":"bad"}}],"errors":[]}'
+  assert     "sg2: rc 1 lists the finding" grep -qF -- '- src.txt:1 [rule.x] bad' "$SG_REPORT"
+  assert_not "sg2: rc 1 is not FAILED" grep -qF 'semgrep FAILED' "$SG_REPORT"
+
+  semgrep_case sg3 2 '' 'semgrep: invalid configuration'
+  assert "sg3: rc 2 is FAILED" grep -qF 'semgrep FAILED (rc=2)' "$SG_REPORT"
+  assert "sg3: FAILED carries stderr" grep -qF 'invalid configuration' "$SG_REPORT"
+
+  semgrep_case sg4 0 ''
+  assert "sg4: rc 0 with no JSON is FAILED" grep -qF 'semgrep FAILED (rc=0)' "$SG_REPORT"
+
+  semgrep_case sg5 0 '{"results":[],"errors":[{"type":"Syntax error","message":"src.txt: parse failure"}]}'
+  assert "sg5: per-file errors are named" grep -qF 'some files or rules were NOT scanned' "$SG_REPORT"
+}
+
+# --- analyzer tests: JS / TS ----------------------------------------------
+# js_review <id> <setup snippet> — commits the setup plus a changed app.ts, runs
+# the analyzer pass. The stub resolves tools only via the runner in $ASTUB/runner.
+js_review() {
+  analyzer_repo "$1"
+  ( cd "$AREPO" && eval "$2" && printf 'export const x = 1;\n' > app.ts \
+      && git add -A && git commit -qm 'js change' )
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  JS_REPORT="$AREPO/.review/raw/analyzers.txt"
+}
+
+# Neither section may come out empty: empty reads as clean to the lenses.
+assert_js_sections_nonempty() { # assert_js_sections_nonempty <id> <tsc title>
+  assert "$1: eslint section is not empty" section_nonempty "$JS_REPORT" eslint
+  assert "$1: $2 section is not empty" section_nonempty "$JS_REPORT" "$2"
+}
+
+# One case per package manager, by packageManager field and by lockfile. The
+# field outranks a stray lockfile. yarn classic and bun must call
+# node_modules/.bin directly (their `run` prefers a same-named package.json
+# script): the stub resolves only via the runner named in $ASTUB/runner, so a
+# `yarn run`/`bun run` call fails these cases. Regression for #18.
+test_js_runner_follows_package_manager() {
+  local id setup runner want
+  while IFS='~' read -r id setup runner want; do
+    [ -n "$id" ] || continue
+    analyzer_repo "$id"
+    printf '%s\n' "$runner" > "$ASTUB/runner"
+    printf "app.ts:1:14  error  'x' is assigned a value but never used\n" > "$ASTUB/eslint.out"
+    printf '1\n' > "$ASTUB/eslint.rc"
+    ( cd "$AREPO" && eval "$setup" && printf 'export const x = 1;\n' > app.ts \
+        && git add -A && git commit -qm 'js change' )
+    run_review_analyzers "$AREPO" "$ASTUB" main
+    JS_REPORT="$AREPO/.review/raw/analyzers.txt"
+    assert "$id: eslint run as '$want'" grep -qxF "$want app.ts" "$ASTUB/runner.calls"
+    assert "$id: eslint findings reported" grep -qF "'x' is assigned a value" "$JS_REPORT"
+    assert_js_sections_nonempty "$id" tsc
+  done <<'EOF'
+j1~printf '{"packageManager":"pnpm@9.1.0"}' > package.json; : > package-lock.json~pnpm~pnpm exec eslint
+j2~printf '{"packageManager":"yarn@4.1.0+sha512.abc"}' > package.json~yarn~yarn exec eslint
+j3~printf '{"packageManager":"yarn@1.22.19"}' > package.json; bin_stubs~bin~node_modules/.bin/eslint
+j4~printf '{"packageManager":"bun@1.1.0"}' > package.json; bin_stubs~bin~node_modules/.bin/eslint
+j5~printf '{"packageManager":"npm@10.2.0"}' > package.json~npx~npx --no-install eslint
+j6~printf '{}' > package.json; : > pnpm-lock.yaml~pnpm~pnpm exec eslint
+j7~printf '{}' > package.json; printf '# yarn lockfile v1\n' > yarn.lock; bin_stubs~bin~node_modules/.bin/eslint
+j8~printf '{}' > package.json; printf '__metadata:\n  version: 8\n' > yarn.lock~yarn~yarn exec eslint
+j9~printf '{}' > package.json; : > bun.lock; bin_stubs~bin~node_modules/.bin/eslint
+j10~printf '{}' > package.json; printf '{}' > package-lock.json~npx~npx --no-install eslint
+j15~printf '{}' > package.json; : > yarn.lock; : > .yarnrc.yml~yarn~yarn exec eslint
+j16~printf '{}' > package.json; : > bun.lockb; bin_stubs~bin~node_modules/.bin/eslint
+EOF
+}
+
+# A tool the runner cannot resolve gets a named skip line, never an empty section.
+test_js_unresolvable_tool_is_named() {
+  js_review j11 "printf '{}' > package.json; : > pnpm-lock.yaml; printf '{}' > tsconfig.json; echo pnpm > '$WORK/j11-stub/runner'"
+  assert "j11: eslint skip names the runner" \
+    grep -qF 'analyzer skipped: eslint not resolvable via pnpm exec (pnpm-lock.yaml)' "$JS_REPORT"
+  assert "j11: tsc skip names the runner" \
+    grep -qF 'analyzer skipped: tsc not resolvable via pnpm exec' "$JS_REPORT"
+  assert_js_sections_nonempty j11 tsc
+}
+
+# eslint 9 with no config exits 2 with empty stdout: that is a failed lint, not a clean one.
+test_js_eslint_crash_is_failed() {
+  mkdir -p "$WORK/j12-stub"
+  printf 'pnpm\n' > "$WORK/j12-stub/runner"; printf '2\n' > "$WORK/j12-stub/eslint.rc"
+  js_review j12 "printf '{}' > package.json; : > pnpm-lock.yaml"
+  assert "j12: eslint rc 2 is FAILED" grep -qF 'eslint FAILED (rc=2)' "$JS_REPORT"
+  assert_js_sections_nonempty j12 tsc
+}
+
+# A clean run says so, and a root tsconfig with references is type-checked with
+# --build, without emitting where TypeScript allows it.
+test_js_clean_run_and_tsc_build() {
+  mkdir -p "$WORK/j13-stub"
+  printf 'pnpm\n' > "$WORK/j13-stub/runner"
+  printf '0\n' > "$WORK/j13-stub/eslint.rc"; printf '0\n' > "$WORK/j13-stub/tsc.rc"
+  js_review j13 "printf '{}' > package.json; : > pnpm-lock.yaml; printf '{\"files\":[],\"references\":[{\"path\":\"pkg\"}]}' > tsconfig.json"
+  assert "j13: clean eslint says so" grep -qF 'eslint: no errors in 1 file(s)' "$JS_REPORT"
+  assert "j13: references root runs tsc --build --noEmit" grep -qxF 'pnpm exec tsc --build --noEmit --pretty false' "$ASTUB/runner.calls"
+  assert "j13: clean tsc says so" grep -qF 'tsc --build --noEmit: no errors' "$JS_REPORT"
+  assert_js_sections_nonempty j13 tsc
+}
+
+# eslint warnings exit 0: the clean line still leads, the warnings follow it.
+test_js_eslint_warnings_keep_clean_line() {
+  mkdir -p "$WORK/j20-stub"
+  printf 'pnpm\n' > "$WORK/j20-stub/runner"; printf '0\n' > "$WORK/j20-stub/eslint.rc"
+  printf 'app.ts:1:1  warning  prefer-const\n' > "$WORK/j20-stub/eslint.out"
+  js_review j20 "printf '{}' > package.json; : > pnpm-lock.yaml"
+  assert "j20: clean line present" grep -qF 'eslint: no errors in 1 file(s)' "$JS_REPORT"
+  assert "j20: clean line leads the warnings" \
+    sh -c 'section_body() { awk -v h="### eslint" "\$0 == h { on = 1; next } /^### / { on = 0 } on" "$1"; }
+           [ "$(section_body "$1" | grep . | head -n 1)" = "eslint: no errors in 1 file(s)" ]' _ "$JS_REPORT"
+  assert "j20: warning kept" grep -qF 'warning  prefer-const' "$JS_REPORT"
+}
+
+# Located type errors are findings; a config error checked nothing and is FAILED.
+test_js_tsc_findings_vs_failure() {
+  mkdir -p "$WORK/j17-stub" "$WORK/j18-stub"
+  printf 'pnpm\n' > "$WORK/j17-stub/runner"; printf '2\n' > "$WORK/j17-stub/tsc.rc"
+  printf "app.ts(1,14): error TS2322: Type 'string' is not assignable to type 'number'.\n" > "$WORK/j17-stub/tsc.out"
+  js_review j17 "printf '{}' > package.json; : > pnpm-lock.yaml; printf '{}' > tsconfig.json"
+  assert     "j17: type error reported" grep -qF 'error TS2322' "$JS_REPORT"
+  assert_not "j17: type error is not FAILED" grep -qF 'tsc --noEmit FAILED' "$JS_REPORT"
+
+  printf 'pnpm\n' > "$WORK/j18-stub/runner"; printf '1\n' > "$WORK/j18-stub/tsc.rc"
+  printf "error TS18003: No inputs were found in config file 'tsconfig.json'.\n" > "$WORK/j18-stub/tsc.out"
+  js_review j18 "printf '{}' > package.json; : > pnpm-lock.yaml; printf '{}' > tsconfig.json"
+  assert "j18: config error is FAILED" grep -qF 'tsc --noEmit FAILED (rc=1)' "$JS_REPORT"
+}
+
+# TypeScript < 5.6 rejects --build --noEmit (TS5094). Plain --build would write
+# build output into the tree, so it is a named skip instead.
+test_js_tsc_build_skipped_before_ts56() {
+  mkdir -p "$WORK/j19-stub"
+  printf 'pnpm\n' > "$WORK/j19-stub/runner"; printf '0\n' > "$WORK/j19-stub/tsc.rc"
+  cat > "$WORK/j19-stub/tsc.sh" <<'EOF'
+case " $* " in
+  *" --noEmit "*) echo "error TS5094: Compiler option '--noEmit' may not be used with '--build'."; exit 1 ;;
+esac
+exit 0
+EOF
+  js_review j19 "printf '{}' > package.json; : > pnpm-lock.yaml; printf '{\"references\":[{\"path\":\"pkg\"}]}' > tsconfig.json"
+  assert_not "j19: never runs an emitting tsc --build" grep -qxF 'pnpm exec tsc --build --pretty false' "$ASTUB/runner.calls"
+  assert     "j19: named skip" grep -qF 'analyzer skipped: tsc --build --noEmit needs TypeScript >= 5.6' "$JS_REPORT"
+}
+
+# No root package.json used to drop the whole JS section — indistinguishable
+# from "no JS changed".
+test_js_without_package_json_is_named() {
+  js_review j14 ":"
+  assert "j14: no package.json gets a skip line" grep -qF 'no package.json at the repo root' "$JS_REPORT"
+  assert "j14: eslint section is not empty" section_nonempty "$JS_REPORT" eslint
 }
 
 # --- updater fixtures ------------------------------------------------------
@@ -1277,6 +1618,22 @@ run_tests \
   test_fail_on_gate_keeps_its_report \
   test_spec_selecting_nothing_fails \
   test_spec_path_with_space \
+  test_gitleaks_scans_branch_history \
+  test_gitleaks_fatal_is_scan_failed \
+  test_gitleaks_error_line_is_scan_failed \
+  test_gitleaks_commit_count_checked \
+  test_gitleaks_leaks_reported \
+  test_gitleaks_uncommitted_scans_diff_only \
+  test_semgrep_gets_whole_paths \
+  test_semgrep_failure_is_named \
+  test_js_runner_follows_package_manager \
+  test_js_unresolvable_tool_is_named \
+  test_js_eslint_crash_is_failed \
+  test_js_clean_run_and_tsc_build \
+  test_js_eslint_warnings_keep_clean_line \
+  test_js_tsc_findings_vs_failure \
+  test_js_tsc_build_skipped_before_ts56 \
+  test_js_without_package_json_is_named \
   test_update_reports_source_and_revision \
   test_update_marks_a_dirty_local_hub \
   test_update_marks_an_untracked_hub_file \
