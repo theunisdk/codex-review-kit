@@ -64,7 +64,23 @@ DEST="$dest_abs"
 # Everything is built in a staging directory beside DEST and swapped in only
 # once every copy has succeeded, so a failed build leaves the previous one whole.
 STAGE="$(mktemp -d "${DEST%/*}/.make-plugin-stage.XXXXXX")"
-trap 'rm -rf "$STAGE"' EXIT
+GENERATED="README.md PLUGIN-NOTES.md .claude-plugin commands skills scripts review"
+SWAPPING=0
+# A swap cut short puts the previous build back rather than deleting it.
+cleanup() {
+  if [ "$SWAPPING" = 1 ]; then
+    for e in $GENERATED; do
+      if [ -e "$STAGE/old/$e" ] || [ -L "$STAGE/old/$e" ]; then
+        if ! { rm -rf "${DEST:?}/$e" && mv "$STAGE/old/$e" "$DEST/"; }; then
+          echo "error: could not restore the previous build — it is in $STAGE/old" >&2
+          return
+        fi
+      fi
+    done
+  fi
+  rm -rf "$STAGE"
+}
+trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 mkdir -p "$STAGE/new/.claude-plugin" "$STAGE/new/commands" "$STAGE/new/skills" \
          "$STAGE/new/scripts/lib" "$STAGE/new/review" "$STAGE/old"
@@ -117,13 +133,14 @@ MARK
 # deleted from the kit would otherwise survive in a reused output directory and
 # ship in the plugin forever.
 # README.md goes out first and back in last, so a swap cut short never looks done.
-GENERATED="README.md PLUGIN-NOTES.md .claude-plugin commands skills scripts review"
+SWAPPING=1
 for e in $GENERATED; do
   if [ -e "$DEST/$e" ] || [ -L "$DEST/$e" ]; then mv "$DEST/$e" "$STAGE/old/"; fi
 done
 for e in .claude-plugin commands skills scripts review PLUGIN-NOTES.md README.md; do
   mv "$OUT/$e" "$DEST/"
 done
+SWAPPING=0
 
 echo "Plugin written to: $DEST"
 echo "Test with:  claude --plugin-dir $DEST"

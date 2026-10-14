@@ -1025,6 +1025,22 @@ test_make_plugin_failed_rebuild_keeps_previous_build() {
   assert "m2: mid-copy failure keeps the previous build" test -f "$dest/review/adjudication.md"
   assert "m2: failed builds leave no staging behind" \
     test "$(ls -A "$WORK/m2-out")" = plugin
+
+  git -C "$hub" checkout -q -- .review
+  printf 'v1\n' > "$dest/skills/pre-pr-review/old-only"
+  mkdir -p "$WORK/m2-bin"
+  printf '#!/bin/sh\ncase "$1" in */new/scripts) exit 1 ;; esac\nexec %s "$@"\n' \
+    "$(command -v mv)" > "$WORK/m2-bin/mv"
+  chmod +x "$WORK/m2-bin/mv"
+  ( cd "$hub" && PATH="$WORK/m2-bin:$PATH" bash scripts/make-plugin.sh "$dest" ) > "$out" 2>&1
+  rc=$?
+  assert "m2: rebuild failing mid-swap fails" test "$rc" -ne 0
+  assert "m2: mid-swap failure restores the previous skills" \
+    test -f "$dest/skills/pre-pr-review/old-only"
+  assert "m2: mid-swap failure restores the previous runner" test -f "$dest/scripts/review.sh"
+  assert "m2: mid-swap failure restores README.md" test -f "$dest/README.md"
+  assert "m2: rolled-back swap leaves no staging behind" \
+    test "$(ls -A "$WORK/m2-out")" = plugin
 }
 
 run_tests() {
