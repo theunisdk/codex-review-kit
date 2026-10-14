@@ -2,9 +2,9 @@
 # Collect cheap static-analysis signal on the changed files and write it to
 # .review/raw/analyzers.txt. Every tool is OPTIONAL — a tool that is not
 # installed is skipped. The secrets and JS/TS sections are never empty: they
-# hold output, a clean line, a named skip, or FAILED. The point is not to gate on this output; it is to hand Codex the
-# lint-level noise up front so it spends its reasoning budget on semantic bugs
-# a linter structurally cannot find.
+# hold output, a clean line, a named skip, or FAILED. The point is not to gate
+# on this output; it is to hand Codex the lint-level noise up front so it spends
+# its reasoning budget on semantic bugs a linter structurally cannot find.
 #
 # This file is synced from the kit — do not edit it in a repo. Wire your own
 # stack in .review/analyzers.local.sh instead (repo-owned, never overwritten).
@@ -57,6 +57,9 @@ collect_analyzer_output() {
     printf -- '-- %s\n' "$label" >> "$report"
     if [ -z "$why" ]; then
       printf '%s\n' "$gl_out" | head -100 >> "$report"
+      if [ "$(printf '%s\n' "$gl_out" | wc -l | tr -d ' ')" -gt 100 ]; then
+        printf '… (truncated)\n%s\n' "$(printf '%s\n' "$gl_out" | tail -n 3)" >> "$report"
+      fi
     else
       printf 'SCAN FAILED (%s) — secrets were NOT checked:\n%s\n' \
         "$why" "$(printf '%s\n' "$gl_out" | head -20)" >> "$report"
@@ -109,10 +112,12 @@ collect_analyzer_output() {
 
   # --- JS / TS ------------------------------------------------------------
   # The runner follows the repo's package manager: npx cannot see binaries a
-  # pnpm or yarn workspace keeps out of the root node_modules/.bin. Each tool
-  # writes output, a clean line, a named skip, or FAILED — the lenses are told
-  # not to re-report what a linter flagged, so an empty section reads as clean.
-  _js_runner() { # prints "<runner command>|<how it was chosen>"
+  # pnpm or yarn workspace keeps out of the root node_modules/.bin. yarn classic
+  # and bun call the hoisted binary directly — their `run` prefers a package.json
+  # script of the same name. Each tool writes output, a clean line, a named skip,
+  # or FAILED: the lenses are told not to re-report what a linter flagged, so an
+  # empty section reads as clean.
+  _js_runner() { # prints "<runner>|<how it was chosen>"; a runner ending in / is a bin dir
     local pm major src
     pm="$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"\([a-z]*\)@\([0-9]*\).*/\1 \2/p' package.json | head -n 1)"
     if [ -n "$pm" ]; then
@@ -128,21 +133,34 @@ collect_analyzer_output() {
     case "$pm" in
       pnpm) printf 'pnpm exec|%s\n' "$src" ;;
       yarn) if [ "${major:-1}" -ge 2 ] 2>/dev/null; then printf 'yarn exec|%s\n' "$src"
-            else printf 'yarn --silent run|%s\n' "$src"; fi ;;
-      bun)  printf 'bun run|%s\n' "$src" ;;
+            else printf 'node_modules/.bin/|%s\n' "$src"; fi ;;
+      bun)  printf 'node_modules/.bin/|%s\n' "$src" ;;
       *)    printf 'npx --no-install|%s\n' "$src" ;;
+    esac
+  }
+
+  _js_run() { # _js_run <tool> <args...>
+    local tool="$1"; shift
+    case "$runner" in
+      */) "$runner$tool" "$@" < /dev/null ;;
+      # shellcheck disable=SC2086
+      *)  $runner "$tool" "$@" < /dev/null ;;
     esac
   }
 
   # _js_resolve <tool> — true if $runner resolves it; otherwise writes the skip line
   _js_resolve() {
-    if ! _have "${runner%% *}"; then
-      echo "analyzer skipped: $1 not run — ${runner%% *} ($runner_src) is not installed" >> "$report"
-      return 1
-    fi
-    # shellcheck disable=SC2086
-    if ! $runner "$1" --version >/dev/null 2>&1; then
-      echo "analyzer skipped: $1 not resolvable via $runner ($runner_src) — workspace-local? wire it in .review/analyzers.local.sh" >> "$report"
+    local why
+    case "$runner" in
+      */) ;;
+      *) if ! _have "${runner%% *}"; then
+           echo "analyzer skipped: $1 not run — ${runner%% *} ($runner_src) is not installed" >> "$report"
+           return 1
+         fi ;;
+    esac
+    if ! why="$(_js_run "$1" --version 2>&1)"; then
+      why="$(printf '%s\n' "$why" | grep . | head -n 1 | cut -c 1-200)"
+      echo "analyzer skipped: $1 not resolvable via $runner ($runner_src)${why:+: $why} — workspace-local? wire it in .review/analyzers.local.sh" >> "$report"
       return 1
     fi
   }
@@ -153,7 +171,7 @@ collect_analyzer_output() {
       _section "eslint"
       echo "analyzer skipped: eslint/tsc not run — no package.json at the repo root; wire them in .review/analyzers.local.sh" >> "$report"
     else
-      local runner runner_src f tool_out tool_rc tsc_mode
+      local runner runner_src f tool_out tool_rc tsc_args
       local -a js_files; js_files=()
       runner="$(_js_runner)"; runner_src="${runner#*|}"; runner="${runner%%|*}"
       while IFS= read -r f; do js_files+=("$f"); done <<< "$js"
@@ -161,11 +179,11 @@ collect_analyzer_output() {
       _section "eslint"
       if _js_resolve eslint; then
         # no --format flag: eslint 9 removed every non-core formatter, unix included
-        # shellcheck disable=SC2086
-        tool_out="$($runner eslint "${js_files[@]}" 2>&1)"; tool_rc=$?
-        if [ "$tool_rc" -eq 0 ] && [ -z "$tool_out" ]; then
-          echo "eslint: 0 problems in ${#js_files[@]} file(s)" >> "$report"
-        elif [ "$tool_rc" -le 1 ] && [ -n "$tool_out" ]; then
+        tool_out="$(_js_run eslint "${js_files[@]}" 2>&1)"; tool_rc=$?
+        if [ "$tool_rc" -eq 0 ]; then
+          echo "eslint: no errors in ${#js_files[@]} file(s)" >> "$report"
+          [ -z "$tool_out" ] || printf '%s\n' "$tool_out" | head -200 >> "$report"
+        elif [ "$tool_rc" -eq 1 ] && [ -n "$tool_out" ]; then
           printf '%s\n' "$tool_out" | head -200 >> "$report"
         else
           printf 'eslint FAILED (rc=%s) — files were NOT linted:\n%s\n' \
@@ -174,21 +192,29 @@ collect_analyzer_output() {
       fi
 
       if [ -f tsconfig.json ] || [ -n "$(_files_matching '*.ts|*.tsx')" ]; then
-        tsc_mode="--noEmit"
-        if [ -f tsconfig.json ] && grep -q '"references"' tsconfig.json; then tsc_mode="--build"; fi
-        _section "tsc $tsc_mode"
+        _section "tsc"
         if [ ! -f tsconfig.json ]; then
           echo "analyzer skipped: tsc not run — no tsconfig.json at the repo root" >> "$report"
         elif _js_resolve tsc; then
+          tsc_args="--noEmit"
+          if grep -q '"references"' tsconfig.json && grep -q '"path"' tsconfig.json; then
+            tsc_args="--build --noEmit"
+          fi
           # shellcheck disable=SC2086
-          tool_out="$($runner tsc $tsc_mode 2>&1)"; tool_rc=$?
+          tool_out="$(_js_run tsc $tsc_args --pretty false 2>&1)"; tool_rc=$?
+          if [ "$tool_rc" -ne 0 ] && grep -q 'error TS5094' <<< "$tool_out"; then
+            # TypeScript < 5.6 rejects --noEmit with --build
+            tsc_args="--build"
+            tool_out="$(_js_run tsc $tsc_args --pretty false 2>&1)"; tool_rc=$?
+          fi
           if [ "$tool_rc" -eq 0 ]; then
-            printf '%s\n' "${tool_out:-tsc $tsc_mode: no errors}" | head -100 >> "$report"
-          elif grep -q 'error TS' <<< "$tool_out"; then
-            printf '%s\n' "$tool_out" | head -100 >> "$report"
+            echo "tsc $tsc_args: no errors" >> "$report"
+            [ -z "$tool_out" ] || printf '%s\n' "$tool_out" | head -100 >> "$report"
+          elif grep -qE '\([0-9]+,[0-9]+\): error TS' <<< "$tool_out"; then
+            printf 'tsc %s:\n%s\n' "$tsc_args" "$(printf '%s\n' "$tool_out" | head -100)" >> "$report"
           else
-            printf 'tsc FAILED (rc=%s) — types were NOT checked:\n%s\n' \
-              "$tool_rc" "$(printf '%s\n' "$tool_out" | head -20)" >> "$report"
+            printf 'tsc %s FAILED (rc=%s) — types were NOT checked:\n%s\n' \
+              "$tsc_args" "$tool_rc" "$(printf '%s\n' "$tool_out" | head -20)" >> "$report"
           fi
         fi
       fi

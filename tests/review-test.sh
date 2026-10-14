@@ -359,19 +359,27 @@ echo "1:00PM INF no leaks found"
 EOF
 # npx / pnpm / yarn / bun: log "<runner> <args>" to runner.calls, strip the
 # runner's own verb, and resolve <tool> only if this runner is the one named in
-# `runner` and <tool>.rc exists. Then print <tool>.out and exit <tool>.rc.
+# `runner` and <tool>.rc exists. Then run <tool>.sh if present, else print
+# <tool>.out and exit <tool>.rc. Copied into node_modules/.bin as eslint/tsc it
+# is the bin-dir runner, named `bin` in `runner`.
 cat > "$WORK/abin/npx" <<'EOF'
 #!/usr/bin/env bash
 me="$(basename "$0")"
-printf '%s %s\n' "$me" "$*" >> "$ANALYZER_STUB_DIR/runner.calls"
-while [ $# -gt 0 ]; do
-  case "$1" in --no-install|--silent|exec|run) shift ;; *) break ;; esac
-done
+case "$me" in
+  npx|pnpm|yarn|bun)
+    printf '%s %s\n' "$me" "$*" >> "$ANALYZER_STUB_DIR/runner.calls"
+    while [ $# -gt 0 ]; do
+      case "$1" in --no-install|--silent|exec|run) shift ;; *) break ;; esac
+    done ;;
+  *) printf 'node_modules/.bin/%s %s\n' "$me" "$*" >> "$ANALYZER_STUB_DIR/runner.calls"
+     set -- "$me" "$@"; me=bin ;;
+esac
 tool="$1"; shift
 if [ "$me" != "$(cat "$ANALYZER_STUB_DIR/runner" 2>/dev/null)" ] || [ ! -f "$ANALYZER_STUB_DIR/$tool.rc" ]; then
   echo "$me: $tool: command not found" >&2; exit 1
 fi
 [ "${1:-}" = --version ] && { echo v0.0.0-stub; exit 0; }
+[ -f "$ANALYZER_STUB_DIR/$tool.sh" ] && exec bash "$ANALYZER_STUB_DIR/$tool.sh" "$@"
 cat "$ANALYZER_STUB_DIR/$tool.out" 2>/dev/null
 exit "$(cat "$ANALYZER_STUB_DIR/$tool.rc")"
 EOF
@@ -396,6 +404,11 @@ run_review_analyzers() { # run_review_analyzers <dir> <stubdir> <review.sh args.
 
 section_body() { # section_body <report> <title> — the lines under "### <title>"
   awk -v h="### $2" '$0 == h { on = 1; next } /^### / { on = 0 } on' "$1"
+}
+
+bin_stubs() { # bin_stubs — eslint/tsc stubs in ./node_modules/.bin
+  mkdir -p node_modules/.bin
+  cp "$WORK/abin/npx" node_modules/.bin/eslint; cp "$WORK/abin/npx" node_modules/.bin/tsc
 }
 
 section_nonempty() { [ -n "$(section_body "$1" "$2" | tr -d '[:space:]')" ]; }
@@ -457,6 +470,8 @@ test_gitleaks_commit_count_checked() {
   run_review_analyzers "$AREPO" "$ASTUB" main
   assert_not "g4: 0 commits scanned on a deletion-only range is not a failure" \
     grep -qF 'SCAN FAILED' "$AREPO/.review/raw/analyzers.txt"
+  assert     "g4: deletion-only range was scanned" \
+    grep -qF -- '-- commit history' "$AREPO/.review/raw/analyzers.txt"
 }
 
 test_gitleaks_leaks_reported() {
@@ -498,7 +513,9 @@ assert_js_sections_nonempty() { # assert_js_sections_nonempty <id> <tsc title>
 }
 
 # One case per package manager, by packageManager field and by lockfile. The
-# field outranks a stray lockfile. Regression for #18 (npx assumed everywhere).
+# field outranks a stray lockfile. yarn classic and bun call node_modules/.bin
+# directly, so a package.json script named like the tool cannot stand in for
+# it. Regression for #18 (npx assumed everywhere).
 test_js_runner_follows_package_manager() {
   local id setup runner want
   while IFS='~' read -r id setup runner want; do
@@ -513,18 +530,20 @@ test_js_runner_follows_package_manager() {
     JS_REPORT="$AREPO/.review/raw/analyzers.txt"
     assert "$id: eslint run as '$want'" grep -qxF "$want app.ts" "$ASTUB/runner.calls"
     assert "$id: eslint findings reported" grep -qF "'x' is assigned a value" "$JS_REPORT"
-    assert_js_sections_nonempty "$id" 'tsc --noEmit'
+    assert_js_sections_nonempty "$id" tsc
   done <<'EOF'
 j1~printf '{"packageManager":"pnpm@9.1.0"}' > package.json; : > package-lock.json~pnpm~pnpm exec eslint
 j2~printf '{"packageManager":"yarn@4.1.0+sha512.abc"}' > package.json~yarn~yarn exec eslint
-j3~printf '{"packageManager":"yarn@1.22.19"}' > package.json~yarn~yarn --silent run eslint
-j4~printf '{"packageManager":"bun@1.1.0"}' > package.json~bun~bun run eslint
+j3~printf '{"packageManager":"yarn@1.22.19","scripts":{"eslint":"echo SCRIPT"}}' > package.json; bin_stubs~bin~node_modules/.bin/eslint
+j4~printf '{"packageManager":"bun@1.1.0"}' > package.json; bin_stubs~bin~node_modules/.bin/eslint
 j5~printf '{"packageManager":"npm@10.2.0"}' > package.json~npx~npx --no-install eslint
 j6~printf '{}' > package.json; : > pnpm-lock.yaml~pnpm~pnpm exec eslint
-j7~printf '{}' > package.json; printf '# yarn lockfile v1\n' > yarn.lock~yarn~yarn --silent run eslint
+j7~printf '{}' > package.json; printf '# yarn lockfile v1\n' > yarn.lock; bin_stubs~bin~node_modules/.bin/eslint
 j8~printf '{}' > package.json; printf '__metadata:\n  version: 8\n' > yarn.lock~yarn~yarn exec eslint
-j9~printf '{}' > package.json; : > bun.lock~bun~bun run eslint
+j9~printf '{}' > package.json; : > bun.lock; bin_stubs~bin~node_modules/.bin/eslint
 j10~printf '{}' > package.json; printf '{}' > package-lock.json~npx~npx --no-install eslint
+j15~printf '{}' > package.json; : > yarn.lock; : > .yarnrc.yml~yarn~yarn exec eslint
+j16~printf '{}' > package.json; : > bun.lockb; bin_stubs~bin~node_modules/.bin/eslint
 EOF
 }
 
@@ -535,7 +554,7 @@ test_js_unresolvable_tool_is_named() {
     grep -qF 'analyzer skipped: eslint not resolvable via pnpm exec (pnpm-lock.yaml)' "$JS_REPORT"
   assert "j11: tsc skip names the runner" \
     grep -qF 'analyzer skipped: tsc not resolvable via pnpm exec' "$JS_REPORT"
-  assert_js_sections_nonempty j11 'tsc --noEmit'
+  assert_js_sections_nonempty j11 tsc
 }
 
 # eslint 9 with no config exits 2 with empty stdout: that is a failed lint, not a clean one.
@@ -544,19 +563,60 @@ test_js_eslint_crash_is_failed() {
   printf 'pnpm\n' > "$WORK/j12-stub/runner"; printf '2\n' > "$WORK/j12-stub/eslint.rc"
   js_review j12 "printf '{}' > package.json; : > pnpm-lock.yaml"
   assert "j12: eslint rc 2 is FAILED" grep -qF 'eslint FAILED (rc=2)' "$JS_REPORT"
-  assert_js_sections_nonempty j12 'tsc --noEmit'
+  assert_js_sections_nonempty j12 tsc
 }
 
-# A clean run says so, and a root tsconfig with references is type-checked with --build.
+# A clean run says so, and a root tsconfig with references is type-checked with
+# --build, without emitting where TypeScript allows it.
 test_js_clean_run_and_tsc_build() {
   mkdir -p "$WORK/j13-stub"
   printf 'pnpm\n' > "$WORK/j13-stub/runner"
   printf '0\n' > "$WORK/j13-stub/eslint.rc"; printf '0\n' > "$WORK/j13-stub/tsc.rc"
   js_review j13 "printf '{}' > package.json; : > pnpm-lock.yaml; printf '{\"files\":[],\"references\":[{\"path\":\"pkg\"}]}' > tsconfig.json"
-  assert "j13: clean eslint says 0 problems" grep -qF 'eslint: 0 problems in 1 file(s)' "$JS_REPORT"
-  assert "j13: references root runs tsc --build" grep -qxF 'pnpm exec tsc --build' "$ASTUB/runner.calls"
-  assert "j13: clean tsc says no errors" grep -qF 'tsc --build: no errors' "$JS_REPORT"
-  assert_js_sections_nonempty j13 'tsc --build'
+  assert "j13: clean eslint says so" grep -qF 'eslint: no errors in 1 file(s)' "$JS_REPORT"
+  assert "j13: references root runs tsc --build --noEmit" grep -qxF 'pnpm exec tsc --build --noEmit --pretty false' "$ASTUB/runner.calls"
+  assert "j13: clean tsc says so" grep -qF 'tsc --build --noEmit: no errors' "$JS_REPORT"
+  assert_js_sections_nonempty j13 tsc
+}
+
+# eslint warnings exit 0: the clean line still leads, the warnings follow it.
+test_js_eslint_warnings_keep_clean_line() {
+  mkdir -p "$WORK/j20-stub"
+  printf 'pnpm\n' > "$WORK/j20-stub/runner"; printf '0\n' > "$WORK/j20-stub/eslint.rc"
+  printf 'app.ts:1:1  warning  prefer-const\n' > "$WORK/j20-stub/eslint.out"
+  js_review j20 "printf '{}' > package.json; : > pnpm-lock.yaml"
+  assert "j20: clean line present" grep -qF 'eslint: no errors in 1 file(s)' "$JS_REPORT"
+  assert "j20: warning kept" grep -qF 'warning  prefer-const' "$JS_REPORT"
+}
+
+# Located type errors are findings; a config error checked nothing and is FAILED.
+test_js_tsc_findings_vs_failure() {
+  mkdir -p "$WORK/j17-stub" "$WORK/j18-stub"
+  printf 'pnpm\n' > "$WORK/j17-stub/runner"; printf '2\n' > "$WORK/j17-stub/tsc.rc"
+  printf "app.ts(1,14): error TS2322: Type 'string' is not assignable to type 'number'.\n" > "$WORK/j17-stub/tsc.out"
+  js_review j17 "printf '{}' > package.json; : > pnpm-lock.yaml; printf '{}' > tsconfig.json"
+  assert     "j17: type error reported" grep -qF 'error TS2322' "$JS_REPORT"
+  assert_not "j17: type error is not FAILED" grep -qF 'tsc --noEmit FAILED' "$JS_REPORT"
+
+  printf 'pnpm\n' > "$WORK/j18-stub/runner"; printf '1\n' > "$WORK/j18-stub/tsc.rc"
+  printf "error TS5023: Unknown compiler option 'bogus'.\n" > "$WORK/j18-stub/tsc.out"
+  js_review j18 "printf '{}' > package.json; : > pnpm-lock.yaml; printf '{}' > tsconfig.json"
+  assert "j18: config error is FAILED" grep -qF 'tsc --noEmit FAILED (rc=1)' "$JS_REPORT"
+}
+
+# TypeScript < 5.6 rejects --build --noEmit (TS5094); fall back to plain --build.
+test_js_tsc_build_falls_back_before_ts56() {
+  mkdir -p "$WORK/j19-stub"
+  printf 'pnpm\n' > "$WORK/j19-stub/runner"; printf '0\n' > "$WORK/j19-stub/tsc.rc"
+  cat > "$WORK/j19-stub/tsc.sh" <<'EOF'
+case " $* " in
+  *" --noEmit "*) echo "error TS5094: Compiler option '--noEmit' may not be used with '--build'."; exit 1 ;;
+esac
+exit 0
+EOF
+  js_review j19 "printf '{}' > package.json; : > pnpm-lock.yaml; printf '{\"references\":[{\"path\":\"pkg\"}]}' > tsconfig.json"
+  assert "j19: retried as tsc --build" grep -qxF 'pnpm exec tsc --build --pretty false' "$ASTUB/runner.calls"
+  assert "j19: fallback reported clean" grep -qF 'tsc --build: no errors' "$JS_REPORT"
 }
 
 # No root package.json used to drop the whole JS section — indistinguishable
@@ -1257,6 +1317,9 @@ run_tests \
   test_js_unresolvable_tool_is_named \
   test_js_eslint_crash_is_failed \
   test_js_clean_run_and_tsc_build \
+  test_js_eslint_warnings_keep_clean_line \
+  test_js_tsc_findings_vs_failure \
+  test_js_tsc_build_falls_back_before_ts56 \
   test_js_without_package_json_is_named \
   test_update_reports_source_and_revision \
   test_update_marks_a_dirty_local_hub \
