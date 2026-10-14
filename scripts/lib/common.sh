@@ -49,14 +49,20 @@ hook_wiring() {
   if [ -d "$hooks_dir" ] && [ "$(cd "$hooks_dir" && pwd -P)" = "$(cd .githooks && pwd -P)" ]; then
     HOOK_STATE=wired; HOOK_NOTE="core.hooksPath = $hooks_path"; return 0
   fi
-  hook="$hooks_dir/pre-push"; user_hook="$hook"
+  hooks_dir="${hooks_dir%/}"; hook="$hooks_dir/pre-push"; user_hook="$hook"
   # husky 9: core.hooksPath is .husky/_, whose stubs run the user's .husky/<hook>
   case "$hooks_dir" in _|*/_) [ -f "$hooks_dir/h" ] && user_hook="${hooks_dir%_}pre-push" ;; esac
-  if [ -x "$hook" ] && grep -v '^[[:space:]]*#' "$user_hook" 2>/dev/null | grep -q '\.githooks/pre-push'; then
+  # a chain line after an exec or exit never runs
+  if [ -x "$hook" ] && awk '/^[[:space:]]*#/ { next }
+      /\.githooks\/pre-push/ { found = 1; exit }
+      /^[[:space:]]*(exec|exit)([[:space:]]|;|$)/ { exit }
+      END { exit(found ? 0 : 1) }' "$user_hook" 2>/dev/null; then
     HOOK_STATE=chained; HOOK_NOTE="$user_hook chains .githooks/pre-push"; return 0
   fi
-  if [ -f "$user_hook" ]; then
-    HOOK_FIX="echo '$HOOK_CHAIN' >> $(printf %q "$user_hook")"
+  if [ -f "$user_hook" ] && grep -Eq '^[[:space:]]*(exec|exit)([[:space:]]|;|$)' "$user_hook" 2>/dev/null; then
+    HOOK_FIX="add the line  $HOOK_CHAIN  to $user_hook, above its first exec/exit"
+  elif [ -f "$user_hook" ]; then
+    HOOK_FIX="printf '\\n%s\\n' '$HOOK_CHAIN' >> $(printf %q "$user_hook")"
   else
     HOOK_FIX="printf '#!/bin/sh\\n%s\\n' '$HOOK_CHAIN' > $(printf %q "$user_hook")"
   fi
@@ -64,6 +70,11 @@ hook_wiring() {
   if [ -n "$hooks_path" ]; then
     HOOK_STATE=foreign
     HOOK_NOTE="core.hooksPath is '$hooks_path', and its pre-push does not call .githooks/pre-push"
+    return 1
+  fi
+  if [ -d "$hooks_dir" ] && [ ! -r "$hooks_dir" ]; then
+    HOOK_STATE=unset-live
+    HOOK_NOTE="core.hooksPath is unset, and $hooks_dir cannot be listed to rule out live hooks that pointing it at .githooks would disable"
     return 1
   fi
   for f in "$hooks_dir"/*; do

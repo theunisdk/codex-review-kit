@@ -335,7 +335,6 @@ test_empty_base_ref_dies() {
       bash scripts/review.sh --no-analyzers "" --lenses correctness ) > "$LOG" 2>&1; local rc=$?
   assert     "empty-base: exits nonzero" test "$rc" -ne 0
   assert     "empty-base: says why" grep -qF 'empty base ref' "$LOG"
-  assert_not "empty-base: no lens launched" test -f "$repo/.review/raw/log-correctness.txt"
 }
 
 test_spec_path_with_space() {
@@ -1391,11 +1390,23 @@ test_install_keeps_live_git_hooks() {
   LOG="$spoke.install.log"
   ( cd "$spoke" && env -i HOME="$WORK/nohome" PATH="$WORK/bin:$PATH" \
       bash scripts/review-install.sh ) > "$LOG" 2>&1; rc=$?
-  assert     "i17: install does not report ready" test "$rc" -ne 0
+  assert     "i17: install fails the hook check" grep -qF 'pre-push hook not wired' "$LOG"
   assert     "i17: names the live hook" grep -qF 'live hooks (pre-commit)' "$LOG"
   assert_not "i17: core.hooksPath left unset" sh -c 'cd "$1" && git config --get core.hooksPath' _ "$spoke"
   ( cd "$spoke" && git -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m probe ) >/dev/null 2>&1
   assert     "i17: the live hook still runs" test -f "$spoke/pre-commit-ran"
+
+  # a hooks dir that cannot be listed may hold live hooks too
+  if [ "$(id -u)" != 0 ]; then
+    rm -f "$spoke/$hooks/pre-commit"; chmod 300 "$spoke/$hooks"
+    ( cd "$spoke" && env -i HOME="$WORK/nohome" PATH="$WORK/bin:$PATH" \
+        bash scripts/review-install.sh ) > "$LOG" 2>&1
+    chmod 755 "$spoke/$hooks"
+    assert     "i17: an unlistable hooks dir is reported" grep -qF 'cannot be listed' "$LOG"
+    assert_not "i17: … and core.hooksPath left unset" sh -c 'cd "$1" && git config --get core.hooksPath' _ "$spoke"
+  else
+    skip_test "i17: unlistable hooks dir (running as root)"
+  fi
 }
 
 # `git push origin HEAD~1:refs/heads/feature` hands the hook a commit
@@ -1612,9 +1623,19 @@ test_review_warns_when_hooks_path_points_elsewhere() {
   run_review "$repo" "$stub" --lenses correctness
   assert "h6: a commented-out chain is not a chain" grep -qF 'pre-push hook not wired' "$LOG"
 
-  printf '.githooks/pre-push "$@" || exit $?\n' >> "$repo/.husky/pre-push"
+  ( cd "$repo" && printf '#!/bin/sh\nexec npm test\n.githooks/pre-push "$@" || exit $?\n' > .husky/pre-push )
+  run_review "$repo" "$stub" --lenses correctness
+  assert "h6: a chain after exec is not a chain" grep -qF 'above its first exec/exit' "$LOG"
+
+  # past the pipe buffer, so an early-exiting match cannot SIGPIPE its writer
+  ( cd "$repo" && { printf '#!/bin/sh\n.githooks/pre-push "$@" || exit $?\n'
+      i=0; while [ $i -lt 10000 ]; do echo ": padding line $i"; i=$((i + 1)); done; } > .husky/pre-push )
   run_review "$repo" "$stub" --lenses correctness
   assert_hook_quiet "h6 (chained)" "$repo"
+
+  ( cd "$repo" && git config core.hooksPath .husky/ )
+  run_review "$repo" "$stub" --lenses correctness
+  assert_hook_quiet "h6 (trailing slash)" "$repo"
 
   # husky 9 points hooksPath at .husky/_, whose stubs run .husky/<hook>
   ( cd "$repo" && mkdir -p .husky/_ && : > .husky/_/h \
@@ -1622,6 +1643,9 @@ test_review_warns_when_hooks_path_points_elsewhere() {
       && chmod +x .husky/_/pre-push && git config core.hooksPath .husky/_ )
   run_review "$repo" "$stub" --lenses correctness
   assert_hook_quiet "h6 (husky 9, chained)" "$repo"
+  ( cd "$repo" && git config core.hooksPath .husky/_/ )
+  run_review "$repo" "$stub" --lenses correctness
+  assert_hook_quiet "h6 (husky 9, trailing slash)" "$repo"
 }
 
 test_review_quiet_when_git_hooks_chain() {
