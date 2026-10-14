@@ -130,7 +130,7 @@ fi
 if [ "$MODE" = "spec" ]; then
   sort -u "$OUT/changed-files.txt" > "$OUT/changed-files.tmp"
 else
-  grep -v -E '^\.review/(raw|runs)/|^\.review/(findings\.json|findings\.md|verdict\.md)$' \
+  grep -v -E '^\.review/(raw|runs)/|^\.review/(findings\.json|findings\.md|verdict\.md|spec-verdict\.md)$' \
     "$OUT/changed-files.txt" | sort -u > "$OUT/changed-files.tmp"
 fi
 mv "$OUT/changed-files.tmp" "$OUT/changed-files.txt"
