@@ -52,13 +52,15 @@ hook_wiring() {
   hooks_dir="${hooks_dir%/}"; hook="$hooks_dir/pre-push"; user_hook="$hook"
   # husky 9: core.hooksPath is .husky/_, whose stubs run the user's .husky/<hook>
   case "$hooks_dir" in _|*/_) [ -f "$hooks_dir/h" ] && user_hook="${hooks_dir%_}pre-push" ;; esac
-  # a chain line after a top-level exec or exit never runs; exec with only redirections returns
+  # a chain line after any exec or exit is not proven to run; exec with only redirections returns
   chain=1
-  if [ -f "$user_hook" ]; then
+  if [ -f "$user_hook" ] && [ ! -r "$user_hook" ]; then
+    chain=2
+  elif [ -f "$user_hook" ]; then
     awk '/^[[:space:]]*#/ { next }
       /\.githooks\/pre-push/ { found = 1; exit }
-      /^exec([[:space:]]+[0-9]*[<>]|[[:space:]]*$)/ { next }
-      /^(exec|exit)([[:space:]]|;|$)/ { blocked = 1; exit }
+      /^[[:space:]]*exec([[:space:]]+[0-9]*[<>]|[[:space:]]*$)/ { next }
+      /^[[:space:]]*(exec|exit)([[:space:]]|;|$)/ { blocked = 1; exit }
       END { exit(found ? 0 : blocked ? 3 : 1) }' "$user_hook" 2>/dev/null
     chain=$?
   fi
@@ -72,7 +74,7 @@ hook_wiring() {
          else
            HOOK_FIX="printf '#!/bin/sh\\n%s\\n' '$HOOK_CHAIN' > $(printf %q "$user_hook")"
          fi ;;
-    3) HOOK_FIX="add the line  $HOOK_CHAIN  to $user_hook, above its first top-level exec/exit" ;;
+    3) HOOK_FIX="add the line  $HOOK_CHAIN  to $user_hook, above its first exec/exit" ;;
   esac
   [ -z "$HOOK_FIX" ] || [ "$chain" = 0 ] || [ "$user_hook" != "$hook" ] || [ -x "$hook" ] \
     || HOOK_FIX="$HOOK_FIX && chmod +x $(printf %q "$hook")"
@@ -80,6 +82,7 @@ hook_wiring() {
     HOOK_STATE=foreign
     HOOK_NOTE="core.hooksPath is '$hooks_path', and its pre-push does not call .githooks/pre-push"
     [ "$chain" != 0 ] || HOOK_NOTE="core.hooksPath is '$hooks_path', and $hook is not executable, so git skips it"
+    [ "$chain" != 3 ] || HOOK_NOTE="core.hooksPath is '$hooks_path', and $user_hook can exec or exit before any call to .githooks/pre-push"
     [ "$chain" != 2 ] || HOOK_NOTE="core.hooksPath is '$hooks_path', and $user_hook cannot be read to check that it calls .githooks/pre-push"
     return 1
   fi

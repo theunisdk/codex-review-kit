@@ -1625,12 +1625,26 @@ test_review_warns_when_hooks_path_points_elsewhere() {
 
   ( cd "$repo" && printf '#!/bin/sh\nexec npm test\n.githooks/pre-push "$@" || exit $?\n' > .husky/pre-push )
   run_review "$repo" "$stub" --lenses correctness
-  assert "h6: a chain after exec is not a chain" grep -qF 'above its first top-level exec/exit' "$LOG"
+  assert "h6: a chain after exec is not a chain" grep -qF 'above its first exec/exit' "$LOG"
 
-  # an exit inside a guard, or an exec that only redirects, does not end the hook
-  ( cd "$repo" && printf '#!/bin/sh\nexec 1>&2\nif [ -n "$SKIP" ]; then\n  exit 0\nfi\n.githooks/pre-push "$@" || exit $?\n' > .husky/pre-push )
+  # any exec or exit before the chain, indented or not, means it may never run
+  ( cd "$repo" && printf '#!/bin/sh\n  exit 0\n.githooks/pre-push "$@" || exit $?\n' > .husky/pre-push )
   run_review "$repo" "$stub" --lenses correctness
-  assert_hook_quiet "h6 (chain after guard and redirect)" "$repo"
+  assert "h6: a chain after an indented exit is not a chain" grep -qF 'can exec or exit before' "$LOG"
+
+  # an exec that only redirects returns
+  ( cd "$repo" && printf '#!/bin/sh\nexec 1>&2\n.githooks/pre-push "$@" || exit $?\nif [ -n "$SKIP" ]; then\n  exit 0\nfi\n' > .husky/pre-push )
+  run_review "$repo" "$stub" --lenses correctness
+  assert_hook_quiet "h6 (chain after a redirect, before a guard)" "$repo"
+
+  ( cd "$repo" && printf '#!/bin/sh\n.githooks/pre-push "$@" || exit $?\n' > .husky/pre-push && chmod 000 .husky/pre-push )
+  run_review "$repo" "$stub" --lenses correctness
+  chmod 755 "$repo/.husky/pre-push"
+  if [ "$(id -u)" != 0 ]; then
+    assert "h6: an unreadable hook says so" grep -qF 'cannot be read' "$LOG"
+  else
+    skip_test "h6: unreadable hook (running as root)"
+  fi
 
   # past the pipe buffer, so an early-exiting match cannot SIGPIPE its writer
   ( cd "$repo" && { printf '#!/bin/sh\n.githooks/pre-push "$@" || exit $?\n'
