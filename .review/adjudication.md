@@ -12,7 +12,7 @@ identical however the review was triggered. Edit this file, not its callers.
 
 (`--spec` reviews a design document instead of code — see the `/review-spec`
 command for the mode's adjudication deltas; the rest of this procedure
-applies unchanged.)
+applies unchanged, except step 5's file and header.)
 
 Several minutes; lenses run in parallel. If it exits non-zero for a setup reason,
 fix that and stop — do not substitute a hand-rolled review.
@@ -75,10 +75,11 @@ unless there is a reason. `low` is judgement.
 
 ## 4 — Apply
 
-Before the first fix, record where the reviewed code ends:
-`PRE_FIX=$(git rev-parse HEAD)`. Apply all FIXes with the minimal change that
-removes the defect; do not opportunistically refactor. Group related fixes into
-coherent commits.
+Before the first fix, run `git rev-parse HEAD` and note the SHA it prints —
+call it PRE_FIX. Note the literal value: a shell variable does not survive to
+the re-review, and an empty base silently widens it to the whole branch. Apply
+all FIXes with the minimal change that removes the defect; do not
+opportunistically refactor. Group related fixes into coherent commits.
 
 Run the project's tests and type checker, plus the lint/analyzer gate wired in
 `.review/analyzers.local.sh` — that pass ran before the lenses, so nothing has
@@ -88,20 +89,23 @@ test encoded the bug — and say which, explicitly.
 If the fixes amount to substantial new code — new logic or a changed
 transaction, authz, or rollout boundary, not mechanical corrections — commit
 them, then run ONE scoped re-review over the fix commits before writing the
-verdict: `./scripts/review.sh "$PRE_FIX" --lenses <relevant lenses>`. Not
+verdict: `./scripts/review.sh <PRE_FIX> --lenses <relevant lenses>`. Not
 `--uncommitted`: once the fixes are committed it reviews nothing and still
-reports `complete: true`. For the same reason, "no changes to review" from this
-run means the fixes are not committed yet — commit them and re-run. Fixes
-applied during adjudication are otherwise the only unreviewed code in the
-change, and it is exactly where downstream reviews land their hits. Adjudicate
-that re-review's findings without a further re-pass —
-one bounded loop, not a cycle.
+reports `complete: true`. A range that is wrong looks clean too, so check it:
+"no changes to review" means the fixes are not committed yet, and a failing
+`git merge-base --is-ancestor <PRE_FIX> HEAD` means an amend or rebase
+rewrote PRE_FIX — note the new pre-fix SHA and re-run. Fixes applied during
+adjudication are otherwise the only unreviewed code in the change, and it is
+exactly where downstream reviews land their hits. Adjudicate that re-review's
+findings without a further re-pass — one bounded loop, not a cycle.
 
 ## 5 — Write the verdict
 
 Write `.review/verdict.md`. Include the HEAD short SHA — after the fix
 commits — in the header so the pre-push hook can tell whether the verdict is
-current.
+current. In `--spec` mode, write `.review/spec-verdict.md` instead, with the
+header `# Spec verdict — <branch> — <short-sha> — <date>`: a spec review is not
+a code review, and the hook must not read it as one.
 
 ```markdown
 # Review verdict — <branch> — <short-sha> — <date>

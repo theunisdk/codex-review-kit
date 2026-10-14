@@ -769,6 +769,7 @@ test_prepush_rejects_a_spec_verdict() {
   ( cd "$repo" && REVIEW_STRICT=1 git push "$remote" 'HEAD:refs/heads/feature4' ) > "$out" 2>&1
   rc=$?
   assert "h3: a current spec-verdict.md alone does not clear the gate" test "$rc" -ne 0
+  assert "h3: … because there is no code verdict" grep -qF 'feature4 — no review verdict found' "$out"
 }
 
 # In a SHA-256 repository a deletion's local_sha is 64 zeros; matching only the
@@ -794,6 +795,7 @@ test_prepush_skips_a_sha256_deletion() {
       | REVIEW_STRICT=1 bash .githooks/pre-push origin url ) > "$out" 2>&1
   rc=$?
   assert "h4: a 64-character SHA that is not all zeros is still gated" test "$rc" -ne 0
+  assert "h4: … for want of a verdict" grep -qF 'feature — no review verdict found' "$out"
 }
 
 # A destination that denies listing looks empty to `ls -A`, and empty is the one

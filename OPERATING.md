@@ -187,7 +187,9 @@ into an explicit question list you answer before the build starts.
 
 Discipline mirrors the code side: one pass per spec, adjudicate (FIXes edit
 the spec; ambiguities usually ESCALATE — that question list is the main
-deliverable), resolve, build. No loops.
+deliverable), resolve, build. No loops. The verdict goes to
+`.review/spec-verdict.md`, which the pre-push hook never reads — a spec review
+does not clear the code-review gate.
 
 ## The one habit
 

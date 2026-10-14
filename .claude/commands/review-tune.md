@@ -10,7 +10,7 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
    every file in `.review/archive/` if that directory exists, and recover the
    superseded ones from git: `git log --format=%H -- .review/verdict.md`, then
    `git show <sha>:.review/verdict.md` for each. Read each one's Rejected
-   section. Do the same for `.review/spec-verdict.md` (spec reviews), but
+   section. Read `.review/spec-verdict.md` too if present (spec reviews), but
    keep its rejections in their own classes: `learnings.md` reaches the code
    lenses too, so a suppression drawn from spec rejections must say it
    applies to spec review only.

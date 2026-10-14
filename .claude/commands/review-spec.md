@@ -27,10 +27,9 @@ of a rework. Target: $ARGUMENTS
    - REJECT with a written reason, as always. The rubric's evidence bar
      applies: a finding about the codebase must cite code the lens read.
 
-3. Write `.review/spec-verdict.md` — never `.review/verdict.md`, which holds the
-   code review the pre-push hook checks — with the header
-   `# Spec verdict — <branch> — <short-sha> — <date>` and the body format from
-   adjudication.md step 5. Then report: the escalated decision
+3. Write `.review/spec-verdict.md` per adjudication.md step 5 — never
+   `.review/verdict.md`, which holds the code review the pre-push hook
+   checks. Then report: the escalated decision
    list in full, what was edited in the spec, and anything logged.
 
 **One pass, no loop.** Review once, adjudicate, resolve the escalated
