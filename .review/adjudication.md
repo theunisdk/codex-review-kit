@@ -12,7 +12,8 @@ identical however the review was triggered. Edit this file, not its callers.
 
 (`--spec` reviews a design document instead of code — see the `/review-spec`
 command for the mode's adjudication deltas; the rest of this procedure
-applies unchanged, except step 5's file and header.)
+applies unchanged, except step 4's re-review — spec mode is one pass — and
+step 5's file and header.)
 
 Several minutes; lenses run in parallel. If it exits non-zero for a setup reason,
 fix that and stop — do not substitute a hand-rolled review.
@@ -91,10 +92,11 @@ transaction, authz, or rollout boundary, not mechanical corrections — commit
 them, then run ONE scoped re-review over the fix commits before writing the
 verdict: `./scripts/review.sh <PRE_FIX> --lenses <relevant lenses>`. Not
 `--uncommitted`: once the fixes are committed it reviews nothing and still
-reports `complete: true`. A range that is wrong looks clean too, so check it:
-"no changes to review" means the fixes are not committed yet, and a failing
+reports `complete: true`. Check the range too: "no changes to review" means
+the fixes are not committed yet, and a failing
 `git merge-base --is-ancestor <PRE_FIX> HEAD` means an amend or rebase
-rewrote PRE_FIX — note the new pre-fix SHA and re-run. Fixes applied during
+rewrote PRE_FIX, so the review covers the wrong range. Keep fixes in their
+own commits on top of PRE_FIX. Fixes applied during
 adjudication are otherwise the only unreviewed code in the change, and it is
 exactly where downstream reviews land their hits. Adjudicate that re-review's
 findings without a further re-pass — one bounded loop, not a cycle.
