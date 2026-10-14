@@ -323,6 +323,21 @@ test_spec_selecting_nothing_fails() {
   assert "spec-empty: stale report replaced" jq -e '.complete == false' "$repo/.review/findings.json"
 }
 
+# An empty positional base used to fall back to the detected default branch,
+# silently widening a scoped re-review (an unset $PRE_FIX) to the whole branch.
+test_empty_base_ref_dies() {
+  local repo="$WORK/eb" stub="$WORK/eb-stub"
+  make_repo "$repo"; mkdir -p "$stub"
+  printf '{"findings":[]}' > "$stub/correctness.json"
+  ( cd "$repo" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  LOG="$repo.log"
+  ( cd "$repo" && PATH="$WORK/bin:$PATH" CODEX_STUB_DIR="$stub" REVIEW_SKIP_AUTH_CHECK=1 \
+      bash scripts/review.sh --no-analyzers "" --lenses correctness ) > "$LOG" 2>&1; local rc=$?
+  assert     "empty-base: exits nonzero" test "$rc" -ne 0
+  assert     "empty-base: says why" grep -qF 'empty base ref' "$LOG"
+  assert_not "empty-base: no lens launched" test -f "$repo/.review/raw/log-correctness.txt"
+}
+
 test_spec_path_with_space() {
   local repo="$WORK/sp" stub="$WORK/sp-stub"
   make_repo "$repo"; mkdir -p "$stub"
@@ -1345,6 +1360,44 @@ knowledge_base:
   assert_not "i15: merged-anchor config not called unparseable" grep -q 'does not parse' "$LOG"
 }
 
+# A foreign core.hooksPath used to be a `skip`, so --check passed while the
+# kit's pre-push hook never ran. It passes now only when that hooks dir chains it.
+test_install_check_foreign_hooks_path() {
+  local spoke="$WORK/i16-spoke" rc
+  make_installed_spoke "$spoke"
+  run_install_full "$spoke"
+  ( cd "$spoke" && mkdir -p .husky && printf '#!/bin/sh\nnpm test\n' > .husky/pre-push \
+      && chmod +x .husky/pre-push && git config core.hooksPath .husky )
+
+  run_install_check "$spoke"; rc=$?
+  assert "i16: unchained foreign hooksPath fails --check" test "$rc" -ne 0
+  assert "i16: … reported as not wired" grep -qF 'pre-push hook not wired' "$LOG"
+  assert "i16: … with a husky example" grep -qF 'e.g. husky' "$LOG"
+
+  printf '.githooks/pre-push "$@" || exit $?\n' >> "$spoke/.husky/pre-push"
+  run_install_check "$spoke"; rc=$?
+  assert "i16: chained foreign hooksPath passes --check" test "$rc" -eq 0
+  assert "i16: … reported as chained" grep -qF '.husky/pre-push chains .githooks/pre-push' "$LOG"
+}
+
+# Setting core.hooksPath over live .git/hooks hooks silently disables them.
+test_install_keeps_live_git_hooks() {
+  local spoke="$WORK/i17-spoke" hooks rc
+  make_installed_spoke "$spoke"
+  hooks="$(cd "$spoke" && git rev-parse --git-path hooks)"
+  printf '#!/bin/sh\ntouch "$(git rev-parse --show-toplevel)/pre-commit-ran"\n' > "$spoke/$hooks/pre-commit"
+  chmod +x "$spoke/$hooks/pre-commit"
+
+  LOG="$spoke.install.log"
+  ( cd "$spoke" && env -i HOME="$WORK/nohome" PATH="$WORK/bin:$PATH" \
+      bash scripts/review-install.sh ) > "$LOG" 2>&1; rc=$?
+  assert     "i17: install does not report ready" test "$rc" -ne 0
+  assert     "i17: names the live hook" grep -qF 'live hooks (pre-commit)' "$LOG"
+  assert_not "i17: core.hooksPath left unset" sh -c 'cd "$1" && git config --get core.hooksPath' _ "$spoke"
+  ( cd "$spoke" && git -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m probe ) >/dev/null 2>&1
+  assert     "i17: the live hook still runs" test -f "$spoke/pre-commit-ran"
+}
+
 # `git push origin HEAD~1:refs/heads/feature` hands the hook a commit
 # expression as <local ref>; selecting branches by it matched no refs/heads/*
 # and skipped the check, so REVIEW_STRICT could not block that push.
@@ -1502,6 +1555,85 @@ test_prepush_skips_a_sha256_deletion() {
   assert "h4: … for want of a verdict" grep -qF 'feature — no review verdict found' "$out"
 }
 
+# A hook that never runs looks exactly like one that ran and found the verdict
+# current, so every review run says when this clone would not run it. A
+# warning only: the run's exit code and `complete` must not move.
+hook_repo() { # hook_repo <dir> <stubdir> — make_repo plus the kit hook and one change
+  make_repo "$1"; mkdir -p "$2"
+  printf '{"findings":[]}' > "$2/correctness.json"
+  ( cd "$1" && mkdir -p .githooks && cp "$KIT/.githooks/pre-push" .githooks/ \
+      && chmod +x .githooks/pre-push && printf 'change\n' >> src.txt \
+      && git add -A && git commit -qm change )
+}
+
+assert_hook_quiet() { # assert_hook_quiet <id> <repo>
+  assert     "$1: run completed" jq -e '.complete == true' "$2/.review/findings.json"
+  assert_not "$1: no hook warning" grep -qF 'pre-push hook not wired' "$LOG"
+  assert_not "$1: no hook line in findings.md" grep -qF 'Pre-push hook not wired' "$2/.review/findings.md"
+}
+
+test_review_warns_when_hook_unwired() {
+  local repo="$WORK/h5" stub="$WORK/h5-stub" rc
+  hook_repo "$repo" "$stub"
+
+  run_review "$repo" "$stub" --lenses correctness; rc=$?
+  assert "h5: unset hooksPath warns" grep -qF 'core.hooksPath is unset' "$LOG"
+  assert "h5: … naming the fix" grep -qF 'fix: git config core.hooksPath .githooks' "$LOG"
+  assert "h5: … and says so in findings.md" grep -qF 'Pre-push hook not wired' "$repo/.review/findings.md"
+  assert "h5: exit code unchanged" test "$rc" -eq 0
+  assert "h5: complete unchanged" jq -e '.complete == true' "$repo/.review/findings.json"
+
+  ( cd "$repo" && git config core.hooksPath .githooks )
+  run_review "$repo" "$stub" --lenses correctness
+  assert_hook_quiet h5 "$repo"
+
+  ( cd "$repo" && git config core.hooksPath "$repo/.githooks" )
+  run_review "$repo" "$stub" --lenses correctness
+  assert_hook_quiet "h5 (absolute path)" "$repo"
+
+  ( cd "$repo" && chmod -x .githooks/pre-push )
+  run_review "$repo" "$stub" --lenses correctness
+  assert "h5: a non-executable hook warns" grep -qF 'chmod +x .githooks/pre-push' "$LOG"
+}
+
+test_review_warns_when_hooks_path_points_elsewhere() {
+  local repo="$WORK/h6" stub="$WORK/h6-stub" rc
+  hook_repo "$repo" "$stub"
+  ( cd "$repo" && mkdir -p .husky && printf '#!/bin/sh\nnpm test\n' > .husky/pre-push \
+      && chmod +x .husky/pre-push && git config core.hooksPath .husky )
+
+  run_review "$repo" "$stub" --lenses correctness; rc=$?
+  assert "h6: unchained foreign hooksPath warns" grep -qF "core.hooksPath is '.husky'" "$LOG"
+  assert "h6: … naming the chain command" grep -qF '>> .husky/pre-push' "$LOG"
+  assert "h6: exit code unchanged" test "$rc" -eq 0
+  assert "h6: complete unchanged" jq -e '.complete == true' "$repo/.review/findings.json"
+
+  printf '# .githooks/pre-push\n' >> "$repo/.husky/pre-push"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "h6: a commented-out chain is not a chain" grep -qF 'pre-push hook not wired' "$LOG"
+
+  printf '.githooks/pre-push "$@" || exit $?\n' >> "$repo/.husky/pre-push"
+  run_review "$repo" "$stub" --lenses correctness
+  assert_hook_quiet "h6 (chained)" "$repo"
+
+  # husky 9 points hooksPath at .husky/_, whose stubs run .husky/<hook>
+  ( cd "$repo" && mkdir -p .husky/_ && : > .husky/_/h \
+      && printf '#!/bin/sh\n. "$(dirname "$0")/h"\n' > .husky/_/pre-push \
+      && chmod +x .husky/_/pre-push && git config core.hooksPath .husky/_ )
+  run_review "$repo" "$stub" --lenses correctness
+  assert_hook_quiet "h6 (husky 9, chained)" "$repo"
+}
+
+test_review_quiet_when_git_hooks_chain() {
+  local repo="$WORK/h7" stub="$WORK/h7-stub" hooks
+  hook_repo "$repo" "$stub"
+  hooks="$(cd "$repo" && git rev-parse --git-path hooks)"
+  printf '#!/bin/sh\n.githooks/pre-push "$@" || exit $?\n' > "$repo/$hooks/pre-push"
+  chmod +x "$repo/$hooks/pre-push"
+  run_review "$repo" "$stub" --lenses correctness
+  assert_hook_quiet "h7 (chained from .git/hooks)" "$repo"
+}
+
 # A destination that denies listing looks empty to `ls -A`, and empty is the one
 # state this guard lets through — into the rm -rf of commands/skills/scripts.
 test_make_plugin_refuses_an_unlistable_destination() {
@@ -1617,6 +1749,7 @@ run_tests \
   test_deletions_are_not_unreadable \
   test_fail_on_gate_keeps_its_report \
   test_spec_selecting_nothing_fails \
+  test_empty_base_ref_dies \
   test_spec_path_with_space \
   test_gitleaks_scans_branch_history \
   test_gitleaks_fatal_is_scan_failed \
@@ -1654,10 +1787,15 @@ run_tests \
   test_init_respects_other_config_spellings \
   test_install_check_reports_gate_state \
   test_install_check_fails_on_unwired_gate \
+  test_install_check_foreign_hooks_path \
+  test_install_keeps_live_git_hooks \
   test_prepush_judges_destination_ref \
   test_prepush_reads_the_verdict_header \
   test_prepush_rejects_a_spec_verdict \
   test_prepush_skips_a_sha256_deletion \
+  test_review_warns_when_hook_unwired \
+  test_review_warns_when_hooks_path_points_elsewhere \
+  test_review_quiet_when_git_hooks_chain \
   test_make_plugin_refuses_an_unlistable_destination \
   test_make_plugin_failed_rebuild_keeps_previous_build
 
