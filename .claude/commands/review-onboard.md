@@ -24,25 +24,26 @@ mutable branch, the next line executes what it fetched as you, and anything
 that moves `main` — a force-push, a compromised account — chooses what runs.
 Read what you got first, or pin harder with `REVIEW_KIT_REF`.
 
+The block resolves one tag listing, so a tag cannot move between lookups. It
+takes the highest numeric release tag (the updater's selector, so a vNext or
+an rc cannot outrank a release), a tag named in `REVIEW_KIT_REF` resolved to
+its commit, or a full SHA as given — and stops on anything else, a branch
+included. The block holds no comments: interactive zsh does not treat `#` as
+one by default.
+
 ```bash
 (
   KIT=https://github.com/theunisdk/codex-review-kit
-  # One listing for every lookup below, so a tag cannot move between them.
   TAGS=$(git ls-remote --tags "$KIT") || { echo "stopped: cannot reach $KIT" >&2; exit 1; }
-  # Same selector the updater uses: numeric release tags only, so a vNext or an
-  # rc cannot outrank the latest release in a command that executes what it fetched.
   LATEST=$(printf '%s\n' "$TAGS" | sed -n 's|.*refs/tags/v\([0-9][0-9.]*\)$|\1|p' \
     | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
   REF="${REVIEW_KIT_REF:-${LATEST:+v$LATEST}}"
   [ -n "$REF" ] || { echo "stopped: no release tag on $KIT — set REVIEW_KIT_REF" >&2; exit 1; }
-  # A full SHA is used as given; a tag resolves to its commit (an annotated
-  # tag's commit is its ^{} line). Anything else — a branch — stops here.
   if printf '%s\n' "$REF" | grep -Eqx '[0-9a-f]{40}'; then SHA=$REF
   else SHA=$(printf '%s\n' "$TAGS" | awk -v t="refs/tags/$REF" \
       '$2 == t {s=$1} $2 == (t "^{}") {p=$1} END {print (p != "" ? p : s)}')
   fi
   [ -n "$SHA" ] || { echo "stopped: '$REF' is neither a tag on $KIT nor a full commit SHA" >&2; exit 1; }
-  # A private temp file means nothing stale or planted at a fixed path gets run.
   RU=$(mktemp) \
     && curl -fsSL "https://raw.githubusercontent.com/theunisdk/codex-review-kit/$SHA/scripts/review-update.sh" -o "$RU" \
     && less "$RU" \

@@ -442,6 +442,7 @@ EOF
   chmod +x "$WORK/bootbin/curl" "$WORK/bootbin/less"
   bootstrap_block "$KIT/.claude/commands/review-onboard.md" \
     | sed "s|^\\( *\\)KIT=https://.*|\\1KIT=file://$hub|" > "$dir.boot.sh"
+  grep -q "KIT=file://" "$dir.boot.sh" || { echo "run_bootstrap: KIT not redirected" > "$LOG"; return 99; }
   ( cd "$dir" && env -i HOME="$WORK/nohome" PATH="$WORK/bootbin:$PATH" BOOT_HUB="$hub" \
       REVIEW_KIT_URL="file://$hub" "$@" bash "$dir.boot.sh" ) > "$LOG" 2>&1
 }
@@ -453,19 +454,22 @@ make_boot_hub() { # make_boot_hub <dir> — annotated v0.9.0, untagged tip, stub
     cp -R "$KIT/templates" .
     printf '#!/bin/sh\necho INSTALL-RAN\n' > scripts/review-install.sh
     printf 'MARKER: nine\n' >> REVIEW.md && git add -A && git commit -qm nine \
-      && git tag -a -m nine v0.9.0
+      && git -c tag.gpgSign=false tag -a -m nine v0.9.0
     printf 'MARKER: tip\n'  >> REVIEW.md && git commit -aqm tip
   )
 }
 
 # REVIEW.md and /review-onboard carry the same no-clone bootstrap; the copy
-# nobody tests must not drift from the one that is.
+# nobody tests must not drift from the one that is. It gets pasted into
+# interactive shells, and zsh there does not treat `#` as a comment.
 test_bootstrap_block_matches_in_both_docs() {
   local a b
   a="$(bootstrap_block "$KIT/.claude/commands/review-onboard.md")"
   b="$(bootstrap_block "$KIT/REVIEW.md")"
   assert "b1: review-onboard has the bootstrap" test -n "$a"
   assert "b1: REVIEW.md carries the same bootstrap" test "$a" = "$b"
+  assert_not "b1: no comment lines (interactive zsh runs them)" \
+    grep -qE '^[[:space:]]*#' <<< "$a"
 }
 
 # The bootstrap installs a release tag — an annotated one resolved to its

@@ -63,7 +63,7 @@ if [ -n "${REVIEW_KIT_DIR:-}" ] && [ -d "$REVIEW_KIT_DIR" ]; then
 elif [ -d "$HOME/dev/private/codex-review-kit/scripts" ]; then
   KIT="$HOME/dev/private/codex-review-kit"; KIT_FROM="local clone"
 else
-  TAGS="$(git ls-remote --tags "$KIT_GIT_URL" 2>/dev/null)" || {
+  TAGS="$(git ls-remote --tags "$KIT_GIT_URL")" || {
     echo "error: cannot reach $KIT_GIT_URL — check the connection and the URL" >&2
     exit 1; }
   if [ -z "$KIT_REF" ]; then
@@ -84,7 +84,7 @@ else
   echo "no local hub found — fetching $KIT_GIT_URL @ $KIT_REF" >&2
   git -C "$TMP_CLONE" init -q
   git -C "$TMP_CLONE" fetch --quiet --depth 1 "$KIT_GIT_URL" "$FETCH_REF" || {
-    echo "error: cannot fetch '$KIT_REF' from $KIT_GIT_URL — needs a tag or full commit SHA" >&2
+    echo "error: cannot fetch '$KIT_REF' from $KIT_GIT_URL — not on the hub, or the fetch failed" >&2
     exit 1; }
   git -C "$TMP_CLONE" checkout --quiet --detach FETCH_HEAD
   KIT="$TMP_CLONE"; KIT_FROM="network"
