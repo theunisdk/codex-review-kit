@@ -998,6 +998,35 @@ test_make_plugin_refuses_an_unlistable_destination() {
   assert "m1: existing content survives" test -f "$dest/commands/keep.md"
 }
 
+# A rebuild that fails on a missing input must not have already deleted the
+# previous build: README.md and the marker would survive and pass for a plugin.
+test_make_plugin_failed_rebuild_keeps_previous_build() {
+  local hub="$WORK/m2-hub" dest="$WORK/m2-out/plugin" out="$WORK/m2.log" rc=0
+  make_hub "$hub"
+  mkdir -p "$WORK/m2-out"
+  ( cd "$hub" && bash scripts/make-plugin.sh "$dest" ) > "$out" 2>&1
+  rc=$?
+  assert "m2: first build succeeds" test "$rc" -eq 0
+
+  rm -rf "$hub/.claude/skills/pre-pr-review"
+  ( cd "$hub" && bash scripts/make-plugin.sh "$dest" ) > "$out" 2>&1
+  rc=$?
+  assert "m2: rebuild with the skill missing fails" test "$rc" -ne 0
+  assert "m2: failure names the missing skill" grep -qF 'kit skill missing' "$out"
+  assert "m2: previous skill survives" test -f "$dest/skills/pre-pr-review/SKILL.md"
+  assert "m2: previous runner survives" test -f "$dest/scripts/review.sh"
+  assert "m2: previous review assets survive" test -f "$dest/review/schema.json"
+
+  git -C "$hub" checkout -q -- .claude/skills
+  rm "$hub/.review/adjudication.md"
+  ( cd "$hub" && bash scripts/make-plugin.sh "$dest" ) > "$out" 2>&1
+  rc=$?
+  assert "m2: rebuild failing mid-copy fails" test "$rc" -ne 0
+  assert "m2: mid-copy failure keeps the previous build" test -f "$dest/review/adjudication.md"
+  assert "m2: failed builds leave no staging behind" \
+    test "$(ls -A "$WORK/m2-out")" = plugin
+}
+
 run_tests() {
   local t
   for t in "$@"; do
@@ -1036,7 +1065,8 @@ run_tests \
   test_prepush_reads_the_verdict_header \
   test_prepush_rejects_a_spec_verdict \
   test_prepush_skips_a_sha256_deletion \
-  test_make_plugin_refuses_an_unlistable_destination
+  test_make_plugin_refuses_an_unlistable_destination \
+  test_make_plugin_failed_rebuild_keeps_previous_build
 
 echo
 if [ "$FAILURES" -gt 0 ]; then
