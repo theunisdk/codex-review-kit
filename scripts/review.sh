@@ -43,11 +43,26 @@ LENSES_FLAG=0
 
 [ -f "$REPO_ROOT/.review/config.sh" ] && . "$REPO_ROOT/.review/config.sh"
 
+# Any failed exit before a report is written must not leave the previous run's
+# report — and its complete:true — standing in for this one.
+STARTED=0; REPORT_WRITTEN=0
+write_aborted_report() {
+  local rc=$?
+  [ "$STARTED" = 1 ] && [ "$REPORT_WRITTEN" = 0 ] || return
+  printf '{"findings":[],"lenses_failed":[],"complete":false}\n' > .review/findings.json
+  printf '# Codex pre-PR review\n\n> **INCOMPLETE — the run stopped (rc=%s) before producing a report.** Nothing was reviewed.\n' \
+    "$rc" > .review/findings.md
+}
+trap write_aborted_report EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # --- args ------------------------------------------------------------------
 while [ $# -gt 0 ]; do
   case "$1" in
     --uncommitted)  MODE="uncommitted" ;;
-    --spec)         MODE="spec"; SPEC_PATHS="$SPEC_PATHS $2"; shift ;;
+    --spec)         MODE="spec"; SPEC_PATHS="$SPEC_PATHS$2
+"; shift ;;
     --lenses)       LENSES="$2"; LENSES_FLAG=1; shift ;;
     --effort)       EFFORT="$2"; shift ;;
     --model)        MODEL="$2"; shift ;;
@@ -66,6 +81,8 @@ done
 
 OUT=".review/raw"
 rm -rf "$OUT"; mkdir -p "$OUT"
+rm -f .review/findings.json .review/findings.md
+STARTED=1
 
 # --- preflight -------------------------------------------------------------
 need_cmd git
@@ -92,32 +109,57 @@ if [ "$MODE" = "spec" ]; then
 fi
 
 # --- resolve the change set ------------------------------------------------
+# NUL-delimited at the git boundary: without -z git C-quotes non-ASCII, tab, quote and
+# backslash names, and a quoted name matches no file on disk.
+nul_to_lines() { local f; while IFS= read -r -d '' f; do printf '%s\n' "$f"; done; }
+
 if [ "$MODE" = "spec" ]; then
   : > "$OUT/changed-files.txt"
-  for p in $SPEC_PATHS; do
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
     if [ -d "$p" ]; then
-      find "$p" -name '*.md' -type f >> "$OUT/changed-files.txt"
+      find "$p" -name '*.md' -type f > "$OUT/spec-found.tmp" || die "cannot read spec directory: $p"
+      [ -s "$OUT/spec-found.tmp" ] || die "no .md spec documents in: $p"
+      cat "$OUT/spec-found.tmp" >> "$OUT/changed-files.txt"; rm -f "$OUT/spec-found.tmp"
     elif [ -f "$p" ]; then
       printf '%s\n' "$p" >> "$OUT/changed-files.txt"
     else
       die "spec path not found: $p"
     fi
-  done
+  done <<EOF
+$SPEC_PATHS
+EOF
+  [ -s "$OUT/changed-files.txt" ] || die "no spec paths given"
   RANGE_LABEL="spec documents: $(tr '\n' ' ' < "$OUT/changed-files.txt")"
 elif [ "$MODE" = "uncommitted" ]; then
-  git diff HEAD > "$OUT/diff.patch"
-  git ls-files --others --exclude-standard | while IFS= read -r f; do
-    [ -f "$f" ] && git diff --no-index /dev/null "$f" >> "$OUT/diff.patch" 2>/dev/null
-  done
-  git diff HEAD --name-only > "$OUT/changed-files.txt"
-  git ls-files --others --exclude-standard >> "$OUT/changed-files.txt"
+  DIFF_BASE="HEAD"
+  git diff HEAD > "$OUT/diff.patch" || die "git diff HEAD failed"
+  git diff HEAD --name-only -z | nul_to_lines > "$OUT/changed-files.txt" \
+    || die "could not list changed files"
+  git ls-files --others --exclude-standard -z 2> "$OUT/untracked.err" | nul_to_lines > "$OUT/untracked.txt" \
+    || die "could not list untracked files"
+  # an unreadable directory is a warning and rc 0 — its files are simply never listed
+  [ -s "$OUT/untracked.err" ] && die "could not list every untracked file: $(head -3 "$OUT/untracked.err")"
+  rm -f "$OUT/untracked.err"
+  while IFS= read -r f; do
+    case "$f" in "$OUT"/*) continue ;; esac
+    # a nested repository or a symlinked directory: --no-index exits 1 and diffs nothing
+    [ -d "$f" ] && { printf '%s\n' "$f" >> "$OUT/unreadable.txt"; continue; }
+    git diff --no-index -- /dev/null "$f" >> "$OUT/diff.patch" 2>/dev/null
+    # --no-index exits 1 when the files differ; anything above that is a failure
+    [ $? -le 1 ] || printf '%s\n' "$f" >> "$OUT/unreadable.txt"
+  done < "$OUT/untracked.txt"
+  cat "$OUT/untracked.txt" >> "$OUT/changed-files.txt"
+  rm -f "$OUT/untracked.txt"
   RANGE_LABEL="uncommitted changes in working tree"
 else
   [ -n "$BASE" ] || BASE="$(detect_base_branch)"
   git rev-parse --verify "$BASE" >/dev/null 2>&1 || die "base ref not found: $BASE"
   MERGE_BASE="$(git merge-base "$BASE" HEAD)" || die "no merge base with $BASE"
-  git diff "$MERGE_BASE"...HEAD > "$OUT/diff.patch"
-  git diff "$MERGE_BASE"...HEAD --name-only > "$OUT/changed-files.txt"
+  DIFF_BASE="$MERGE_BASE"
+  git diff "$MERGE_BASE"...HEAD > "$OUT/diff.patch" || die "git diff failed"
+  git diff "$MERGE_BASE"...HEAD --name-only -z | nul_to_lines > "$OUT/changed-files.txt" \
+    || die "could not list changed files"
   git log --format='%h %s' "$MERGE_BASE"..HEAD > "$OUT/commits.txt"
   RANGE_LABEL="$BASE...$(git rev-parse --abbrev-ref HEAD) (merge-base ${MERGE_BASE:0:10})"
 fi
@@ -134,6 +176,23 @@ else
     "$OUT/changed-files.txt" | sort -u > "$OUT/changed-files.tmp"
 fi
 mv "$OUT/changed-files.tmp" "$OUT/changed-files.txt"
+
+# A listed path that is neither readable on disk nor a deletion was never reviewed.
+# In branch mode HEAD is the reviewed tree, so a path HEAD still has is not deleted.
+while IFS= read -r f; do
+  [ -L "$f" ] && continue
+  if [ -e "$f" ]; then
+    [ -r "$f" ] && continue
+  elif [ -n "${DIFF_BASE:-}" ] && git rev-parse -q --verify "$DIFF_BASE:$f" >/dev/null; then
+    [ "$MODE" = branch ] && git rev-parse -q --verify "HEAD:$f" >/dev/null || continue
+  fi
+  printf '%s\n' "$f" >> "$OUT/unreadable.txt"
+done < "$OUT/changed-files.txt"
+if [ -s "$OUT/unreadable.txt" ]; then
+  sort -u -o "$OUT/unreadable.txt" "$OUT/unreadable.txt"
+  warn "$(grep -c . < "$OUT/unreadable.txt") changed path(s) could not be read — the run will be marked incomplete:"
+  sed 's/^/  /' "$OUT/unreadable.txt" >&2
+fi
 CHANGED_COUNT="$(grep -c . < "$OUT/changed-files.txt" || true)"
 DIFF_LINES=0
 [ -f "$OUT/diff.patch" ] && DIFF_LINES="$(wc -l < "$OUT/diff.patch" | tr -d ' ')"
@@ -146,6 +205,7 @@ if [ "${CHANGED_COUNT:-0}" -eq 0 ]; then
   # to prevent.
   printf '{"findings":[],"lenses_failed":[],"complete":true}\n' > .review/findings.json
   printf '# Codex pre-PR review\n\nNo changes to review against %s.\n' "$RANGE_LABEL" > .review/findings.md
+  REPORT_WRITTEN=1
   exit 0
 fi
 
@@ -170,7 +230,6 @@ fi
   if [ "$MODE" = "spec" ]; then
     echo "- Documents under review (cite findings against these files' line numbers):"
     sed 's/^/  - `/;s/$/`/' "$OUT/changed-files.txt"
-    echo "- House rules: \`.review/rubric.md\` — a spec that would violate them is a finding."
   else
     echo "- Files changed: $CHANGED_COUNT"
     echo "- Unified diff: \`.review/raw/diff.patch\`"
@@ -180,6 +239,9 @@ fi
   [ -s "$OUT/analyzers.txt" ] && echo "- Static analyzer output already collected: \`.review/raw/analyzers.txt\` (do NOT re-report anything a linter already flagged there)"
   echo
 } > "$OUT/context.md"
+
+[ ! -s .review/rubric.md ] || [ -r .review/rubric.md ] || die "cannot read .review/rubric.md"
+[ -s .review/rubric.md ] || warn "no .review/rubric.md — lenses will not see this repository's house rules (run /review-onboard)"
 
 # --- launch lenses ---------------------------------------------------------
 pids=""; running=0; launched=""
@@ -207,6 +269,12 @@ for lens in $LENSES; do
     echo; echo "---"; echo
     cat "$OUT/context.md"
     echo "---"; echo
+    if [ -s .review/rubric.md ]; then
+      echo "## House rules (\`.review/rubric.md\` — a violation is a finding for every lens)"
+      echo
+      cat .review/rubric.md
+      echo; echo "---"; echo
+    fi
     if [ -s .review/learnings-shared.md ]; then
       echo "## Kit-wide learnings (shared across repositories — obey these)"
       echo
@@ -298,6 +366,7 @@ if [ "$ok_lenses" -eq 0 ]; then
     > .review/findings.json
   printf '# Codex pre-PR review\n\n> **INCOMPLETE — every lens failed.** No area of this diff was reviewed.\n> Check `%s/log-*.txt`.\n' \
     "$OUT" > .review/findings.md
+  REPORT_WRITTEN=1
   die "every lens failed — check $OUT/log-*.txt"
 fi
 
@@ -325,11 +394,14 @@ jq -s --argjson th "$CONFIDENCE_MIN" '
 # cannot read a partial run as a complete review.
 failed_lenses="$failed_lenses${missing_lenses:-}"
 FAILED_LIST="$(printf '%s' "${failed_lenses# }")"
-jq --arg failed "$FAILED_LIST" '
-  . + { lenses_failed: ($failed | if . == "" then [] else split(" ") end) }
-  | . + { complete: ((.lenses_failed | length) == 0) }
+UNREADABLE_COUNT=0
+[ -s "$OUT/unreadable.txt" ] && UNREADABLE_COUNT="$(grep -c . < "$OUT/unreadable.txt")"
+jq --arg failed "$FAILED_LIST" --arg unreadable "$(cat "$OUT/unreadable.txt" 2>/dev/null)" '
+  . + { lenses_failed: ($failed | if . == "" then [] else split(" ") end),
+        unreadable_paths: ($unreadable | split("\n") | map(select(. != ""))) }
+  | . + { complete: ((.lenses_failed | length) == 0 and (.unreadable_paths | length) == 0) }
 ' .review/findings.json > .review/findings.json.tmp \
-  && mv .review/findings.json.tmp .review/findings.json
+  && mv .review/findings.json.tmp .review/findings.json || die "could not finalise findings.json"
 
 TOTAL="$(jq '.findings | length' .review/findings.json)"
 
@@ -347,8 +419,13 @@ TOTAL="$(jq '.findings | length' .review/findings.json)"
     echo "> relying on this report."
     echo
   fi
+  if [ "$UNREADABLE_COUNT" -gt 0 ]; then
+    echo "> **INCOMPLETE REVIEW — $UNREADABLE_COUNT changed path(s) could not be read**, so no lens saw them:"
+    sed 's/^/> - `/;s/$/`/' "$OUT/unreadable.txt"
+    echo
+  fi
   if [ "$(jq '.findings | length' .review/findings.json)" -eq 0 ]; then
-    if [ -n "$FAILED_LIST" ]; then
+    if [ -n "$FAILED_LIST" ] || [ "$UNREADABLE_COUNT" -gt 0 ]; then
       echo "_No findings — but the run was incomplete, so this is not a clean result._"
     else
       echo "_No findings above the confidence threshold._"
@@ -369,11 +446,13 @@ TOTAL="$(jq '.findings | length' .review/findings.json)"
     ' .review/findings.json
   fi
 } > .review/findings.md
+REPORT_WRITTEN=1
 
 # --- summary ---------------------------------------------------------------
 echo
 info "$TOTAL finding(s) → .review/findings.json  ·  .review/findings.md"
 [ -z "$FAILED_LIST" ] || warn "INCOMPLETE: lens(es) failed; their areas are unreviewed —$failed_lenses"
+[ "$UNREADABLE_COUNT" -eq 0 ] || warn "INCOMPLETE: $UNREADABLE_COUNT changed path(s) could not be read — see $OUT/unreadable.txt"
 jq -r '
   (.findings | group_by(.severity) | map({(.[0].severity): length}) | add // {}) as $c
   | ["critical","high","medium","low"] | map(. + ": " + (($c[.] // 0)|tostring)) | join("   ")

@@ -13,8 +13,9 @@ reviewer covers everything else.
 # Method — do not skip this
 
 1. **Read the spec document(s) in full**, listed in the context block.
-2. **Read `.review/rubric.md`** — the repository's house rules. A spec that
-   would require violating one is a finding even though no code exists yet.
+2. **Read the house rules** (`.review/rubric.md`, included below when the
+   repository has them). A spec that would require violating one is a finding
+   even though no code exists yet.
 3. **Verify every claim the spec makes about the existing codebase** by
    reading the actual code. "Extend the existing X", "reuse Y", "the table
    already has Z" — each is either confirmed with a file:line you read, or it
