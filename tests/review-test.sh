@@ -513,9 +513,10 @@ assert_js_sections_nonempty() { # assert_js_sections_nonempty <id> <tsc title>
 }
 
 # One case per package manager, by packageManager field and by lockfile. The
-# field outranks a stray lockfile. yarn classic and bun call node_modules/.bin
-# directly, so a package.json script named like the tool cannot stand in for
-# it. Regression for #18 (npx assumed everywhere).
+# field outranks a stray lockfile. yarn classic and bun must call
+# node_modules/.bin directly (their `run` prefers a same-named package.json
+# script): the stub resolves only via the runner named in $ASTUB/runner, so a
+# `yarn run`/`bun run` call fails these cases. Regression for #18.
 test_js_runner_follows_package_manager() {
   local id setup runner want
   while IFS='~' read -r id setup runner want; do
@@ -534,7 +535,7 @@ test_js_runner_follows_package_manager() {
   done <<'EOF'
 j1~printf '{"packageManager":"pnpm@9.1.0"}' > package.json; : > package-lock.json~pnpm~pnpm exec eslint
 j2~printf '{"packageManager":"yarn@4.1.0+sha512.abc"}' > package.json~yarn~yarn exec eslint
-j3~printf '{"packageManager":"yarn@1.22.19","scripts":{"eslint":"echo SCRIPT"}}' > package.json; bin_stubs~bin~node_modules/.bin/eslint
+j3~printf '{"packageManager":"yarn@1.22.19"}' > package.json; bin_stubs~bin~node_modules/.bin/eslint
 j4~printf '{"packageManager":"bun@1.1.0"}' > package.json; bin_stubs~bin~node_modules/.bin/eslint
 j5~printf '{"packageManager":"npm@10.2.0"}' > package.json~npx~npx --no-install eslint
 j6~printf '{}' > package.json; : > pnpm-lock.yaml~pnpm~pnpm exec eslint
@@ -586,6 +587,9 @@ test_js_eslint_warnings_keep_clean_line() {
   printf 'app.ts:1:1  warning  prefer-const\n' > "$WORK/j20-stub/eslint.out"
   js_review j20 "printf '{}' > package.json; : > pnpm-lock.yaml"
   assert "j20: clean line present" grep -qF 'eslint: no errors in 1 file(s)' "$JS_REPORT"
+  assert "j20: clean line leads the warnings" \
+    sh -c 'section_body() { awk -v h="### eslint" "\$0 == h { on = 1; next } /^### / { on = 0 } on" "$1"; }
+           [ "$(section_body "$1" | grep . | head -n 1)" = "eslint: no errors in 1 file(s)" ]' _ "$JS_REPORT"
   assert "j20: warning kept" grep -qF 'warning  prefer-const' "$JS_REPORT"
 }
 
@@ -599,13 +603,14 @@ test_js_tsc_findings_vs_failure() {
   assert_not "j17: type error is not FAILED" grep -qF 'tsc --noEmit FAILED' "$JS_REPORT"
 
   printf 'pnpm\n' > "$WORK/j18-stub/runner"; printf '1\n' > "$WORK/j18-stub/tsc.rc"
-  printf "error TS5023: Unknown compiler option 'bogus'.\n" > "$WORK/j18-stub/tsc.out"
+  printf "error TS18003: No inputs were found in config file 'tsconfig.json'.\n" > "$WORK/j18-stub/tsc.out"
   js_review j18 "printf '{}' > package.json; : > pnpm-lock.yaml; printf '{}' > tsconfig.json"
   assert "j18: config error is FAILED" grep -qF 'tsc --noEmit FAILED (rc=1)' "$JS_REPORT"
 }
 
-# TypeScript < 5.6 rejects --build --noEmit (TS5094); fall back to plain --build.
-test_js_tsc_build_falls_back_before_ts56() {
+# TypeScript < 5.6 rejects --build --noEmit (TS5094). Plain --build would write
+# build output into the tree, so it is a named skip instead.
+test_js_tsc_build_skipped_before_ts56() {
   mkdir -p "$WORK/j19-stub"
   printf 'pnpm\n' > "$WORK/j19-stub/runner"; printf '0\n' > "$WORK/j19-stub/tsc.rc"
   cat > "$WORK/j19-stub/tsc.sh" <<'EOF'
@@ -615,8 +620,8 @@ esac
 exit 0
 EOF
   js_review j19 "printf '{}' > package.json; : > pnpm-lock.yaml; printf '{\"references\":[{\"path\":\"pkg\"}]}' > tsconfig.json"
-  assert "j19: retried as tsc --build" grep -qxF 'pnpm exec tsc --build --pretty false' "$ASTUB/runner.calls"
-  assert "j19: fallback reported clean" grep -qF 'tsc --build: no errors' "$JS_REPORT"
+  assert_not "j19: never runs an emitting tsc --build" grep -qxF 'pnpm exec tsc --build --pretty false' "$ASTUB/runner.calls"
+  assert     "j19: named skip" grep -qF 'analyzer skipped: tsc --build --noEmit needs TypeScript >= 5.6' "$JS_REPORT"
 }
 
 # No root package.json used to drop the whole JS section — indistinguishable
@@ -1319,7 +1324,7 @@ run_tests \
   test_js_clean_run_and_tsc_build \
   test_js_eslint_warnings_keep_clean_line \
   test_js_tsc_findings_vs_failure \
-  test_js_tsc_build_falls_back_before_ts56 \
+  test_js_tsc_build_skipped_before_ts56 \
   test_js_without_package_json_is_named \
   test_update_reports_source_and_revision \
   test_update_marks_a_dirty_local_hub \

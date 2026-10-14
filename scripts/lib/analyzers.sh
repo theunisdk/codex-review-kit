@@ -58,7 +58,7 @@ collect_analyzer_output() {
     if [ -z "$why" ]; then
       printf '%s\n' "$gl_out" | head -100 >> "$report"
       if [ "$(printf '%s\n' "$gl_out" | wc -l | tr -d ' ')" -gt 100 ]; then
-        printf '… (truncated)\n%s\n' "$(printf '%s\n' "$gl_out" | tail -n 3)" >> "$report"
+        printf '… (truncated)\n%s\n' "$(printf '%s\n' "$gl_out" | tail -n +101 | tail -n 3)" >> "$report"
       fi
     else
       printf 'SCAN FAILED (%s) — secrets were NOT checked:\n%s\n' \
@@ -203,11 +203,8 @@ collect_analyzer_output() {
           # shellcheck disable=SC2086
           tool_out="$(_js_run tsc $tsc_args --pretty false 2>&1)"; tool_rc=$?
           if [ "$tool_rc" -ne 0 ] && grep -q 'error TS5094' <<< "$tool_out"; then
-            # TypeScript < 5.6 rejects --noEmit with --build
-            tsc_args="--build"
-            tool_out="$(_js_run tsc $tsc_args --pretty false 2>&1)"; tool_rc=$?
-          fi
-          if [ "$tool_rc" -eq 0 ]; then
+            echo "analyzer skipped: tsc --build --noEmit needs TypeScript >= 5.6 (plain --build writes build output into the tree) — references not type-checked; wire it in .review/analyzers.local.sh" >> "$report"
+          elif [ "$tool_rc" -eq 0 ]; then
             echo "tsc $tsc_args: no errors" >> "$report"
             [ -z "$tool_out" ] || printf '%s\n' "$tool_out" | head -100 >> "$report"
           elif grep -qE '\([0-9]+,[0-9]+\): error TS' <<< "$tool_out"; then
