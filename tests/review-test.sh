@@ -1041,6 +1041,12 @@ test_make_plugin_failed_rebuild_keeps_previous_build() {
   assert "m2: mid-swap failure restores README.md" test -f "$dest/README.md"
   assert "m2: rolled-back swap leaves no staging behind" \
     test "$(ls -A "$WORK/m2-out")" = plugin
+
+  ( cd "$hub" && PATH="$WORK/m2-bin:$PATH" bash scripts/make-plugin.sh "$WORK/m2-out/fresh" ) > "$out" 2>&1
+  rc=$?
+  assert "m2: first build failing mid-swap fails" test "$rc" -ne 0
+  assert "m2: first build cut short leaves no generated entries" \
+    test "$(ls -A "$WORK/m2-out/fresh")" = .make-plugin-generated
 }
 
 run_tests() {

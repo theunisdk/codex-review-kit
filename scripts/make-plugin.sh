@@ -75,6 +75,8 @@ cleanup() {
           echo "error: could not restore the previous build — it is in $STAGE/old" >&2
           return
         fi
+      elif [ ! -e "$OUT/$e" ] && [ ! -L "$OUT/$e" ]; then
+        rm -rf "${DEST:?}/$e"
       fi
     done
   fi
