@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Warn — never block — when pushing a branch whose review verdict is stale.
-# Deliberately non-blocking: a hook that gates on a multi-minute review is a hook
-# you will disable within a week. Set REVIEW_STRICT=1 to make it blocking.
+# Warn when pushing a branch whose review verdict is stale; block only when
+# REVIEW_STRICT=1. Non-blocking by default: a hook that gates on a multi-minute
+# review is a hook you will disable within a week.
 set -uo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)" || exit 0
@@ -13,12 +13,11 @@ cd "$REPO_ROOT" || exit 0
 # branch instead would clear `git push origin other-branch` on the strength of
 # the current branch's verdict, and REVIEW_STRICT would not block it. The
 # verdict is still matched against local_sha — the commit being pushed.
-ZERO="0000000000000000000000000000000000000000"
 stale_refs=""
 
 while read -r _local_ref local_sha remote_ref _remote_sha; do
   [ -n "${remote_ref:-}" ] || continue
-  [ "$local_sha" = "$ZERO" ] && continue          # branch deletion
+  case "$local_sha" in *[!0]*) ;; *) continue ;; esac   # branch deletion (SHA-1 or SHA-256)
   # Branches only, judged by the DESTINATION ref: `git push origin
   # HEAD~1:refs/heads/feature` passes the commit expression as <local ref>, so a
   # refs/heads/* test against it matches nothing and the push goes unchecked.
@@ -36,10 +35,12 @@ while read -r _local_ref local_sha remote_ref _remote_sha; do
     # at whatever length git abbreviated it; a SHA elsewhere is not a verdict, and
     # file mtime says when the file was written, not which commit it judged.
     judged=$(awk -F ' — ' 'NR == 1 {
-      if (NF == 4 && $1 == "# Review verdict" && $3 ~ /^[0-9a-f]+$/ && length($3) >= 4 && length($3) <= 40) print $3
+      if (NF == 4 && $1 == "# Review verdict" && $3 ~ /^[0-9a-f]+$/ && length($3) >= 4 && length($3) <= 64) print $3
       exit
     }' .review/verdict.md)
-    if [ -z "$judged" ] || [ "${local_sha#"$judged"}" = "$local_sha" ]; then
+    if [ -z "$judged" ] && head -n 1 .review/verdict.md | grep -q '^# Spec verdict'; then
+      stale_refs="$stale_refs\n  $branch — spec-mode verdict, not a code review — run /review"
+    elif [ -z "$judged" ] || [ "${local_sha#"$judged"}" = "$local_sha" ]; then
       stale_refs="$stale_refs\n  $branch — verdict does not cover ${local_sha:0:10}"
     fi
   fi

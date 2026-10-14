@@ -728,6 +728,76 @@ test_prepush_reads_the_verdict_header() {
   assert "h2: a SHA in a later header field does not cover it" test "$rc" -ne 0
 }
 
+# /review-spec wrote the same file and header as /review, so a spec review naming
+# HEAD cleared the code-review gate. Spec verdicts now carry their own header and
+# file; a misfiled one is rejected by name, and one beside verdict.md is ignored.
+test_prepush_rejects_a_spec_verdict() {
+  local repo="$WORK/h3" remote="$WORK/h3-remote.git" out="$WORK/h3.push.log" rc=0 short
+  git init -q --bare "$remote"
+  git init -q -b main "$repo"
+  (
+    cd "$repo" || exit 1
+    git config user.email review-test@example.invalid
+    git config user.name review-test
+    git config core.hooksPath .githooks
+    mkdir -p scripts .githooks .review
+    cp "$KIT/.githooks/pre-push" .githooks/
+    cp "$KIT/scripts/review.sh" scripts/
+    printf 'seed\n' > f.txt
+    git add -A && git commit -qm c1
+  )
+  short=$(git -C "$repo" rev-parse --short HEAD)
+
+  printf '# Spec verdict — feature — %s — 2026-01-01\n\nclean\n' "$short" > "$repo/.review/verdict.md"
+  ( cd "$repo" && REVIEW_STRICT=1 git push "$remote" 'HEAD:refs/heads/feature' ) > "$out" 2>&1
+  rc=$?
+  assert "h3: a spec verdict does not clear the code-review gate" test "$rc" -ne 0
+  assert "h3: the hook says the verdict is spec-mode" grep -qF 'feature — spec-mode verdict' "$out"
+
+  printf '# Review verdict — feature — %s — 2026-01-01\n\nclean\n' "$short" > "$repo/.review/verdict.md"
+  ( cd "$repo" && REVIEW_STRICT=1 git push "$remote" 'HEAD:refs/heads/feature2' ) > "$out" 2>&1
+  rc=$?
+  assert "h3: a code verdict naming HEAD still passes" test "$rc" -eq 0
+
+  printf '# Spec verdict — feature — 0000000 — 2026-01-01\n' > "$repo/.review/spec-verdict.md"
+  ( cd "$repo" && REVIEW_STRICT=1 git push "$remote" 'HEAD:refs/heads/feature3' ) > "$out" 2>&1
+  rc=$?
+  assert "h3: a stale spec-verdict.md beside a current verdict passes" test "$rc" -eq 0
+
+  rm "$repo/.review/verdict.md"
+  printf '# Spec verdict — feature — %s — 2026-01-01\n' "$short" > "$repo/.review/spec-verdict.md"
+  ( cd "$repo" && REVIEW_STRICT=1 git push "$remote" 'HEAD:refs/heads/feature4' ) > "$out" 2>&1
+  rc=$?
+  assert "h3: a current spec-verdict.md alone does not clear the gate" test "$rc" -ne 0
+  assert "h3: … because there is no code verdict" grep -qF 'feature4 — no review verdict found' "$out"
+}
+
+# In a SHA-256 repository a deletion's local_sha is 64 zeros; matching only the
+# 40-zero SHA-1 form judged `git push origin :feature` as a push of a commit and
+# blocked it for lack of a verdict.
+test_prepush_skips_a_sha256_deletion() {
+  local repo="$WORK/h4" out="$WORK/h4.push.log" rc=0 z40 z64
+  git init -q -b main "$repo"
+  mkdir -p "$repo/scripts" "$repo/.githooks"
+  cp "$KIT/.githooks/pre-push" "$repo/.githooks/"
+  cp "$KIT/scripts/review.sh" "$repo/scripts/"
+  z40=0000000000000000000000000000000000000000
+  z64=0000000000000000000000000000000000000000000000000000000000000000
+  ( cd "$repo" && printf '(delete) %s refs/heads/feature %s\n' "$z64" "$z64" \
+      | REVIEW_STRICT=1 bash .githooks/pre-push origin url ) > "$out" 2>&1
+  rc=$?
+  assert "h4: a SHA-256 branch deletion is not gated" test "$rc" -eq 0
+  ( cd "$repo" && printf '(delete) %s refs/heads/feature %s\n' "$z40" "$z40" \
+      | REVIEW_STRICT=1 bash .githooks/pre-push origin url ) > "$out" 2>&1
+  rc=$?
+  assert "h4: a SHA-1 branch deletion is not gated" test "$rc" -eq 0
+  ( cd "$repo" && printf 'HEAD %s refs/heads/feature %s\n' "${z64%0}1" "$z64" \
+      | REVIEW_STRICT=1 bash .githooks/pre-push origin url ) > "$out" 2>&1
+  rc=$?
+  assert "h4: a 64-character SHA that is not all zeros is still gated" test "$rc" -ne 0
+  assert "h4: … for want of a verdict" grep -qF 'feature — no review verdict found' "$out"
+}
+
 # A destination that denies listing looks empty to `ls -A`, and empty is the one
 # state this guard lets through — into the rm -rf of commands/skills/scripts.
 test_make_plugin_refuses_an_unlistable_destination() {
@@ -778,6 +848,8 @@ run_tests \
   test_install_check_fails_on_unwired_gate \
   test_prepush_judges_destination_ref \
   test_prepush_reads_the_verdict_header \
+  test_prepush_rejects_a_spec_verdict \
+  test_prepush_skips_a_sha256_deletion \
   test_make_plugin_refuses_an_unlistable_destination
 
 echo

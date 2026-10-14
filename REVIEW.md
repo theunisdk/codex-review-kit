@@ -215,7 +215,7 @@ scripts/               all synced
 .claude/               synced: /review, /review-tune, /review-postmortem + skill
 .codex/                synced: optional interactive-Codex skill
 .claude-plugin/        synced: plugin manifests
-.githooks/pre-push     synced: warns on a stale verdict; never blocks
+.githooks/pre-push     synced: warns on a stale verdict by default; blocks when REVIEW_STRICT=1
 .coderabbit.yaml       REPO-OWNED  the PR gate; points CodeRabbit at rubric.md
 templates/             hub only: seeds for the repo-owned files (--init)
 ```

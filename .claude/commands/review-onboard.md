@@ -134,7 +134,7 @@ What is left to fill in is optional and grounded the same way as everything else
   in your CI, so genuine duplication is mostly handled. And the local
   analyzer pass is not a gate: `analyzers.local.sh` tools are optional and
   skipped silently when absent, the lenses are told not to re-report anything
-  the analyzers already flagged, and the pre-push hook warns without blocking.
+  the analyzers already flagged, and the pre-push hook warns without blocking by default.
   Disable a tool here only when an *enforced* CI check covers it — otherwise
   you remove its findings from the only gate that was still reporting them.
 - **`reviews.path_filters`** — the vendored, generated, and duplicate-checkout
