@@ -1056,6 +1056,21 @@ test_make_plugin_failed_rebuild_keeps_previous_build() {
   assert "m2: rebuild failing on a partial backup fails" test "$rc" -ne 0
   assert "m2: a partial backup never replaces the original" \
     test -f "$dest/skills/pre-pr-review/old-only"
+  rm -rf "$WORK"/m2-out/.make-plugin-stage.*
+
+  # Or the copy completes and only the delete of the source dies partway.
+  printf '#!/bin/sh\ncase "$1" in */plugin/skills) cp -R "$1" "$2/" && rm -f "$1/pre-pr-review/old-only"; exit 1 ;; esac\nexec %s "$@"\n' \
+    "$(command -v mv)" > "$WORK/m2-bin/mv"
+  ( cd "$hub" && PATH="$WORK/m2-bin:$PATH" bash scripts/make-plugin.sh "$dest" ) > "$out" 2>&1
+  rc=$?
+  local kept
+  kept=$(ls -d "$WORK"/m2-out/.make-plugin-stage.* 2>/dev/null)
+  assert "m2: rebuild failing after a complete backup fails" test "$rc" -ne 0
+  assert "m2: the only complete backup is kept" \
+    test -f "$kept/old/skills/pre-pr-review/old-only"
+  assert "m2: the kept backup is named on stderr" grep -qF "$kept" "$out"
+  assert "m2: other entries are still restored" test -f "$dest/README.md"
+  rm -rf "$WORK"/m2-out/.make-plugin-stage.*
 }
 
 run_tests() {

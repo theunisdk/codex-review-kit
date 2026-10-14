@@ -67,6 +67,7 @@ STAGE="$(mktemp -d "${DEST%/*}/.make-plugin-stage.XXXXXX")"
 GENERATED="README.md PLUGIN-NOTES.md .claude-plugin commands skills scripts review"
 SWAPPING=0
 BACKED_UP=""
+KEEP_STAGE=0
 # A swap cut short puts the previous build back rather than deleting it.
 cleanup() {
   if [ "$SWAPPING" = 1 ]; then
@@ -81,6 +82,10 @@ cleanup() {
           if [ ! -e "$OUT/$e" ] && [ ! -L "$OUT/$e" ]; then rm -rf "${DEST:?}/$e"; fi ;;
       esac
     done
+  fi
+  if [ "$KEEP_STAGE" = 1 ]; then
+    echo "error: a backup failed partway — the previous build may only be in $STAGE/old" >&2
+    return
   fi
   rm -rf "$STAGE"
 }
@@ -140,7 +145,10 @@ MARK
 SWAPPING=1
 for e in $GENERATED; do
   if [ -e "$DEST/$e" ] || [ -L "$DEST/$e" ]; then
-    mv "$DEST/$e" "$STAGE/old/"
+    if ! mv "$DEST/$e" "$STAGE/old/"; then
+      if [ -e "$STAGE/old/$e" ] || [ -L "$STAGE/old/$e" ]; then KEEP_STAGE=1; fi
+      exit 1
+    fi
     BACKED_UP="$BACKED_UP $e"
   fi
 done
