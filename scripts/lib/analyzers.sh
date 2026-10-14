@@ -164,8 +164,8 @@ collect_analyzer_output() {
     local tool="$1"; shift
     case "$runner" in
       */) "$runner$tool" "$@" < /dev/null ;;
-      # shellcheck disable=SC2086
-      *)  $runner "$tool" "$@" < /dev/null ;;
+      *)  # shellcheck disable=SC2086
+          $runner "$tool" "$@" < /dev/null ;;
     esac
   }
 

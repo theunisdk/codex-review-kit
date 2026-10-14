@@ -7,18 +7,22 @@
 #   _section <title>   — write a section header into $report
 #   _files_matching '<glob>|<glob>' — changed files that exist, by extension
 #
-# Keep every command best-effort (`|| true`, `head -N`) — this pass informs
-# the review, it never gates it. Verify each command works before adding it.
-# Never leave a section empty: the lenses read empty as clean, so keep stderr
-# and print a line when a tool can't run.
+# Keep every command best-effort — this pass informs the review, it never
+# gates it. Verify each command works before adding it. Never leave a section
+# empty: the lenses read empty as clean, so keep stderr and write a clean line
+# or the rc when there is no other output.
 #
 # Example (pnpm TypeScript monorepo — use the runner your lockfile implies:
 # npx --no-install, yarn exec on berry, node_modules/.bin/ on yarn 1 or bun):
 #
-# local ts; ts="$(_files_matching '*.ts|*.tsx')"
+# local ts out rc; ts="$(_files_matching '*.ts|*.tsx')"
 # if [ -n "$ts" ]; then
 #   _section "eslint"
-#   printf '%s\n' "$ts" | xargs pnpm exec eslint 2>&1 | head -200 >> "$report" || true
+#   out="$(printf '%s\n' "$ts" | tr '\n' '\0' | xargs -0 pnpm exec eslint 2>&1)"; rc=$?
+#   if [ "$rc" -eq 0 ] && [ -z "$out" ]; then echo "eslint: clean" >> "$report"
+#   else printf 'eslint rc=%s\n%s\n' "$rc" "$out" | head -200 >> "$report"; fi
 #   _section "tsc"
-#   pnpm exec tsc --build --noEmit 2>&1 | head -100 >> "$report" || true
+#   out="$(pnpm exec tsc --build --noEmit 2>&1)"; rc=$?
+#   if [ "$rc" -eq 0 ] && [ -z "$out" ]; then echo "tsc: clean" >> "$report"
+#   else printf 'tsc rc=%s\n%s\n' "$rc" "$out" | head -100 >> "$report"; fi
 # fi
