@@ -173,7 +173,7 @@ elif [ "$CHECK_ONLY" -eq 1 ]; then
   no "core.hooksPath not set"
 elif git config core.hooksPath .githooks; then
   ok "set core.hooksPath = .githooks"
-  skip "hook only WARNS about a stale review; it never blocks a push"
+  skip "hook warns on a stale verdict by default; blocks when REVIEW_STRICT=1"
 else
   no "could not set core.hooksPath — the pre-push hook will not run"
 fi

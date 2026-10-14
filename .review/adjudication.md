@@ -75,8 +75,10 @@ unless there is a reason. `low` is judgement.
 
 ## 4 — Apply
 
-Apply all FIXes with the minimal change that removes the defect; do not
-opportunistically refactor. Group related fixes into coherent commits.
+Before the first fix, record where the reviewed code ends:
+`PRE_FIX=$(git rev-parse HEAD)`. Apply all FIXes with the minimal change that
+removes the defect; do not opportunistically refactor. Group related fixes into
+coherent commits.
 
 Run the project's tests and type checker, plus the lint/analyzer gate wired in
 `.review/analyzers.local.sh` — that pass ran before the lenses, so nothing has
@@ -84,17 +86,22 @@ ever linted the code you just wrote. If a fix breaks a test, decide whether the
 test encoded the bug — and say which, explicitly.
 
 If the fixes amount to substantial new code — new logic or a changed
-transaction, authz, or rollout boundary, not mechanical corrections — run ONE
-scoped re-review over them (`--uncommitted`, relevant lenses only) before
-writing the verdict: fixes applied during adjudication are otherwise the only
-unreviewed code in the change, and it is exactly where downstream reviews land
-their hits. Adjudicate that re-review's findings without a further re-pass —
+transaction, authz, or rollout boundary, not mechanical corrections — commit
+them, then run ONE scoped re-review over the fix commits before writing the
+verdict: `./scripts/review.sh "$PRE_FIX" --lenses <relevant lenses>`. Not
+`--uncommitted`: once the fixes are committed it reviews nothing and still
+reports `complete: true`. For the same reason, "no changes to review" from this
+run means the fixes are not committed yet — commit them and re-run. Fixes
+applied during adjudication are otherwise the only unreviewed code in the
+change, and it is exactly where downstream reviews land their hits. Adjudicate
+that re-review's findings without a further re-pass —
 one bounded loop, not a cycle.
 
 ## 5 — Write the verdict
 
-Write `.review/verdict.md`. Include the HEAD short SHA in the header so the
-pre-push hook can tell whether the verdict is current.
+Write `.review/verdict.md`. Include the HEAD short SHA — after the fix
+commits — in the header so the pre-push hook can tell whether the verdict is
+current.
 
 ```markdown
 # Review verdict — <branch> — <short-sha> — <date>
