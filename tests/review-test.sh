@@ -159,6 +159,163 @@ test_all_lenses_failed_with_output_still_merges() {
   assert     "t3: lens in lenses_failed" jq -e '.lenses_failed == ["security"]' "$repo/.review/findings.json"
 }
 
+# The rubric is the repo's house rules; a lens that never sees it cannot report a
+# violation of one. Both code and spec mode must inline it into every prompt.
+test_rubric_reaches_every_lens_prompt() {
+  local repo="$WORK/rb" stub="$WORK/rb-stub"
+  make_repo "$repo"; mkdir -p "$stub"
+  printf '{"findings":[]}' > "$stub/correctness.json"
+  printf '{"findings":[]}' > "$stub/security.json"
+  (
+    cd "$repo" || exit 1
+    cp "$KIT/.review/prompts/_common-spec.md" .review/prompts/
+    printf 'RUBRIC-SENTINEL-7f3a\n' > .review/rubric.md
+    mkdir -p docs && printf '# spec\n' > docs/spec.md
+    printf 'change\n' >> src.txt
+    git add -A && git commit -qm 'source change'
+  )
+  run_review "$repo" "$stub" --lenses correctness,security
+  assert "rubric: in correctness prompt" grep -qF 'RUBRIC-SENTINEL-7f3a' "$repo/.review/raw/prompt-correctness.md"
+  assert "rubric: in security prompt" grep -qF 'RUBRIC-SENTINEL-7f3a' "$repo/.review/raw/prompt-security.md"
+
+  run_review "$repo" "$stub" --spec docs/spec.md --lenses correctness
+  assert "rubric: in spec-mode prompt" grep -qF 'RUBRIC-SENTINEL-7f3a' "$repo/.review/raw/prompt-correctness.md"
+
+  rm "$repo/.review/rubric.md"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "rubric: missing rubric warned about" grep -qF 'no .review/rubric.md' "$LOG"
+}
+
+# Without -z git C-quotes non-ASCII and backslash names; the quoted name matched
+# no file, so the content never reached diff.patch while the run reported
+# complete:true.
+test_unusual_filenames_reach_the_diff() {
+  local repo="$WORK/fn" stub="$WORK/fn-stub"
+  make_repo "$repo"; mkdir -p "$stub"
+  printf '{"findings":[]}' > "$stub/correctness.json"
+  (
+    cd "$repo" || exit 1
+    git config core.quotePath true
+    printf 'accent-content\n' > 'é.txt'
+    printf 'backslash-content\n' > 'back\slash.txt'
+  )
+  run_review "$repo" "$stub" --uncommitted --lenses correctness; local rc=$?
+  assert "uncommitted: run exits 0" test "$rc" -eq 0
+  assert "uncommitted: untracked é.txt content in diff" grep -qF 'accent-content' "$repo/.review/raw/diff.patch"
+  assert "uncommitted: untracked back\\slash.txt content in diff" grep -qF 'backslash-content' "$repo/.review/raw/diff.patch"
+  assert "uncommitted: é.txt listed unquoted" grep -qxF 'é.txt' "$repo/.review/raw/changed-files.txt"
+  assert "uncommitted: back\\slash.txt listed unquoted" grep -qxF 'back\slash.txt' "$repo/.review/raw/changed-files.txt"
+  assert "uncommitted: complete" jq -e '.complete == true' "$repo/.review/findings.json"
+
+  ( cd "$repo" && git add -A && git commit -qm 'odd names' )
+  run_review "$repo" "$stub" --lenses correctness; rc=$?
+  assert "branch: run exits 0" test "$rc" -eq 0
+  assert "branch: é.txt listed unquoted" grep -qxF 'é.txt' "$repo/.review/raw/changed-files.txt"
+  assert "branch: back\\slash.txt listed unquoted" grep -qxF 'back\slash.txt' "$repo/.review/raw/changed-files.txt"
+  assert "branch: complete" jq -e '.complete == true' "$repo/.review/findings.json"
+
+  if [ "$(id -u)" = 0 ]; then
+    skip_test "uncommitted: unreadable file (root reads everything)"
+  else
+    ( cd "$repo" && printf 'x\n' > locked.txt && chmod 000 locked.txt )
+    run_review "$repo" "$stub" --uncommitted --lenses correctness
+    chmod 644 "$repo/locked.txt"
+    assert "uncommitted: unreadable file named" jq -e '.unreadable_paths == ["locked.txt"]' "$repo/.review/findings.json"
+    assert "uncommitted: unreadable file marks run incomplete" jq -e '.complete == false' "$repo/.review/findings.json"
+    rm -f "$repo/locked.txt"
+
+    mkdir -p "$repo/sealed" && printf 'x\n' > "$repo/sealed/f.txt" && chmod 000 "$repo/sealed"
+    run_review "$repo" "$stub" --uncommitted --lenses correctness; rc=$?
+    chmod 755 "$repo/sealed"; rm -rf "$repo/sealed"
+    assert     "uncommitted: unlistable directory exits nonzero" test "$rc" -ne 0
+    assert     "uncommitted: unlistable directory not complete" jq -e '.complete == false' "$repo/.review/findings.json"
+  fi
+
+  git init -q "$repo/nested" && printf 'x\n' > "$repo/nested/f.txt"
+  run_review "$repo" "$stub" --uncommitted --lenses correctness
+  rm -rf "$repo/nested"
+  assert "uncommitted: nested repo named unreadable" jq -e '.unreadable_paths == ["nested/"]' "$repo/.review/findings.json"
+  assert "uncommitted: nested repo marks run incomplete" jq -e '.complete == false' "$repo/.review/findings.json"
+}
+
+# Deleted, renamed and submodule paths are absent from disk by design; the
+# unreadable-path check must not count them as unreviewed.
+test_deletions_are_not_unreadable() {
+  local repo="$WORK/dl" stub="$WORK/dl-stub" sub="$WORK/dl-sub"
+  make_repo "$repo"; mkdir -p "$stub"
+  printf '{"findings":[]}' > "$stub/correctness.json"
+  git init -q -b main "$sub"
+  ( cd "$sub" && git config user.email t@example.invalid && git config user.name t \
+      && printf 'x\n' > f && git add f && git commit -qm sub )
+  (
+    cd "$repo" || exit 1
+    git checkout -q main
+    printf 'a\n' > gone.txt; printf 'b\n' > moved.txt; printf 'c\n' > staged.txt; printf 'd\n' > worktree.txt
+    git -c protocol.file.allow=always submodule add -q "$sub" sm >/dev/null 2>&1
+    git add -A && git commit -qm 'files to delete' && git checkout -qb del
+    git rm -q gone.txt && git mv moved.txt renamed.txt && git rm -q sm
+    git commit -qm 'delete, rename, drop submodule'
+    rm worktree.txt
+  )
+  assert "deletions: submodule fixture built" git -C "$repo" rev-parse -q --verify main:sm
+  run_review "$repo" "$stub" --lenses correctness
+  assert "deletions: branch mode flags nothing" jq -e '.unreadable_paths == [] and .complete == true' "$repo/.review/findings.json"
+
+  ( cd "$repo" && git rm -q staged.txt )
+  run_review "$repo" "$stub" --uncommitted --lenses correctness
+  assert "deletions: uncommitted mode flags nothing" jq -e '.unreadable_paths == [] and .complete == true' "$repo/.review/findings.json"
+}
+
+# --fail-on exits 2 after writing the report; the abort handler must leave it alone.
+test_fail_on_gate_keeps_its_report() {
+  local repo="$WORK/gt" stub="$WORK/gt-stub"
+  make_repo "$repo"; mkdir -p "$stub"
+  finding 'gate finding' > "$stub/correctness.json"
+  ( cd "$repo" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  run_review "$repo" "$stub" --lenses correctness --fail-on high; local rc=$?
+  assert "gate: exits 2" test "$rc" -eq 2
+  assert "gate: report kept" jq -e '.complete == true and (.findings | length) == 1' "$repo/.review/findings.json"
+}
+
+# A spec selection that resolves to no documents reviewed nothing, and any run
+# that stops early must not leave the previous run's complete:true in place.
+test_spec_selecting_nothing_fails() {
+  local repo="$WORK/se" stub="$WORK/se-stub"
+  make_repo "$repo"; mkdir -p "$stub"
+  ( cd "$repo" && cp "$KIT/.review/prompts/_common-spec.md" .review/prompts/ && mkdir -p docs/empty && printf 'x\n' > docs/empty/notes.txt )
+  local stale='{"findings":[],"lenses_failed":[],"complete":true}'
+
+  printf '%s\n' "$stale" > "$repo/.review/findings.json"
+  run_review "$repo" "$stub" --spec docs/empty --lenses correctness; local rc=$?
+  assert "spec-empty: dir without .md exits nonzero" test "$rc" -ne 0
+  assert "spec-empty: reported incomplete" jq -e '.complete == false' "$repo/.review/findings.json"
+
+  printf '# spec\n' > "$repo/docs/real.md"
+  run_review "$repo" "$stub" --spec docs/empty --spec docs/real.md --lenses correctness; rc=$?
+  assert "spec-empty: empty dir alongside a real spec exits nonzero" test "$rc" -ne 0
+
+  printf '%s\n' "$stale" > "$repo/.review/findings.json"
+  run_review "$repo" "$stub" --spec docs/missing.md --lenses correctness; rc=$?
+  assert "spec-empty: missing path exits nonzero" test "$rc" -ne 0
+  assert "spec-empty: stale report replaced" jq -e '.complete == false' "$repo/.review/findings.json"
+}
+
+test_spec_path_with_space() {
+  local repo="$WORK/sp" stub="$WORK/sp-stub"
+  make_repo "$repo"; mkdir -p "$stub"
+  printf '{"findings":[]}' > "$stub/correctness.json"
+  ( cd "$repo" && cp "$KIT/.review/prompts/_common-spec.md" .review/prompts/ && mkdir -p 'docs/my specs' && printf '# spec\n' > 'docs/my specs/a b.md' )
+
+  run_review "$repo" "$stub" --spec 'docs/my specs/a b.md' --lenses correctness; local rc=$?
+  assert "spec-space: file path exits 0" test "$rc" -eq 0
+  assert "spec-space: file listed whole" grep -qxF 'docs/my specs/a b.md' "$repo/.review/raw/changed-files.txt"
+  assert "spec-space: complete" jq -e '.complete == true' "$repo/.review/findings.json"
+
+  run_review "$repo" "$stub" --spec 'docs/my specs' --lenses correctness; rc=$?
+  assert "spec-space: directory path exits 0" test "$rc" -eq 0
+  assert "spec-space: directory's file listed" grep -qxF 'docs/my specs/a b.md' "$repo/.review/raw/changed-files.txt"
+}
+
 # --- updater fixtures ------------------------------------------------------
 make_hub() { # make_hub <dir> — minimal kit tree, one commit, no tags
   local dir="$1"
@@ -763,6 +920,12 @@ run_tests \
   test_tracked_review_sources_survive_filter \
   test_nonzero_rc_lens_marked_failed \
   test_all_lenses_failed_with_output_still_merges \
+  test_rubric_reaches_every_lens_prompt \
+  test_unusual_filenames_reach_the_diff \
+  test_deletions_are_not_unreadable \
+  test_fail_on_gate_keeps_its_report \
+  test_spec_selecting_nothing_fails \
+  test_spec_path_with_space \
   test_update_reports_source_and_revision \
   test_update_marks_a_dirty_local_hub \
   test_update_marks_an_untracked_hub_file \

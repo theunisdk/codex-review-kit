@@ -93,7 +93,8 @@ For each lens where you can name CONCRETE repo hazards, write a fragment
 starting `In this repository, additionally hunt for:` — 2–5 bullets naming
 files, functions, and the failure mode. A hazard that would apply to any repo
 on this stack belongs in the hub, not here. No fragment is better than a
-padded one.
+padded one. Don't restate rubric rules here: `review.sh` already puts the
+rubric in front of every lens.
 
 ## 5 — `.review/learnings.md` repository facts
 
