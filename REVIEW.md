@@ -54,17 +54,47 @@ alongside the files that are its own and never synced:
 **New repo:** say `/review-onboard` in Claude Code — it bootstraps the files
 and, more importantly, does the adaptation properly: a rubric grounded in code
 it actually read, analyzer commands verified before wiring, concrete lens
-hazards, and a fire drill to prove the result. By hand, the bootstrap is:
+hazards, and a fire drill to prove the result. By hand, from a local hub
+clone — no download, and the default path:
 
 ```bash
-# From a local hub clone — no download, and the default path:
 REVIEW_KIT_DIR=~/dev/private/codex-review-kit \
   bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
-# Without one, the updater fetches the hub's latest release tag — never the
-# mutable `main` — or the tag/full-SHA in $REVIEW_KIT_REF; read what it fetched
-# before the next line, which executes it.
 ./scripts/review-install.sh          # per-machine setup
-# then adapt the repo-owned files — .review/, plus the gate at the root:
+```
+
+Without a clone, this fetches the updater at the hub's latest release tag —
+or the tag or full SHA in `$REVIEW_KIT_REF` — and refuses anything else,
+`main` included. Both `less` pauses are the point: read each file before
+the next line executes it.
+
+```bash
+(
+  KIT=https://github.com/theunisdk/codex-review-kit
+  TAGS=$(git ls-remote --tags "$KIT") || { echo "stopped: cannot reach $KIT" >&2; exit 1; }
+  LATEST=$(printf '%s\n' "$TAGS" | sed -n 's|.*refs/tags/v\([0-9][0-9.]*\)$|\1|p' \
+    | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+  REF="${REVIEW_KIT_REF:-${LATEST:+v$LATEST}}"
+  [ -n "$REF" ] || { echo "stopped: no release tag on $KIT — set REVIEW_KIT_REF" >&2; exit 1; }
+  if printf '%s\n' "$REF" | grep -Eqx '[0-9a-f]{40}'; then SHA=$REF
+  else SHA=$(printf '%s\n' "$TAGS" | awk -v t="refs/tags/$REF" \
+      '$2 == t {s=$1} $2 == (t "^{}") {p=$1} END {print (p != "" ? p : s)}')
+  fi
+  [ -n "$SHA" ] || { echo "stopped: '$REF' is neither a tag on $KIT nor a full commit SHA" >&2; exit 1; }
+  RU=$(mktemp) \
+    && curl -fsSL "https://raw.githubusercontent.com/theunisdk/codex-review-kit/$SHA/scripts/review-update.sh" -o "$RU" \
+    && less "$RU" \
+    && REVIEW_KIT_REF="$SHA" bash "$RU" --init \
+    && less scripts/review-install.sh \
+    && ./scripts/review-install.sh \
+    || { echo "stopped: a step above failed" >&2; exit 1; }
+)
+```
+
+Then, either way:
+
+```bash
+# adapt the repo-owned files — .review/, plus the gate at the root:
 #   .review/rubric.md  .review/learnings.md  .review/config.sh
 #   .review/analyzers.local.sh  .review/prompts.local/
 # --init seeds .coderabbit.yaml only when the repo had no CodeRabbit config,
