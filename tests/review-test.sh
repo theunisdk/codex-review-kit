@@ -384,7 +384,11 @@ cat "$ANALYZER_STUB_DIR/$tool.out" 2>/dev/null
 exit "$(cat "$ANALYZER_STUB_DIR/$tool.rc")"
 EOF
 for r in pnpm yarn bun; do cp "$WORK/abin/npx" "$WORK/abin/$r"; done
-printf '#!/usr/bin/env bash\necho %s\n' "'{\"results\":[]}'" > "$WORK/abin/semgrep"
+cat > "$WORK/abin/semgrep" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$ANALYZER_STUB_DIR/semgrep.args"
+echo '{"results":[]}'
+EOF
 chmod +x "$WORK"/abin/*
 
 analyzer_repo() { # analyzer_repo <id> — fixture repo + stub dir in $AREPO/$ASTUB
@@ -493,6 +497,15 @@ test_gitleaks_uncommitted_scans_diff_only() {
   run_review_analyzers "$AREPO" "$ASTUB" --uncommitted
   assert_not "g6: uncommitted mode has no history scan" grep -qF -- '--log-opts' "$ASTUB/gitleaks.calls"
   assert     "g6: uncommitted mode scans the diff" grep -qF -- '--pipe' "$ASTUB/gitleaks.calls"
+}
+
+# The changed-file list is newline-delimited: a name with a space is one path.
+test_semgrep_gets_whole_paths() {
+  analyzer_repo sg1
+  ( cd "$AREPO" && printf 'x\n' > 'a b.txt' && git add -A && git commit -qm 'spaced name' )
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  assert     "sg1: spaced name passed as one argument" grep -qxF 'a b.txt' "$ASTUB/semgrep.args"
+  assert_not "sg1: name not split" grep -qxF 'a' "$ASTUB/semgrep.args"
 }
 
 # --- analyzer tests: JS / TS ----------------------------------------------
@@ -1318,6 +1331,7 @@ run_tests \
   test_gitleaks_commit_count_checked \
   test_gitleaks_leaks_reported \
   test_gitleaks_uncommitted_scans_diff_only \
+  test_semgrep_gets_whole_paths \
   test_js_runner_follows_package_manager \
   test_js_unresolvable_tool_is_named \
   test_js_eslint_crash_is_failed \

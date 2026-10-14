@@ -83,10 +83,12 @@ collect_analyzer_output() {
   fi
 
   # --- semgrep (multi-language, high signal) ------------------------------
-  if _have semgrep; then
+  local sg_list f; sg_list="$(_files_matching '*')"
+  if [ -n "$sg_list" ] && _have semgrep; then
     _section "semgrep --config=auto"
-    # shellcheck disable=SC2046
-    semgrep --config=auto --quiet --error --json $(tr '\n' ' ' < "$list") 2>/dev/null \
+    local -a sg_files; sg_files=()
+    while IFS= read -r f; do sg_files+=("$f"); done <<< "$sg_list"
+    semgrep --config=auto --quiet --error --json "${sg_files[@]}" 2>/dev/null \
       | jq -r '.results[]? | "- " + .path + ":" + (.start.line|tostring) + " [" + .check_id + "] " + .extra.message' \
       2>/dev/null | head -200 >> "$report" || true
   fi
