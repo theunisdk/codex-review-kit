@@ -72,14 +72,17 @@ else
       echo "error: no release tag found on $KIT_GIT_URL — set REVIEW_KIT_REF to a tag or full commit SHA" >&2
       exit 1; }
   fi
+  # A tag is fetched as the commit listed above (an annotated tag's is its ^{}
+  # line), so a tag moved since the listing is not what gets installed.
   if [[ $KIT_REF =~ ^[0-9a-f]{40}$ ]]; then
     FETCH_REF="$KIT_REF"
-  elif printf '%s\n' "$TAGS" | awk -v t="refs/tags/$KIT_REF" '$2 == t {f=1} END {exit !f}'; then
-    FETCH_REF="refs/tags/$KIT_REF"
   else
-    echo "error: '$KIT_REF' is not a tag on $KIT_GIT_URL or a full commit SHA — REVIEW_KIT_REF takes one of those, never a branch" >&2
-    exit 1
+    FETCH_REF="$(printf '%s\n' "$TAGS" | awk -v t="refs/tags/$KIT_REF" \
+      '$2 == t {s=$1} $2 == (t "^{}") {p=$1} END {print (p != "" ? p : s)}')"
   fi
+  [ -n "$FETCH_REF" ] || {
+    echo "error: '$KIT_REF' is not a tag on $KIT_GIT_URL or a full commit SHA — REVIEW_KIT_REF takes one of those, never a branch" >&2
+    exit 1; }
   TMP_CLONE="$(mktemp -d)"
   echo "no local hub found — fetching $KIT_GIT_URL @ $KIT_REF" >&2
   git -C "$TMP_CLONE" init -q

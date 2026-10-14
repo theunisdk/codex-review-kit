@@ -347,11 +347,12 @@ test_update_network_honors_explicit_ref() {
   assert     "u3: kit-version records the pin" grep -q '^ref: v0\.9\.0$' "$spoke/.review/kit-version"
 }
 
-make_tagged_hub() { # make_tagged_hub <dir> — v0.9.0 tagged, then an untagged tip on main
+make_tagged_hub() { # make_tagged_hub <dir> — annotated v0.9.0, then an untagged tip on main
   make_hub "$1"
   (
     cd "$1" || exit 1
-    printf 'MARKER: nine\n' >> REVIEW.md && git commit -aqm nine && git tag v0.9.0
+    printf 'MARKER: nine\n' >> REVIEW.md && git commit -aqm nine \
+      && git -c tag.gpgSign=false tag -a -m nine v0.9.0
     printf 'MARKER: tip\n'  >> REVIEW.md && git commit -aqm tip
   )
 }
@@ -369,17 +370,25 @@ test_update_network_refuses_a_branch_ref() {
   assert_not "u13: branch tip content NOT installed" grep -qs 'MARKER: tip' "$spoke/REVIEW.md"
 }
 
-# A full commit SHA is a pin too, and is recorded as given.
+# A full commit SHA is a pin too, and is recorded as given. An annotated tag
+# installs the commit it points at.
 test_update_network_honors_a_commit_sha() {
   local hub="$WORK/u14-hub" spoke="$WORK/u14-spoke" sha
   make_tagged_hub "$hub"; make_spoke "$spoke"
-  sha="$(git -C "$hub" rev-parse v0.9.0)"
+  sha="$(git -C "$hub" rev-parse 'v0.9.0^{commit}')"
   run_update "$spoke" REVIEW_KIT_URL="file://$hub" REVIEW_KIT_REF="$sha"; local rc=$?
 
   assert     "u14: run exits 0" test "$rc" -eq 0
   assert     "u14: pinned commit content installed" grep -q 'MARKER: nine' "$spoke/REVIEW.md"
   assert_not "u14: branch tip content NOT installed" grep -q 'MARKER: tip' "$spoke/REVIEW.md"
   assert     "u14: kit-version records the SHA" grep -q "^ref: $sha\$" "$spoke/.review/kit-version"
+
+  rm -rf "$spoke"; make_spoke "$spoke"
+  run_update "$spoke" REVIEW_KIT_URL="file://$hub" REVIEW_KIT_REF=v0.9.0; rc=$?
+  assert     "u14: annotated tag exits 0" test "$rc" -eq 0
+  assert     "u14: annotated tag content installed" grep -q 'MARKER: nine' "$spoke/REVIEW.md"
+  assert     "u14: annotated tag installs its commit" \
+    grep -q "^kit: .* ${sha:0:7}" "$spoke/.review/kit-version"
 }
 
 # An unreachable hub and a missing tag both refuse, but must not read alike:
