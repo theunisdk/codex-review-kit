@@ -1047,6 +1047,15 @@ test_make_plugin_failed_rebuild_keeps_previous_build() {
   assert "m2: first build failing mid-swap fails" test "$rc" -ne 0
   assert "m2: first build cut short leaves no generated entries" \
     test "$(ls -A "$WORK/m2-out/fresh")" = .make-plugin-generated
+
+  # A cross-filesystem mv that dies partway leaves a partial copy at the target.
+  printf '#!/bin/sh\ncase "$1" in */plugin/skills) mkdir -p "$2/skills"; exit 1 ;; esac\nexec %s "$@"\n' \
+    "$(command -v mv)" > "$WORK/m2-bin/mv"
+  ( cd "$hub" && PATH="$WORK/m2-bin:$PATH" bash scripts/make-plugin.sh "$dest" ) > "$out" 2>&1
+  rc=$?
+  assert "m2: rebuild failing on a partial backup fails" test "$rc" -ne 0
+  assert "m2: a partial backup never replaces the original" \
+    test -f "$dest/skills/pre-pr-review/old-only"
 }
 
 run_tests() {

@@ -66,18 +66,20 @@ DEST="$dest_abs"
 STAGE="$(mktemp -d "${DEST%/*}/.make-plugin-stage.XXXXXX")"
 GENERATED="README.md PLUGIN-NOTES.md .claude-plugin commands skills scripts review"
 SWAPPING=0
+BACKED_UP=""
 # A swap cut short puts the previous build back rather than deleting it.
 cleanup() {
   if [ "$SWAPPING" = 1 ]; then
     for e in $GENERATED; do
-      if [ -e "$STAGE/old/$e" ] || [ -L "$STAGE/old/$e" ]; then
-        if ! { rm -rf "${DEST:?}/$e" && mv "$STAGE/old/$e" "$DEST/"; }; then
-          echo "error: could not restore the previous build — it is in $STAGE/old" >&2
-          return
-        fi
-      elif [ ! -e "$OUT/$e" ] && [ ! -L "$OUT/$e" ]; then
-        rm -rf "${DEST:?}/$e"
-      fi
+      case " $BACKED_UP " in
+        *" $e "*)
+          if ! { rm -rf "${DEST:?}/$e" && mv "$STAGE/old/$e" "$DEST/"; }; then
+            echo "error: could not restore the previous build — it is in $STAGE/old" >&2
+            return
+          fi ;;
+        *)
+          if [ ! -e "$OUT/$e" ] && [ ! -L "$OUT/$e" ]; then rm -rf "${DEST:?}/$e"; fi ;;
+      esac
     done
   fi
   rm -rf "$STAGE"
@@ -137,7 +139,10 @@ MARK
 # README.md goes out first and back in last, so a swap cut short never looks done.
 SWAPPING=1
 for e in $GENERATED; do
-  if [ -e "$DEST/$e" ] || [ -L "$DEST/$e" ]; then mv "$DEST/$e" "$STAGE/old/"; fi
+  if [ -e "$DEST/$e" ] || [ -L "$DEST/$e" ]; then
+    mv "$DEST/$e" "$STAGE/old/"
+    BACKED_UP="$BACKED_UP $e"
+  fi
 done
 for e in .claude-plugin commands skills scripts review PLUGIN-NOTES.md README.md; do
   mv "$OUT/$e" "$DEST/"
