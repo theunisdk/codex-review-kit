@@ -177,10 +177,15 @@ else
 fi
 mv "$OUT/changed-files.tmp" "$OUT/changed-files.txt"
 
-# A listed path that is neither on disk nor a deletion was never reviewed.
+# A listed path that is neither readable on disk nor a deletion was never reviewed.
+# In branch mode HEAD is the reviewed tree, so a path HEAD still has is not deleted.
 while IFS= read -r f; do
-  [ -e "$f" ] || [ -L "$f" ] && continue
-  [ -n "${DIFF_BASE:-}" ] && { git rev-parse -q --verify "HEAD:$f" >/dev/null || git rev-parse -q --verify "$DIFF_BASE:$f" >/dev/null; } && continue
+  [ -L "$f" ] && continue
+  if [ -e "$f" ]; then
+    [ -r "$f" ] && continue
+  elif [ -n "${DIFF_BASE:-}" ] && git rev-parse -q --verify "$DIFF_BASE:$f" >/dev/null; then
+    [ "$MODE" = branch ] && git rev-parse -q --verify "HEAD:$f" >/dev/null || continue
+  fi
   printf '%s\n' "$f" >> "$OUT/unreadable.txt"
 done < "$OUT/changed-files.txt"
 if [ -s "$OUT/unreadable.txt" ]; then
@@ -235,6 +240,7 @@ fi
   echo
 } > "$OUT/context.md"
 
+[ ! -s .review/rubric.md ] || [ -r .review/rubric.md ] || die "cannot read .review/rubric.md"
 [ -s .review/rubric.md ] || warn "no .review/rubric.md — lenses will not see this repository's house rules (run /review-onboard)"
 
 # --- launch lenses ---------------------------------------------------------

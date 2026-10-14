@@ -181,6 +181,14 @@ test_rubric_reaches_every_lens_prompt() {
   run_review "$repo" "$stub" --spec docs/spec.md --lenses correctness
   assert "rubric: in spec-mode prompt" grep -qF 'RUBRIC-SENTINEL-7f3a' "$repo/.review/raw/prompt-correctness.md"
 
+  if [ "$(id -u)" != 0 ]; then
+    chmod 000 "$repo/.review/rubric.md"
+    run_review "$repo" "$stub" --lenses correctness; local rc=$?
+    chmod 644 "$repo/.review/rubric.md"
+    assert "rubric: unreadable rubric exits nonzero" test "$rc" -ne 0
+    assert "rubric: unreadable rubric not complete" jq -e '.complete == false' "$repo/.review/findings.json"
+  fi
+
   rm "$repo/.review/rubric.md"
   run_review "$repo" "$stub" --lenses correctness
   assert "rubric: missing rubric warned about" grep -qF 'no .review/rubric.md' "$LOG"
@@ -264,6 +272,21 @@ test_deletions_are_not_unreadable() {
   ( cd "$repo" && git rm -q staged.txt )
   run_review "$repo" "$stub" --uncommitted --lenses correctness
   assert "deletions: uncommitted mode flags nothing" jq -e '.unreadable_paths == [] and .complete == true' "$repo/.review/findings.json"
+
+  # changed on the branch but missing from the working tree: the lenses cannot read it
+  ( cd "$repo" && git reset -q --hard && printf 'more\n' >> src.txt && git commit -qam 'touch src' && rm src.txt )
+  run_review "$repo" "$stub" --lenses correctness
+  assert "deletions: branch file missing from worktree is unreadable" \
+    jq -e '.unreadable_paths == ["src.txt"] and .complete == false' "$repo/.review/findings.json"
+  git -C "$repo" checkout -q -- src.txt
+
+  if [ "$(id -u)" != 0 ]; then
+    chmod 000 "$repo/src.txt"
+    run_review "$repo" "$stub" --lenses correctness
+    chmod 644 "$repo/src.txt"
+    assert "deletions: unreadable changed file is unreadable" \
+      jq -e '.unreadable_paths == ["src.txt"] and .complete == false' "$repo/.review/findings.json"
+  fi
 }
 
 # --fail-on exits 2 after writing the report; the abort handler must leave it alone.
