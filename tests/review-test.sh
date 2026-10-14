@@ -284,6 +284,29 @@ test_update_leaves_a_clean_local_hub_unmarked() {
   assert_not "u10: no dirty warning" grep -qF 'uncommitted changes' "$LOG"
 }
 
+# A spoke runs ITS OWN copy of the updater, which the sync overwrites. When the
+# hub's copy is longer, bash must not read past main() into the new file.
+# Regression for the clean sync that exited 2 with "syntax error".
+test_update_survives_replacing_itself() {
+  local hub="$WORK/u12-hub" spoke="$WORK/u12-spoke"
+  make_hub "$hub"; make_spoke "$spoke"
+  mkdir -p "$spoke/scripts"
+  cp "$KIT/scripts/review-update.sh" "$spoke/scripts/"
+  (
+    cd "$hub" || exit 1
+    printf 'echo TAIL-EXECUTED >&2; exit 7\n%.0s' 1 2 3 4 5 6 7 8 >> scripts/review-update.sh
+    git commit -aqm longer-updater
+  )
+  LOG="$spoke.log"
+  ( cd "$spoke" && env -i HOME="$WORK/nohome" PATH="$PATH" REVIEW_KIT_DIR="$hub" \
+      bash scripts/review-update.sh ) > "$LOG" 2>&1; local rc=$?
+
+  assert     "u12: run exits 0" test "$rc" -eq 0
+  assert_not "u12: no syntax error" grep -q 'syntax error' "$LOG"
+  assert_not "u12: no bytes of the new file executed" grep -q 'TAIL-EXECUTED' "$LOG"
+  assert     "u12: the longer updater was installed" grep -q 'TAIL-EXECUTED' "$spoke/scripts/review-update.sh"
+}
+
 # With no local hub, the fetch must pin to the highest release tag — never the
 # default branch tip. v0.10.0 vs v0.9.0 also guards the numeric tag sort.
 # Regression for the unpinned `git clone --depth 1` of the default branch.
@@ -324,6 +347,64 @@ test_update_network_honors_explicit_ref() {
   assert     "u3: kit-version records the pin" grep -q '^ref: v0\.9\.0$' "$spoke/.review/kit-version"
 }
 
+make_tagged_hub() { # make_tagged_hub <dir> — v0.9.0 tagged, then an untagged tip on main
+  make_hub "$1"
+  (
+    cd "$1" || exit 1
+    printf 'MARKER: nine\n' >> REVIEW.md && git commit -aqm nine && git tag v0.9.0
+    printf 'MARKER: tip\n'  >> REVIEW.md && git commit -aqm tip
+  )
+}
+
+# REVIEW_KIT_REF names a pin, so a branch — mutable by definition — is refused
+# rather than fetched. Regression for REVIEW_KIT_REF=main installing the tip.
+test_update_network_refuses_a_branch_ref() {
+  local hub="$WORK/u13-hub" spoke="$WORK/u13-spoke"
+  make_tagged_hub "$hub"; make_spoke "$spoke"
+  run_update "$spoke" REVIEW_KIT_URL="file://$hub" REVIEW_KIT_REF=main; local rc=$?
+
+  assert     "u13: run refuses" test "$rc" -ne 0
+  assert     "u13: refusal says it is not a tag" grep -q "'main' is not a tag" "$LOG"
+  assert_not "u13: nothing synced" test -f "$spoke/.review/kit-version"
+  assert_not "u13: branch tip content NOT installed" grep -qs 'MARKER: tip' "$spoke/REVIEW.md"
+}
+
+# A full commit SHA is a pin too, and is recorded as given.
+test_update_network_honors_a_commit_sha() {
+  local hub="$WORK/u14-hub" spoke="$WORK/u14-spoke" sha
+  make_tagged_hub "$hub"; make_spoke "$spoke"
+  sha="$(git -C "$hub" rev-parse v0.9.0)"
+  run_update "$spoke" REVIEW_KIT_URL="file://$hub" REVIEW_KIT_REF="$sha"; local rc=$?
+
+  assert     "u14: run exits 0" test "$rc" -eq 0
+  assert     "u14: pinned commit content installed" grep -q 'MARKER: nine' "$spoke/REVIEW.md"
+  assert_not "u14: branch tip content NOT installed" grep -q 'MARKER: tip' "$spoke/REVIEW.md"
+  assert     "u14: kit-version records the SHA" grep -q "^ref: $sha\$" "$spoke/.review/kit-version"
+}
+
+# An unreachable hub and a missing tag both refuse, but must not read alike:
+# one is a connection to fix, the other a pin to correct.
+test_update_network_tells_unreachable_from_missing() {
+  local hub="$WORK/u15-hub" spoke="$WORK/u15-spoke" gone="file://$WORK/u15-nowhere"
+  make_tagged_hub "$hub"; make_spoke "$spoke"
+
+  run_update "$spoke" REVIEW_KIT_URL="file://$hub" REVIEW_KIT_REF=v9.9.9; local rc=$?
+  assert     "u15: missing tag refuses" test "$rc" -ne 0
+  assert     "u15: missing tag says so" grep -q "'v9.9.9' is not a tag" "$LOG"
+  assert_not "u15: missing tag is not called unreachable" grep -q 'cannot reach' "$LOG"
+
+  run_update "$spoke" REVIEW_KIT_URL="$gone" REVIEW_KIT_REF=v0.9.0; rc=$?
+  assert     "u15: unreachable hub refuses" test "$rc" -ne 0
+  assert     "u15: unreachable hub says so" grep -q 'cannot reach' "$LOG"
+  assert_not "u15: unreachable hub is not called a missing tag" grep -q 'is not a tag' "$LOG"
+
+  run_update "$spoke" REVIEW_KIT_URL="$gone"; rc=$?
+  assert     "u15: unreachable hub refuses tag discovery" test "$rc" -ne 0
+  assert     "u15: tag discovery says unreachable" grep -q 'cannot reach' "$LOG"
+  assert_not "u15: tag discovery does not claim no tags" grep -q 'no release tag' "$LOG"
+  assert_not "u15: nothing synced" test -f "$spoke/.review/kit-version"
+}
+
 # A remote with no release tag and no explicit ref must refuse, not silently
 # take whatever the default branch points at.
 test_update_network_refuses_without_pin() {
@@ -335,6 +416,95 @@ test_update_network_refuses_without_pin() {
   assert     "u4: run refuses" test "$rc" -ne 0
   assert     "u4: refusal names the fix" grep -q 'REVIEW_KIT_REF' "$LOG"
   assert_not "u4: nothing synced" test -f "$spoke/.review/kit-version"
+}
+
+# --- no-clone bootstrap ----------------------------------------------------
+bootstrap_block() { # bootstrap_block <md file> — the fenced block that runs ls-remote
+  awk '/^```bash$/ {inb=1; b=""; next}
+       /^```$/ && inb {inb=0; if (b ~ /ls-remote/) printf "%s", b; next}
+       inb {b = b $0 "\n"}' "$1"
+}
+
+# Runs the onboard bootstrap against a local hub: curl is stubbed to read the
+# hub at the commit in the URL, and less is a no-op.
+run_bootstrap() { # run_bootstrap <spoke> <hub> [VAR=val ...] — output in $LOG
+  local dir="$1" hub="$2"; shift 2
+  LOG="$dir.log"
+  mkdir -p "$WORK/nohome" "$WORK/bootbin"
+  cat > "$WORK/bootbin/curl" <<'EOF'
+#!/usr/bin/env bash
+out=""; url=""
+while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac; done
+sha="$(printf '%s\n' "$url" | sed -n 's|.*/codex-review-kit/\([^/]*\)/scripts/.*|\1|p')"
+git -C "$BOOT_HUB" show "$sha:scripts/review-update.sh" > "$out"
+EOF
+  printf '#!/bin/sh\nexit 0\n' > "$WORK/bootbin/less"
+  chmod +x "$WORK/bootbin/curl" "$WORK/bootbin/less"
+  bootstrap_block "$KIT/.claude/commands/review-onboard.md" \
+    | sed "s|^\\( *\\)KIT=https://.*|\\1KIT=file://$hub|" > "$dir.boot.sh"
+  ( cd "$dir" && env -i HOME="$WORK/nohome" PATH="$WORK/bootbin:$PATH" BOOT_HUB="$hub" \
+      REVIEW_KIT_URL="file://$hub" "$@" bash "$dir.boot.sh" ) > "$LOG" 2>&1
+}
+
+make_boot_hub() { # make_boot_hub <dir> — annotated v0.9.0, untagged tip, stub installer
+  make_hub "$1"
+  (
+    cd "$1" || exit 1
+    cp -R "$KIT/templates" .
+    printf '#!/bin/sh\necho INSTALL-RAN\n' > scripts/review-install.sh
+    printf 'MARKER: nine\n' >> REVIEW.md && git add -A && git commit -qm nine \
+      && git tag -a -m nine v0.9.0
+    printf 'MARKER: tip\n'  >> REVIEW.md && git commit -aqm tip
+  )
+}
+
+# REVIEW.md and /review-onboard carry the same no-clone bootstrap; the copy
+# nobody tests must not drift from the one that is.
+test_bootstrap_block_matches_in_both_docs() {
+  local a b
+  a="$(bootstrap_block "$KIT/.claude/commands/review-onboard.md")"
+  b="$(bootstrap_block "$KIT/REVIEW.md")"
+  assert "b1: review-onboard has the bootstrap" test -n "$a"
+  assert "b1: REVIEW.md carries the same bootstrap" test "$a" = "$b"
+}
+
+# The bootstrap installs a release tag — an annotated one resolved to its
+# commit — and refuses a branch before anything is downloaded or run.
+# Regression for SHA="${SHA:-$REF}" passing REF=main through as the SHA.
+test_bootstrap_pins_and_refuses_a_branch() {
+  local hub="$WORK/b2-hub" spoke="$WORK/b2-spoke" sha
+  make_boot_hub "$hub"; make_spoke "$spoke"
+  sha="$(git -C "$hub" rev-parse 'v0.9.0^{commit}')"
+
+  run_bootstrap "$spoke" "$hub"; local rc=$?
+  assert     "b2: tag bootstrap exits 0" test "$rc" -eq 0
+  assert     "b2: tag content installed" grep -q 'MARKER: nine' "$spoke/REVIEW.md"
+  assert_not "b2: branch tip content NOT installed" grep -q 'MARKER: tip' "$spoke/REVIEW.md"
+  assert     "b2: kit-version records the tag's commit" grep -q "^ref: $sha\$" "$spoke/.review/kit-version"
+  assert     "b2: installer ran" grep -q 'INSTALL-RAN' "$LOG"
+
+  rm -rf "$spoke"; make_spoke "$spoke"
+  run_bootstrap "$spoke" "$hub" REVIEW_KIT_REF=main; rc=$?
+  assert     "b2: branch refused" test "$rc" -ne 0
+  assert     "b2: refusal says it is not a tag" grep -q "'main' is neither a tag" "$LOG"
+  assert_not "b2: nothing synced" test -f "$spoke/.review/kit-version"
+}
+
+# As in the updater: an unreachable hub and a missing tag stop with different words.
+test_bootstrap_tells_unreachable_from_missing() {
+  local hub="$WORK/b3-hub" spoke="$WORK/b3-spoke"
+  make_boot_hub "$hub"; make_spoke "$spoke"
+
+  run_bootstrap "$spoke" "$hub" REVIEW_KIT_REF=v9.9.9; local rc=$?
+  assert     "b3: missing tag stops" test "$rc" -ne 0
+  assert     "b3: missing tag says so" grep -q "'v9.9.9' is neither a tag" "$LOG"
+  assert_not "b3: missing tag is not called unreachable" grep -q 'cannot reach' "$LOG"
+
+  run_bootstrap "$spoke" "$WORK/b3-nowhere"; rc=$?
+  assert     "b3: unreachable hub stops" test "$rc" -ne 0
+  assert     "b3: unreachable hub says so" grep -q 'cannot reach' "$LOG"
+  assert_not "b3: unreachable hub does not claim no tags" grep -q 'no release tag' "$LOG"
+  assert_not "b3: nothing synced" test -f "$spoke/.review/kit-version"
 }
 
 # A local hub clone that is behind its own origin must warn — a stale clone
@@ -767,9 +937,16 @@ run_tests \
   test_update_marks_a_dirty_local_hub \
   test_update_marks_an_untracked_hub_file \
   test_update_leaves_a_clean_local_hub_unmarked \
+  test_update_survives_replacing_itself \
   test_update_network_pins_to_latest_tag \
   test_update_network_honors_explicit_ref \
+  test_update_network_refuses_a_branch_ref \
+  test_update_network_honors_a_commit_sha \
+  test_update_network_tells_unreachable_from_missing \
   test_update_network_refuses_without_pin \
+  test_bootstrap_block_matches_in_both_docs \
+  test_bootstrap_pins_and_refuses_a_branch \
+  test_bootstrap_tells_unreachable_from_missing \
   test_update_warns_on_stale_local_clone \
   test_init_seeds_coderabbit_config \
   test_init_never_overwrites_existing_config \

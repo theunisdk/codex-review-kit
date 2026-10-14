@@ -23,16 +23,16 @@
 # Hub resolution order: $REVIEW_KIT_DIR, then the local clone at
 # ~/dev/private/codex-review-kit, then a pinned fetch from the public repo:
 # its latest release tag, or $REVIEW_KIT_REF (a tag or full commit SHA) —
-# never the mutable default branch. Local sources are used as-is (offline
+# never a branch, the default one included. Local sources are used as-is (offline
 # stays fine), with a warning when a local clone is behind its own origin.
 # Every run prints the resolved source and the revision it installs.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-# Everything lives in main() so bash parses the whole script before any file
-# is copied — this script overwrites ITSELF during the sync, and an
-# interpreter still reading the old file at that moment continues at the same
-# byte offset in the new one.
+# This script overwrites ITSELF during the sync, and bash reads a script file
+# as it goes: whatever it reads next comes from the new file at the old byte
+# offset. So everything lives in main(), parsed before any file is copied, and
+# the call and its exit share the last line — nothing is read after it.
 main() {
 
 KIT_GIT_URL="${REVIEW_KIT_URL:-https://github.com/theunisdk/codex-review-kit}"
@@ -51,11 +51,10 @@ TMP_CLONE=""
 cleanup() { if [ -n "$TMP_CLONE" ]; then rm -rf "$TMP_CLONE"; fi; }
 trap cleanup EXIT
 
-# Highest release tag (vN.N…) on the remote, numeric per component so
-# v0.10.0 beats v0.9.0. Empty when unreachable or untagged.
+# Highest release tag (vN.N…) in `git ls-remote --tags` output on stdin,
+# numeric per component so v0.10.0 beats v0.9.0. Empty when there is none.
 latest_tag() {
-  git ls-remote --tags "$1" 'v[0-9]*' 2>/dev/null \
-    | sed -n 's|.*refs/tags/v\([0-9][0-9.]*\)$|\1|p' \
+  sed -n 's|.*refs/tags/v\([0-9][0-9.]*\)$|\1|p' \
     | sort -t. -k1,1n -k2,2n -k3,3n | tail -n1 | sed 's/^/v/'
 }
 
@@ -64,16 +63,27 @@ if [ -n "${REVIEW_KIT_DIR:-}" ] && [ -d "$REVIEW_KIT_DIR" ]; then
 elif [ -d "$HOME/dev/private/codex-review-kit/scripts" ]; then
   KIT="$HOME/dev/private/codex-review-kit"; KIT_FROM="local clone"
 else
+  TAGS="$(git ls-remote --tags "$KIT_GIT_URL" 2>/dev/null)" || {
+    echo "error: cannot reach $KIT_GIT_URL — check the connection and the URL" >&2
+    exit 1; }
   if [ -z "$KIT_REF" ]; then
-    KIT_REF="$(latest_tag "$KIT_GIT_URL")" || KIT_REF=""
+    KIT_REF="$(printf '%s\n' "$TAGS" | latest_tag)"
     [ -n "$KIT_REF" ] || {
-      echo "error: no release tag found on $KIT_GIT_URL — check the connection, or set REVIEW_KIT_REF to a tag or full commit SHA" >&2
+      echo "error: no release tag found on $KIT_GIT_URL — set REVIEW_KIT_REF to a tag or full commit SHA" >&2
       exit 1; }
+  fi
+  if [[ $KIT_REF =~ ^[0-9a-f]{40}$ ]]; then
+    FETCH_REF="$KIT_REF"
+  elif printf '%s\n' "$TAGS" | awk -v t="refs/tags/$KIT_REF" '$2 == t {f=1} END {exit !f}'; then
+    FETCH_REF="refs/tags/$KIT_REF"
+  else
+    echo "error: '$KIT_REF' is not a tag on $KIT_GIT_URL or a full commit SHA — REVIEW_KIT_REF takes one of those, never a branch" >&2
+    exit 1
   fi
   TMP_CLONE="$(mktemp -d)"
   echo "no local hub found — fetching $KIT_GIT_URL @ $KIT_REF" >&2
   git -C "$TMP_CLONE" init -q
-  git -C "$TMP_CLONE" fetch --quiet --depth 1 "$KIT_GIT_URL" "$KIT_REF" || {
+  git -C "$TMP_CLONE" fetch --quiet --depth 1 "$KIT_GIT_URL" "$FETCH_REF" || {
     echo "error: cannot fetch '$KIT_REF' from $KIT_GIT_URL — needs a tag or full commit SHA" >&2
     exit 1; }
   git -C "$TMP_CLONE" checkout --quiet --detach FETCH_HEAD
@@ -172,4 +182,4 @@ printf 'kit: %s %s\nref: %s\nsource: %s\nsynced: %s\n' \
 echo "synced from kit @ $KIT_DESC ($KIT_COMMIT) → run scripts/review-install.sh if this is a new machine"
 
 }
-main "$@"
+main "$@"; exit $?

@@ -23,10 +23,10 @@ bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
 ./scripts/review-install.sh
 ```
 
-Without a local clone, the bootstrap fetches the hub's latest release tag —
-never the mutable `main` — and prints the source and revision it installs.
-Set `REVIEW_KIT_REF` to a tag or full commit SHA to pin harder. See
-[REVIEW.md](REVIEW.md) for the full install notes.
+Without a local clone, use the pinned bootstrap in [REVIEW.md](REVIEW.md#install):
+it fetches the hub's latest release tag — never the mutable `main` — and
+prints the source and revision it installs. Set `REVIEW_KIT_REF` to a tag or
+full commit SHA to pin harder; a branch name is refused.
 
 ## Tests
 
