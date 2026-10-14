@@ -57,9 +57,20 @@ hook_wiring() {
   if [ -f "$user_hook" ] && [ ! -r "$user_hook" ]; then
     chain=2
   elif [ -f "$user_hook" ]; then
-    awk '/^[[:space:]]*#/ { next }
+    awk 'function redirect_only(line,   w, n, i, op) {
+        sub(/^[[:space:]]*exec/, "", line); sub(/[[:space:]]#.*$/, "", line)
+        n = split(line, w, /[[:space:]]+/); op = 0
+        for (i = 1; i <= n; i++) {
+          if (w[i] == "") continue
+          if (op) { op = 0; continue }
+          if (w[i] ~ /^[0-9]*(<|>|>>|<>|>&|<&|>\|)$/) { op = 1; continue }
+          if (w[i] !~ /^[0-9]*[<>]/) return 0
+        }
+        return !op
+      }
+      /^[[:space:]]*#/ { next }
       /\.githooks\/pre-push/ { found = 1; exit }
-      /^[[:space:]]*exec([[:space:]]+[0-9]*[<>]|[[:space:]]*$)/ { next }
+      /^[[:space:]]*exec([[:space:]]|;|$)/ && redirect_only($0) { next }
       /^[[:space:]]*(exec|exit)([[:space:]]|;|$)/ { blocked = 1; exit }
       END { exit(found ? 0 : blocked ? 3 : 1) }' "$user_hook" 2>/dev/null
     chain=$?

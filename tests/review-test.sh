@@ -1632,8 +1632,12 @@ test_review_warns_when_hooks_path_points_elsewhere() {
   run_review "$repo" "$stub" --lenses correctness
   assert "h6: a chain after an indented exit is not a chain" grep -qF 'can exec or exit before' "$LOG"
 
+  ( cd "$repo" && printf '#!/bin/sh\nexec >/dev/null /bin/true\n.githooks/pre-push "$@" || exit $?\n' > .husky/pre-push )
+  run_review "$repo" "$stub" --lenses correctness
+  assert "h6: an exec that redirects and runs a command is not skipped" grep -qF 'can exec or exit before' "$LOG"
+
   # an exec that only redirects returns
-  ( cd "$repo" && printf '#!/bin/sh\nexec 1>&2\n.githooks/pre-push "$@" || exit $?\nif [ -n "$SKIP" ]; then\n  exit 0\nfi\n' > .husky/pre-push )
+  ( cd "$repo" && printf '#!/bin/sh\nexec 1>&2\nexec 2> /dev/null 3>&1\n.githooks/pre-push "$@" || exit $?\nif [ -n "$SKIP" ]; then\n  exit 0\nfi\n' > .husky/pre-push )
   run_review "$repo" "$stub" --lenses correctness
   assert_hook_quiet "h6 (chain after a redirect, before a guard)" "$repo"
 
