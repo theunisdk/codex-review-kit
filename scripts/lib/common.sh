@@ -33,7 +33,7 @@ detect_base_branch() {
 # and HOOK_FIX (the command that wires it; empty when wired). Returns 1 when unwired.
 HOOK_CHAIN='.githooks/pre-push "$@" || exit $?'
 hook_wiring() {
-  local hooks_path hooks_dir hook user_hook live="" f
+  local hooks_path hooks_dir hook user_hook live="" f chain
   HOOK_STATE=""; HOOK_NOTE=""; HOOK_FIX=""
   hooks_path="$(git config --get core.hooksPath 2>/dev/null)"
   hooks_dir="$(git rev-parse --git-path hooks 2>/dev/null)" \
@@ -52,24 +52,35 @@ hook_wiring() {
   hooks_dir="${hooks_dir%/}"; hook="$hooks_dir/pre-push"; user_hook="$hook"
   # husky 9: core.hooksPath is .husky/_, whose stubs run the user's .husky/<hook>
   case "$hooks_dir" in _|*/_) [ -f "$hooks_dir/h" ] && user_hook="${hooks_dir%_}pre-push" ;; esac
-  # a chain line after an exec or exit never runs
-  if [ -x "$hook" ] && awk '/^[[:space:]]*#/ { next }
+  # a chain line after a top-level exec or exit never runs; exec with only redirections returns
+  chain=1
+  if [ -f "$user_hook" ]; then
+    awk '/^[[:space:]]*#/ { next }
       /\.githooks\/pre-push/ { found = 1; exit }
-      /^[[:space:]]*(exec|exit)([[:space:]]|;|$)/ { exit }
-      END { exit(found ? 0 : 1) }' "$user_hook" 2>/dev/null; then
+      /^exec([[:space:]]+[0-9]*[<>]|[[:space:]]*$)/ { next }
+      /^(exec|exit)([[:space:]]|;|$)/ { blocked = 1; exit }
+      END { exit(found ? 0 : blocked ? 3 : 1) }' "$user_hook" 2>/dev/null
+    chain=$?
+  fi
+  if [ "$chain" = 0 ] && [ -x "$hook" ]; then
     HOOK_STATE=chained; HOOK_NOTE="$user_hook chains .githooks/pre-push"; return 0
   fi
-  if [ -f "$user_hook" ] && grep -Eq '^[[:space:]]*(exec|exit)([[:space:]]|;|$)' "$user_hook" 2>/dev/null; then
-    HOOK_FIX="add the line  $HOOK_CHAIN  to $user_hook, above its first exec/exit"
-  elif [ -f "$user_hook" ]; then
-    HOOK_FIX="printf '\\n%s\\n' '$HOOK_CHAIN' >> $(printf %q "$user_hook")"
-  else
-    HOOK_FIX="printf '#!/bin/sh\\n%s\\n' '$HOOK_CHAIN' > $(printf %q "$user_hook")"
-  fi
-  [ "$user_hook" != "$hook" ] || [ -x "$hook" ] || HOOK_FIX="$HOOK_FIX && chmod +x $(printf %q "$hook")"
+  case "$chain" in
+    0) HOOK_FIX="chmod +x $(printf %q "$hook")" ;;
+    1) if [ -f "$user_hook" ]; then
+           HOOK_FIX="printf '\\n%s\\n' '$HOOK_CHAIN' >> $(printf %q "$user_hook")"
+         else
+           HOOK_FIX="printf '#!/bin/sh\\n%s\\n' '$HOOK_CHAIN' > $(printf %q "$user_hook")"
+         fi ;;
+    3) HOOK_FIX="add the line  $HOOK_CHAIN  to $user_hook, above its first top-level exec/exit" ;;
+  esac
+  [ -z "$HOOK_FIX" ] || [ "$chain" = 0 ] || [ "$user_hook" != "$hook" ] || [ -x "$hook" ] \
+    || HOOK_FIX="$HOOK_FIX && chmod +x $(printf %q "$hook")"
   if [ -n "$hooks_path" ]; then
     HOOK_STATE=foreign
     HOOK_NOTE="core.hooksPath is '$hooks_path', and its pre-push does not call .githooks/pre-push"
+    [ "$chain" != 0 ] || HOOK_NOTE="core.hooksPath is '$hooks_path', and $hook is not executable, so git skips it"
+    [ "$chain" != 2 ] || HOOK_NOTE="core.hooksPath is '$hooks_path', and $user_hook cannot be read to check that it calls .githooks/pre-push"
     return 1
   fi
   if [ -d "$hooks_dir" ] && [ ! -r "$hooks_dir" ]; then

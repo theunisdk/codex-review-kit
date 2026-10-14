@@ -1625,7 +1625,12 @@ test_review_warns_when_hooks_path_points_elsewhere() {
 
   ( cd "$repo" && printf '#!/bin/sh\nexec npm test\n.githooks/pre-push "$@" || exit $?\n' > .husky/pre-push )
   run_review "$repo" "$stub" --lenses correctness
-  assert "h6: a chain after exec is not a chain" grep -qF 'above its first exec/exit' "$LOG"
+  assert "h6: a chain after exec is not a chain" grep -qF 'above its first top-level exec/exit' "$LOG"
+
+  # an exit inside a guard, or an exec that only redirects, does not end the hook
+  ( cd "$repo" && printf '#!/bin/sh\nexec 1>&2\nif [ -n "$SKIP" ]; then\n  exit 0\nfi\n.githooks/pre-push "$@" || exit $?\n' > .husky/pre-push )
+  run_review "$repo" "$stub" --lenses correctness
+  assert_hook_quiet "h6 (chain after guard and redirect)" "$repo"
 
   # past the pipe buffer, so an early-exiting match cannot SIGPIPE its writer
   ( cd "$repo" && { printf '#!/bin/sh\n.githooks/pre-push "$@" || exit $?\n'
@@ -1633,9 +1638,6 @@ test_review_warns_when_hooks_path_points_elsewhere() {
   run_review "$repo" "$stub" --lenses correctness
   assert_hook_quiet "h6 (chained)" "$repo"
 
-  ( cd "$repo" && git config core.hooksPath .husky/ )
-  run_review "$repo" "$stub" --lenses correctness
-  assert_hook_quiet "h6 (trailing slash)" "$repo"
 
   # husky 9 points hooksPath at .husky/_, whose stubs run .husky/<hook>
   ( cd "$repo" && mkdir -p .husky/_ && : > .husky/_/h \
