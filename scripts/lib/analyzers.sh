@@ -83,14 +83,33 @@ collect_analyzer_output() {
   fi
 
   # --- semgrep (multi-language, high signal) ------------------------------
-  local sg_list f; sg_list="$(_files_matching '*')"
+  # With --error, rc 0 is clean and rc 1 is findings; anything else, or output
+  # that isn't semgrep's JSON, is a failed scan.
+  local sg_list f sg_out sg_rc sg_hits sg_errs; sg_list="$(_files_matching '*')"
   if [ -n "$sg_list" ] && _have semgrep; then
     _section "semgrep --config=auto"
     local -a sg_files; sg_files=()
     while IFS= read -r f; do sg_files+=("$f"); done <<< "$sg_list"
-    semgrep --config=auto --quiet --error --json "${sg_files[@]}" 2>/dev/null \
-      | jq -r '.results[]? | "- " + .path + ":" + (.start.line|tostring) + " [" + .check_id + "] " + .extra.message' \
-      2>/dev/null | head -200 >> "$report" || true
+    sg_out="$(semgrep --config=auto --quiet --error --json "${sg_files[@]}" 2> "$out/semgrep.stderr" < /dev/null)"; sg_rc=$?
+    if [ "$sg_rc" -le 1 ] && jq -e 'type == "object" and has("results")' >/dev/null 2>&1 <<< "$sg_out"; then
+      sg_hits="$(jq -r '.results[] | "- " + .path + ":" + (.start.line|tostring) + " [" + .check_id + "] " + .extra.message' <<< "$sg_out")"
+      if [ -n "$sg_hits" ]; then
+        printf '%s\n' "$sg_hits" | head -200 >> "$report"
+      elif [ "$sg_rc" -eq 0 ]; then
+        echo "semgrep: no findings in ${#sg_files[@]} file(s)" >> "$report"
+      else
+        echo "semgrep FAILED (rc=1 with no results) — findings were NOT reported" >> "$report"
+      fi
+      sg_errs="$(jq -r '.errors[]? | "- " + (.type | tostring) + ": " + ((.message // "") | tostring)' <<< "$sg_out")"
+      if [ -n "$sg_errs" ]; then
+        printf 'semgrep reported errors — some files or rules were NOT scanned:\n%s\n' \
+          "$(printf '%s\n' "$sg_errs" | head -10)" >> "$report"
+      fi
+    else
+      printf 'semgrep FAILED (rc=%s) — files were NOT scanned:\n%s\n' \
+        "$sg_rc" "$( { cat "$out/semgrep.stderr"; printf '%s\n' "$sg_out"; } | grep . | head -20)" >> "$report"
+    fi
+    rm -f "$out/semgrep.stderr"
   fi
 
   # --- Shell --------------------------------------------------------------

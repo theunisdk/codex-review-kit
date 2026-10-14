@@ -384,10 +384,15 @@ cat "$ANALYZER_STUB_DIR/$tool.out" 2>/dev/null
 exit "$(cat "$ANALYZER_STUB_DIR/$tool.rc")"
 EOF
 for r in pnpm yarn bun; do cp "$WORK/abin/npx" "$WORK/abin/$r"; done
+# semgrep: records its argv in semgrep.args; prints semgrep.out (default: no
+# results), semgrep.err on stderr, and exits semgrep.rc (default 0).
 cat > "$WORK/abin/semgrep" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$@" > "$ANALYZER_STUB_DIR/semgrep.args"
-echo '{"results":[]}'
+d="$ANALYZER_STUB_DIR"
+printf '%s\n' "$@" > "$d/semgrep.args"
+[ -f "$d/semgrep.err" ] && cat "$d/semgrep.err" >&2
+if [ -f "$d/semgrep.out" ]; then cat "$d/semgrep.out"; else echo '{"results":[],"errors":[]}'; fi
+exit "$(cat "$d/semgrep.rc" 2>/dev/null || echo 0)"
 EOF
 chmod +x "$WORK"/abin/*
 
@@ -506,6 +511,36 @@ test_semgrep_gets_whole_paths() {
   run_review_analyzers "$AREPO" "$ASTUB" main
   assert     "sg1: spaced name passed as one argument" grep -qxF 'a b.txt' "$ASTUB/semgrep.args"
   assert_not "sg1: name not split" grep -qxF 'a' "$ASTUB/semgrep.args"
+  assert     "sg1: clean run says so" grep -qF 'semgrep: no findings in' "$AREPO/.review/raw/analyzers.txt"
+}
+
+# semgrep_case <id> <rc> <stdout> [stderr] — one run with a scripted semgrep
+semgrep_case() {
+  analyzer_repo "$1"
+  printf '%s\n' "$2" > "$ASTUB/semgrep.rc"
+  printf '%s' "$3" > "$ASTUB/semgrep.out"
+  [ -z "${4:-}" ] || printf '%s\n' "$4" > "$ASTUB/semgrep.err"
+  ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  SG_REPORT="$AREPO/.review/raw/analyzers.txt"
+}
+
+# With --error, rc 1 is findings; rc 2+ or output that isn't semgrep JSON is a
+# failed scan, which used to leave the section empty — read as clean.
+test_semgrep_failure_is_named() {
+  semgrep_case sg2 1 '{"results":[{"path":"src.txt","start":{"line":1},"check_id":"rule.x","extra":{"message":"bad"}}],"errors":[]}'
+  assert     "sg2: rc 1 lists the finding" grep -qF -- '- src.txt:1 [rule.x] bad' "$SG_REPORT"
+  assert_not "sg2: rc 1 is not FAILED" grep -qF 'semgrep FAILED' "$SG_REPORT"
+
+  semgrep_case sg3 2 '' 'semgrep: invalid configuration'
+  assert "sg3: rc 2 is FAILED" grep -qF 'semgrep FAILED (rc=2)' "$SG_REPORT"
+  assert "sg3: FAILED carries stderr" grep -qF 'invalid configuration' "$SG_REPORT"
+
+  semgrep_case sg4 0 ''
+  assert "sg4: rc 0 with no JSON is FAILED" grep -qF 'semgrep FAILED (rc=0)' "$SG_REPORT"
+
+  semgrep_case sg5 0 '{"results":[],"errors":[{"type":"Syntax error","message":"src.txt: parse failure"}]}'
+  assert "sg5: per-file errors are named" grep -qF 'some files or rules were NOT scanned' "$SG_REPORT"
 }
 
 # --- analyzer tests: JS / TS ----------------------------------------------
@@ -1332,6 +1367,7 @@ run_tests \
   test_gitleaks_leaks_reported \
   test_gitleaks_uncommitted_scans_diff_only \
   test_semgrep_gets_whole_paths \
+  test_semgrep_failure_is_named \
   test_js_runner_follows_package_manager \
   test_js_unresolvable_tool_is_named \
   test_js_eslint_crash_is_failed \
