@@ -10,12 +10,13 @@
 # Keep every command best-effort (`|| true`, `head -N`) — this pass informs
 # the review, it never gates it. Verify each command works before adding it.
 #
-# Example (TypeScript monorepo):
+# Example (pnpm TypeScript monorepo — use the runner your lockfile implies:
+# npx --no-install, yarn exec, bun run):
 #
 # local ts; ts="$(_files_matching '*.ts|*.tsx')"
 # if [ -n "$ts" ]; then
 #   _section "eslint"
-#   printf '%s\n' "$ts" | xargs npx --no-install eslint 2>&1 | head -200 >> "$report" || true
+#   printf '%s\n' "$ts" | xargs pnpm exec eslint 2>&1 | head -200 >> "$report" || true
 #   _section "tsc"
-#   npx --no-install tsc --build 2>&1 | head -100 >> "$report" || true
+#   pnpm exec tsc --build 2>&1 | head -100 >> "$report" || true
 # fi

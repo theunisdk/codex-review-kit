@@ -54,7 +54,7 @@ make_repo() { # make_repo <dir> — kit installed, one commit on main, branch `c
     git config user.name review-test
     mkdir -p scripts/lib .review/prompts .review/raw
     cp "$KIT/scripts/review.sh" scripts/
-    cp "$KIT/scripts/lib/common.sh" scripts/lib/
+    cp "$KIT/scripts/lib/common.sh" "$KIT/scripts/lib/analyzers.sh" scripts/lib/
     cp "$KIT/.review/schema.json" .review/
     cp "$KIT/.review/prompts/_common.md" "$KIT/.review/prompts/correctness.md" \
        "$KIT/.review/prompts/security.md" .review/prompts/
@@ -337,6 +337,234 @@ test_spec_path_with_space() {
   run_review "$repo" "$stub" --spec 'docs/my specs' --lenses correctness; rc=$?
   assert "spec-space: directory path exits 0" test "$rc" -eq 0
   assert "spec-space: directory's file listed" grep -qxF 'docs/my specs/a b.md' "$repo/.review/raw/changed-files.txt"
+}
+
+# --- analyzer stubs --------------------------------------------------------
+# CI has no gitleaks/eslint/tsc, so every tool the analyzer pass reaches for is
+# a stub in $WORK/abin, first on PATH. Behaviour comes from $ANALYZER_STUB_DIR.
+mkdir -p "$WORK/abin"
+# gitleaks: logs its args to gitleaks.calls. The history scan (no --pipe) prints
+# gitleaks-history.out and exits gitleaks-history.rc; --pipe uses gitleaks-pipe.*.
+# Without those files it reports a clean scan.
+cat > "$WORK/abin/gitleaks" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$ANALYZER_STUB_DIR/gitleaks.calls"
+case " $* " in *" --pipe "*) kind=pipe; cat > /dev/null ;; *) kind=history ;; esac
+if [ -f "$ANALYZER_STUB_DIR/gitleaks-$kind.out" ]; then
+  cat "$ANALYZER_STUB_DIR/gitleaks-$kind.out"
+  exit "$(cat "$ANALYZER_STUB_DIR/gitleaks-$kind.rc" 2>/dev/null || echo 0)"
+fi
+[ "$kind" = history ] && echo "1:00PM INF 1 commits scanned."
+echo "1:00PM INF no leaks found"
+EOF
+# npx / pnpm / yarn / bun: log "<runner> <args>" to runner.calls, strip the
+# runner's own verb, and resolve <tool> only if this runner is the one named in
+# `runner` and <tool>.rc exists. Then print <tool>.out and exit <tool>.rc.
+cat > "$WORK/abin/npx" <<'EOF'
+#!/usr/bin/env bash
+me="$(basename "$0")"
+printf '%s %s\n' "$me" "$*" >> "$ANALYZER_STUB_DIR/runner.calls"
+while [ $# -gt 0 ]; do
+  case "$1" in --no-install|--silent|exec|run) shift ;; *) break ;; esac
+done
+tool="$1"; shift
+if [ "$me" != "$(cat "$ANALYZER_STUB_DIR/runner" 2>/dev/null)" ] || [ ! -f "$ANALYZER_STUB_DIR/$tool.rc" ]; then
+  echo "$me: $tool: command not found" >&2; exit 1
+fi
+[ "${1:-}" = --version ] && { echo v0.0.0-stub; exit 0; }
+cat "$ANALYZER_STUB_DIR/$tool.out" 2>/dev/null
+exit "$(cat "$ANALYZER_STUB_DIR/$tool.rc")"
+EOF
+for r in pnpm yarn bun; do cp "$WORK/abin/npx" "$WORK/abin/$r"; done
+printf '#!/usr/bin/env bash\necho %s\n' "'{\"results\":[]}'" > "$WORK/abin/semgrep"
+chmod +x "$WORK"/abin/*
+
+analyzer_repo() { # analyzer_repo <id> — fixture repo + stub dir in $AREPO/$ASTUB
+  AREPO="$WORK/$1"; ASTUB="$WORK/$1-stub"
+  make_repo "$AREPO"; mkdir -p "$ASTUB"
+  printf '{"findings":[]}' > "$ASTUB/correctness.json"
+}
+
+run_review_analyzers() { # run_review_analyzers <dir> <stubdir> <review.sh args...>; output in $LOG
+  local dir="$1" stub="$2"; shift 2
+  LOG="$dir.log"
+  (
+    cd "$dir" && PATH="$WORK/abin:$WORK/bin:$PATH" CODEX_STUB_DIR="$stub" ANALYZER_STUB_DIR="$stub" \
+      REVIEW_SKIP_AUTH_CHECK=1 bash scripts/review.sh --lenses correctness "$@"
+  ) > "$LOG" 2>&1
+}
+
+section_body() { # section_body <report> <title> — the lines under "### <title>"
+  awk -v h="### $2" '$0 == h { on = 1; next } /^### / { on = 0 } on' "$1"
+}
+
+section_nonempty() { [ -n "$(section_body "$1" "$2" | tr -d '[:space:]')" ]; }
+
+# --- analyzer tests: secrets ----------------------------------------------
+# Branch mode must scan each commit in the range, not only the net diff — a
+# token added then removed on the branch is absent from diff.patch. Regression
+# for #9. The net-diff scan stays alongside it.
+test_gitleaks_scans_branch_history() {
+  analyzer_repo g1
+  ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  local mb; mb="$(git -C "$AREPO" merge-base main HEAD)"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  local report="$AREPO/.review/raw/analyzers.txt"
+
+  assert     "g1: history scan given --log-opts=<merge-base>..HEAD" grep -qF -- "--log-opts=$mb..HEAD" "$ASTUB/gitleaks.calls"
+  assert     "g1: net diff still scanned with --pipe" grep -qF -- '--pipe' "$ASTUB/gitleaks.calls"
+  assert     "g1: both scans labelled in the report" \
+    sh -c 'grep -qF -- "-- commit history" "$1" && grep -qF -- "-- net diff" "$1"' _ "$report"
+  assert     "g1: clean scan reports no leaks" grep -qF 'no leaks found' "$report"
+  assert_not "g1: clean scan is not SCAN FAILED" grep -qF 'SCAN FAILED' "$report"
+}
+
+# rc 1 is not "findings": a broken .gitleaks.toml exits 1 with only an FTL line.
+test_gitleaks_fatal_is_scan_failed() {
+  analyzer_repo g2
+  ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  printf '1:00PM FTL unable to load gitleaks config\n' > "$ASTUB/gitleaks-history.out"
+  printf '1\n' > "$ASTUB/gitleaks-history.rc"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+
+  assert "g2: FTL + rc 1 is SCAN FAILED" grep -qF 'SCAN FAILED (rc=1' "$AREPO/.review/raw/analyzers.txt"
+}
+
+# A bad --log-opts range logs ERR, scans 0 commits, says "no leaks found", rc 0.
+test_gitleaks_error_line_is_scan_failed() {
+  analyzer_repo g3
+  ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  printf '%s\n' "1:00PM ERR [git] fatal: ambiguous argument 'nosuchref..HEAD'" \
+    '1:00PM INF 0 commits scanned.' '1:00PM INF no leaks found' > "$ASTUB/gitleaks-history.out"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+
+  assert "g3: ERR + 0 commits + rc 0 is SCAN FAILED" grep -qF 'SCAN FAILED' "$AREPO/.review/raw/analyzers.txt"
+}
+
+# Zero commits scanned on a range that adds lines is a failed scan even with no
+# ERR line; on a deletion-only range it is the honest count, not a failure.
+test_gitleaks_commit_count_checked() {
+  analyzer_repo g4
+  ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  printf '%s\n' '1:00PM INF 0 commits scanned.' '1:00PM INF no leaks found' > "$ASTUB/gitleaks-history.out"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  assert "g4: 0 commits scanned on an adding range is SCAN FAILED" \
+    grep -qF 'SCAN FAILED (0 commits scanned)' "$AREPO/.review/raw/analyzers.txt"
+
+  analyzer_repo g4b
+  ( cd "$AREPO" && : > src.txt && git add -A && git commit -qm 'delete only' )
+  printf '%s\n' '1:00PM INF 0 commits scanned.' '1:00PM INF no leaks found' > "$ASTUB/gitleaks-history.out"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  assert_not "g4: 0 commits scanned on a deletion-only range is not a failure" \
+    grep -qF 'SCAN FAILED' "$AREPO/.review/raw/analyzers.txt"
+}
+
+test_gitleaks_leaks_reported() {
+  analyzer_repo g5
+  ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  printf '%s\n' 'Finding:     REDACTED' 'RuleID:      github-pat' 'File:        s.txt' \
+    '1:00PM INF 1 commits scanned.' '1:00PM WRN leaks found: 1' > "$ASTUB/gitleaks-history.out"
+  printf '3\n' > "$ASTUB/gitleaks-history.rc"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  local report="$AREPO/.review/raw/analyzers.txt"
+
+  assert     "g5: rc 3 reports the finding" grep -qF 'RuleID:      github-pat' "$report"
+  assert_not "g5: rc 3 is not SCAN FAILED" grep -qF 'SCAN FAILED' "$report"
+}
+
+test_gitleaks_uncommitted_scans_diff_only() {
+  analyzer_repo g6
+  ( cd "$AREPO" && printf 'change\n' >> src.txt )
+  run_review_analyzers "$AREPO" "$ASTUB" --uncommitted
+  assert_not "g6: uncommitted mode has no history scan" grep -qF -- '--log-opts' "$ASTUB/gitleaks.calls"
+  assert     "g6: uncommitted mode scans the diff" grep -qF -- '--pipe' "$ASTUB/gitleaks.calls"
+}
+
+# --- analyzer tests: JS / TS ----------------------------------------------
+# js_review <id> <setup snippet> — commits the setup plus a changed app.ts, runs
+# the analyzer pass. The stub resolves tools only via the runner in $ASTUB/runner.
+js_review() {
+  analyzer_repo "$1"
+  ( cd "$AREPO" && eval "$2" && printf 'export const x = 1;\n' > app.ts \
+      && git add -A && git commit -qm 'js change' )
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  JS_REPORT="$AREPO/.review/raw/analyzers.txt"
+}
+
+# Neither section may come out empty: empty reads as clean to the lenses.
+assert_js_sections_nonempty() { # assert_js_sections_nonempty <id> <tsc title>
+  assert "$1: eslint section is not empty" section_nonempty "$JS_REPORT" eslint
+  assert "$1: $2 section is not empty" section_nonempty "$JS_REPORT" "$2"
+}
+
+# One case per package manager, by packageManager field and by lockfile. The
+# field outranks a stray lockfile. Regression for #18 (npx assumed everywhere).
+test_js_runner_follows_package_manager() {
+  local id setup runner want
+  while IFS='~' read -r id setup runner want; do
+    [ -n "$id" ] || continue
+    analyzer_repo "$id"
+    printf '%s\n' "$runner" > "$ASTUB/runner"
+    printf "app.ts:1:14  error  'x' is assigned a value but never used\n" > "$ASTUB/eslint.out"
+    printf '1\n' > "$ASTUB/eslint.rc"
+    ( cd "$AREPO" && eval "$setup" && printf 'export const x = 1;\n' > app.ts \
+        && git add -A && git commit -qm 'js change' )
+    run_review_analyzers "$AREPO" "$ASTUB" main
+    JS_REPORT="$AREPO/.review/raw/analyzers.txt"
+    assert "$id: eslint run as '$want'" grep -qxF "$want app.ts" "$ASTUB/runner.calls"
+    assert "$id: eslint findings reported" grep -qF "'x' is assigned a value" "$JS_REPORT"
+    assert_js_sections_nonempty "$id" 'tsc --noEmit'
+  done <<'EOF'
+j1~printf '{"packageManager":"pnpm@9.1.0"}' > package.json; : > package-lock.json~pnpm~pnpm exec eslint
+j2~printf '{"packageManager":"yarn@4.1.0+sha512.abc"}' > package.json~yarn~yarn exec eslint
+j3~printf '{"packageManager":"yarn@1.22.19"}' > package.json~yarn~yarn --silent run eslint
+j4~printf '{"packageManager":"bun@1.1.0"}' > package.json~bun~bun run eslint
+j5~printf '{"packageManager":"npm@10.2.0"}' > package.json~npx~npx --no-install eslint
+j6~printf '{}' > package.json; : > pnpm-lock.yaml~pnpm~pnpm exec eslint
+j7~printf '{}' > package.json; printf '# yarn lockfile v1\n' > yarn.lock~yarn~yarn --silent run eslint
+j8~printf '{}' > package.json; printf '__metadata:\n  version: 8\n' > yarn.lock~yarn~yarn exec eslint
+j9~printf '{}' > package.json; : > bun.lock~bun~bun run eslint
+j10~printf '{}' > package.json; printf '{}' > package-lock.json~npx~npx --no-install eslint
+EOF
+}
+
+# A tool the runner cannot resolve gets a named skip line, never an empty section.
+test_js_unresolvable_tool_is_named() {
+  js_review j11 "printf '{}' > package.json; : > pnpm-lock.yaml; printf '{}' > tsconfig.json; echo pnpm > '$WORK/j11-stub/runner'"
+  assert "j11: eslint skip names the runner" \
+    grep -qF 'analyzer skipped: eslint not resolvable via pnpm exec (pnpm-lock.yaml)' "$JS_REPORT"
+  assert "j11: tsc skip names the runner" \
+    grep -qF 'analyzer skipped: tsc not resolvable via pnpm exec' "$JS_REPORT"
+  assert_js_sections_nonempty j11 'tsc --noEmit'
+}
+
+# eslint 9 with no config exits 2 with empty stdout: that is a failed lint, not a clean one.
+test_js_eslint_crash_is_failed() {
+  mkdir -p "$WORK/j12-stub"
+  printf 'pnpm\n' > "$WORK/j12-stub/runner"; printf '2\n' > "$WORK/j12-stub/eslint.rc"
+  js_review j12 "printf '{}' > package.json; : > pnpm-lock.yaml"
+  assert "j12: eslint rc 2 is FAILED" grep -qF 'eslint FAILED (rc=2)' "$JS_REPORT"
+  assert_js_sections_nonempty j12 'tsc --noEmit'
+}
+
+# A clean run says so, and a root tsconfig with references is type-checked with --build.
+test_js_clean_run_and_tsc_build() {
+  mkdir -p "$WORK/j13-stub"
+  printf 'pnpm\n' > "$WORK/j13-stub/runner"
+  printf '0\n' > "$WORK/j13-stub/eslint.rc"; printf '0\n' > "$WORK/j13-stub/tsc.rc"
+  js_review j13 "printf '{}' > package.json; : > pnpm-lock.yaml; printf '{\"files\":[],\"references\":[{\"path\":\"pkg\"}]}' > tsconfig.json"
+  assert "j13: clean eslint says 0 problems" grep -qF 'eslint: 0 problems in 1 file(s)' "$JS_REPORT"
+  assert "j13: references root runs tsc --build" grep -qxF 'pnpm exec tsc --build' "$ASTUB/runner.calls"
+  assert "j13: clean tsc says no errors" grep -qF 'tsc --build: no errors' "$JS_REPORT"
+  assert_js_sections_nonempty j13 'tsc --build'
+}
+
+# No root package.json used to drop the whole JS section — indistinguishable
+# from "no JS changed".
+test_js_without_package_json_is_named() {
+  js_review j14 ":"
+  assert "j14: no package.json gets a skip line" grep -qF 'no package.json at the repo root' "$JS_REPORT"
+  assert "j14: eslint section is not empty" section_nonempty "$JS_REPORT" eslint
 }
 
 # --- updater fixtures ------------------------------------------------------
@@ -1019,6 +1247,17 @@ run_tests \
   test_fail_on_gate_keeps_its_report \
   test_spec_selecting_nothing_fails \
   test_spec_path_with_space \
+  test_gitleaks_scans_branch_history \
+  test_gitleaks_fatal_is_scan_failed \
+  test_gitleaks_error_line_is_scan_failed \
+  test_gitleaks_commit_count_checked \
+  test_gitleaks_leaks_reported \
+  test_gitleaks_uncommitted_scans_diff_only \
+  test_js_runner_follows_package_manager \
+  test_js_unresolvable_tool_is_named \
+  test_js_eslint_crash_is_failed \
+  test_js_clean_run_and_tsc_build \
+  test_js_without_package_json_is_named \
   test_update_reports_source_and_revision \
   test_update_marks_a_dirty_local_hub \
   test_update_marks_an_untracked_hub_file \
