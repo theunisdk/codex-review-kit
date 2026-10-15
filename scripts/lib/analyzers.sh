@@ -9,6 +9,63 @@
 # This file is synced from the kit — do not edit it in a repo. Wire your own
 # stack in .review/analyzers.local.sh instead (repo-owned, never overwritten).
 
+# --- secrets: shared with the zero-change path in review.sh ----------------
+# Branch mode scans each commit in the range as well as the net diff: a secret
+# added then removed on the branch is absent from diff.patch but still pushed.
+# The net-diff scan stays because `git log -p` shows no content for merges.
+# rc 3 means leaks. Any other non-zero rc, an ERR/FTL line, or no commits
+# scanned when the range adds lines means the scan did not happen — a bad
+# --log-opts range logs ERR, then "no leaks found", and exits 0.
+# Writes to $report. Returns 0 clean, 3 leaks, 1 scan failed.
+_gitleaks() { # _gitleaks <label> <min-commits|-> <gitleaks args...>
+  local label="$1" min="$2" gl_out gl_rc why="" n; shift 2
+  gl_out="$(gitleaks "$@" --no-banner --no-color --redact -v --exit-code 3 2>&1)"; gl_rc=$?
+  gl_out="$(printf '%s\n' "$gl_out" | sed "s/$(printf '\033')\[[0-9;]*m//g")"
+  case "$gl_rc" in 0|3) ;; *) why="rc=$gl_rc" ;; esac
+  if grep -qE '^[^ ]+ (ERR|FTL) ' <<< "$gl_out"; then
+    why="${why:+$why, }gitleaks logged an error"
+  fi
+  if [ "$min" != "-" ]; then
+    n="$(printf '%s\n' "$gl_out" | sed -n 's/.* \([0-9][0-9]*\) commits scanned.*/\1/p' | tail -n 1)"
+    if [ -z "$n" ]; then
+      why="${why:+$why, }no commit count reported"
+    elif [ "$n" -lt "$min" ]; then
+      why="${why:+$why, }$n commits scanned"
+    fi
+  fi
+  printf -- '-- %s\n' "$label" >> "$report"
+  if [ -z "$why" ]; then
+    printf '%s\n' "$gl_out" | head -100 >> "$report"
+    if [ "$(printf '%s\n' "$gl_out" | wc -l | tr -d ' ')" -gt 100 ]; then
+      printf '… (truncated)\n%s\n' "$(printf '%s\n' "$gl_out" | tail -n +101 | tail -n 3)" >> "$report"
+    fi
+  else
+    printf 'SCAN FAILED (%s) — secrets were NOT checked:\n%s\n' \
+      "$why" "$(printf '%s\n' "$gl_out" | head -20)" >> "$report"
+    return 1
+  fi
+  [ "$gl_rc" = 3 ] && return 3
+  return 0
+}
+
+_gitleaks_history() { # each commit in $MERGE_BASE..HEAD
+  local adds
+  adds="$(git log --no-merges --numstat --format= "$MERGE_BASE..HEAD" \
+    | awk '$1 ~ /^[0-9]+$/ && $1 > 0 { n = 1 } END { print n + 0 }')"
+  _gitleaks "commit history $MERGE_BASE..HEAD" "$adds" \
+    detect --source . --log-opts="$MERGE_BASE..HEAD" < /dev/null
+}
+
+# A branch whose commits net out to no diff: only the history scan has anything
+# to read. Writes <out>/analyzers.txt. Returns as _gitleaks, or 4 if gitleaks is
+# not installed.
+scan_history_secrets() {
+  local report="$1/analyzers.txt"
+  command -v gitleaks >/dev/null 2>&1 || return 4
+  printf '\n### %s\n' "gitleaks (secrets)" > "$report"
+  _gitleaks_history
+}
+
 collect_analyzer_output() {
   local out="$1"
   local list="$out/changed-files.txt"
@@ -31,49 +88,10 @@ collect_analyzer_output() {
     done < "$list"
   }
 
-  # --- secrets ------------------------------------------------------------
-  # Branch mode scans each commit in the range as well as the net diff: a secret
-  # added then removed on the branch is absent from diff.patch but still pushed.
-  # The net-diff scan stays because `git log -p` shows no content for merges.
-  # rc 3 means leaks. Any other non-zero rc, an ERR/FTL line, or no commits
-  # scanned when the range adds lines means the scan did not happen — a bad
-  # --log-opts range logs ERR, then "no leaks found", and exits 0.
-  _gitleaks() { # _gitleaks <label> <min-commits|-> <gitleaks args...>
-    local label="$1" min="$2" gl_out gl_rc why="" n; shift 2
-    gl_out="$(gitleaks "$@" --no-banner --no-color --redact -v --exit-code 3 2>&1)"; gl_rc=$?
-    gl_out="$(printf '%s\n' "$gl_out" | sed "s/$(printf '\033')\[[0-9;]*m//g")"
-    case "$gl_rc" in 0|3) ;; *) why="rc=$gl_rc" ;; esac
-    if grep -qE '^[^ ]+ (ERR|FTL) ' <<< "$gl_out"; then
-      why="${why:+$why, }gitleaks logged an error"
-    fi
-    if [ "$min" != "-" ]; then
-      n="$(printf '%s\n' "$gl_out" | sed -n 's/.* \([0-9][0-9]*\) commits scanned.*/\1/p' | tail -n 1)"
-      if [ -z "$n" ]; then
-        why="${why:+$why, }no commit count reported"
-      elif [ "$n" -lt "$min" ]; then
-        why="${why:+$why, }$n commits scanned"
-      fi
-    fi
-    printf -- '-- %s\n' "$label" >> "$report"
-    if [ -z "$why" ]; then
-      printf '%s\n' "$gl_out" | head -100 >> "$report"
-      if [ "$(printf '%s\n' "$gl_out" | wc -l | tr -d ' ')" -gt 100 ]; then
-        printf '… (truncated)\n%s\n' "$(printf '%s\n' "$gl_out" | tail -n +101 | tail -n 3)" >> "$report"
-      fi
-    else
-      printf 'SCAN FAILED (%s) — secrets were NOT checked:\n%s\n' \
-        "$why" "$(printf '%s\n' "$gl_out" | head -20)" >> "$report"
-    fi
-  }
-
   if _have gitleaks; then
     _section "gitleaks (secrets)"
     if [ "${MODE:-}" = "branch" ] && [ -n "${MERGE_BASE:-}" ]; then
-      local adds
-      adds="$(git log --no-merges --numstat --format= "$MERGE_BASE..HEAD" \
-        | awk '$1 ~ /^[0-9]+$/ && $1 > 0 { n = 1 } END { print n + 0 }')"
-      _gitleaks "commit history $MERGE_BASE..HEAD" "$adds" \
-        detect --source . --log-opts="$MERGE_BASE..HEAD" < /dev/null
+      _gitleaks_history
     fi
     if [ -s "$out/diff.patch" ]; then
       _gitleaks "net diff" - detect --pipe < "$out/diff.patch"

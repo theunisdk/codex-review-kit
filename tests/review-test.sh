@@ -518,6 +518,87 @@ test_gitleaks_uncommitted_scans_diff_only() {
   assert     "g6: uncommitted mode scans the diff" grep -qF -- '--pipe' "$ASTUB/gitleaks.calls"
 }
 
+# A branch whose commits net out to no diff never reached the analyzers: the
+# zero-change exit reported complete:true and gitleaks never ran. Regression
+# for #19. The history scan runs there now, and its outcome is the report.
+reverted_secret_branch() { # reverted_secret_branch <id> — $AREPO: add a secret, then revert it
+  analyzer_repo "$1"
+  ( cd "$AREPO" && printf 'api_key = "%s"\n' "not-a-real-key-0123456789" > creds.txt \
+      && git add -A && git commit -qm 'add creds' && git rm -q creds.txt && git commit -qm 'drop creds' )
+}
+
+test_gitleaks_scans_history_of_an_empty_net_diff() {
+  reverted_secret_branch g7
+  local mb rc; mb="$(git -C "$AREPO" merge-base main HEAD)"
+  printf '%s\n' 'Finding:     REDACTED' 'RuleID:      generic-api-key' 'File:        creds.txt' \
+    '1:00PM INF 2 commits scanned.' '1:00PM WRN leaks found: 1' > "$ASTUB/gitleaks-history.out"
+  printf '3\n' > "$ASTUB/gitleaks-history.rc"
+  run_review_analyzers "$AREPO" "$ASTUB" main; rc=$?
+  local json="$AREPO/.review/findings.json"
+
+  assert     "g7: the net diff is empty" grep -qF 'no changes to review' "$LOG"
+  assert     "g7: history scanned with --log-opts=<merge-base>..HEAD" grep -qF -- "--log-opts=$mb..HEAD" "$ASTUB/gitleaks.calls"
+  assert     "g7: the leak is a critical finding" \
+    jq -e '[.findings[] | select(.severity == "critical" and .lens == "gitleaks")] | length == 1' "$json"
+  assert     "g7: … carrying gitleaks' output" jq -e '.findings[0].evidence | contains("generic-api-key")' "$json"
+  assert     "g7: history_scan names the leak" jq -e '.history_scan == {commits: 2, result: "leaks"}' "$json"
+  assert     "g7: findings.md says so" grep -qF 'SECRET IN BRANCH HISTORY' "$AREPO/.review/findings.md"
+  assert_not "g7: findings.md is not a bare no-changes report" \
+    test "$(grep -c . < "$AREPO/.review/findings.md")" -le 2
+  assert     "g7: exit 0 without --fail-on" test "$rc" -eq 0
+  run_review_analyzers "$AREPO" "$ASTUB" main --fail-on high; rc=$?
+  assert     "g7: --fail-on high exits 2" test "$rc" -eq 2
+
+  rm -f "$ASTUB/gitleaks-history.out" "$ASTUB/gitleaks-history.rc"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  assert     "g7: a clean history scan is complete" jq -e '.complete == true and .findings == []' "$json"
+  assert     "g7: … and says it scanned" jq -e '.history_scan.result == "clean"' "$json"
+
+  analyzer_repo g7b
+  : > "$ASTUB/gitleaks.calls"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  assert_not "g7: no commits, no history scan" grep -q . "$ASTUB/gitleaks.calls"
+  assert     "g7: … and no history_scan field" jq -e 'has("history_scan") | not' "$AREPO/.review/findings.json"
+}
+
+test_gitleaks_failure_on_empty_net_diff_is_failed() {
+  reverted_secret_branch g8
+  printf '1:00PM FTL unable to load gitleaks config\n' > "$ASTUB/gitleaks-history.out"
+  printf '1\n' > "$ASTUB/gitleaks-history.rc"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  local json="$AREPO/.review/findings.json"
+
+  assert "g8: a failed scan is complete:false" jq -e '.complete == false' "$json"
+  assert "g8: history_scan names the failure" jq -e '.history_scan.result == "failed"' "$json"
+  assert "g8: findings.md says FAILED" grep -qF 'FAILED' "$AREPO/.review/findings.md"
+  assert "g8: the report says SCAN FAILED" grep -qF 'SCAN FAILED (rc=1' "$AREPO/.review/raw/analyzers.txt"
+
+  printf '%s\n' '1:00PM INF 0 commits scanned.' '1:00PM INF no leaks found' > "$ASTUB/gitleaks-history.out"
+  printf '0\n' > "$ASTUB/gitleaks-history.rc"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  assert "g8: 0 commits scanned of a range that added lines is FAILED" jq -e '.complete == false' "$json"
+}
+
+test_gitleaks_missing_on_empty_net_diff_is_named() {
+  reverted_secret_branch g9
+  local d p="" json="$AREPO/.review/findings.json" IFS=:
+  for d in $PATH; do [ -x "$d/gitleaks" ] || p="$p${p:+:}$d"; done
+  unset IFS
+  if ! PATH="$p" command -v git >/dev/null || ! PATH="$p" command -v jq >/dev/null; then
+    skip_test "g9: gitleaks shares a PATH dir with git or jq; cannot hide it"; return
+  fi
+  ( cd "$AREPO" && PATH="$WORK/bin:$p" CODEX_STUB_DIR="$ASTUB" REVIEW_SKIP_AUTH_CHECK=1 \
+      bash scripts/review.sh --lenses correctness main ) > "$AREPO.log" 2>&1
+  assert "g9: history_scan says not scanned" jq -e '.history_scan.result == "not_scanned"' "$json"
+  assert "g9: findings.md says the history was NOT scanned" \
+    grep -qF 'NOT scanned for secrets: gitleaks is not installed' "$AREPO/.review/findings.md"
+  assert "g9: … and so does stderr" grep -qF 'not scanned for secrets: gitleaks is not installed' "$AREPO.log"
+
+  run_review "$AREPO" "$ASTUB" --lenses correctness
+  assert "g9: --no-analyzers is named too" \
+    grep -qF 'NOT scanned for secrets: --no-analyzers' "$AREPO/.review/findings.md"
+}
+
 # The changed-file list is newline-delimited: a name with a space is one path.
 test_semgrep_gets_whole_paths() {
   analyzer_repo sg1
@@ -1820,6 +1901,9 @@ run_tests \
   test_gitleaks_commit_count_checked \
   test_gitleaks_leaks_reported \
   test_gitleaks_uncommitted_scans_diff_only \
+  test_gitleaks_scans_history_of_an_empty_net_diff \
+  test_gitleaks_failure_on_empty_net_diff_is_failed \
+  test_gitleaks_missing_on_empty_net_diff_is_named \
   test_semgrep_gets_whole_paths \
   test_semgrep_failure_is_named \
   test_js_runner_follows_package_manager \
