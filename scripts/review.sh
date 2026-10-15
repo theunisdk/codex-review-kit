@@ -89,6 +89,9 @@ if ! hook_wiring; then
   [ -z "$HOOK_FIX" ] || HOOK_WARNING="$HOOK_WARNING Fix: \`$HOOK_FIX\`"
 fi
 
+# The previous verdicts, before this run's adjudication overwrites them.
+archive_verdicts
+
 OUT=".review/raw"
 rm -rf "$OUT"; mkdir -p "$OUT"
 rm -f .review/findings.json .review/findings.md
@@ -213,9 +216,55 @@ if [ "${CHANGED_COUNT:-0}" -eq 0 ]; then
   # `complete` before anything else, so a payload without it forces the reader to guess — and
   # the guess that a clean run and a broken one look alike is exactly what those fields exist
   # to prevent.
-  printf '{"findings":[],"lenses_failed":[],"complete":true}\n' > .review/findings.json
-  printf '# Codex pre-PR review\n\nNo changes to review against %s.\n' "$RANGE_LABEL" > .review/findings.md
+  COMMITS=0
+  if [ "$MODE" = "branch" ]; then
+    COMMITS="$(git rev-list --count "$MERGE_BASE..HEAD")" || die "could not count commits in $MERGE_BASE..HEAD"
+  fi
+  # Commits that net out to no diff still publish whatever they once added.
+  HISTORY=""; HISTORY_NOTE=""
+  if [ "$COMMITS" -gt 0 ]; then
+    if [ "$RUN_ANALYZERS" != "1" ]; then
+      HISTORY="not_scanned"; HISTORY_NOTE="--no-analyzers"
+    else
+      . "$REPO_ROOT/scripts/lib/analyzers.sh"
+      scan_history_secrets "$OUT"
+      case $? in
+        0) HISTORY="clean" ;;
+        3) HISTORY="leaks" ;;
+        4) HISTORY="not_scanned"; HISTORY_NOTE="gitleaks is not installed" ;;
+        *) HISTORY="failed" ;;
+      esac
+    fi
+  fi
+  jq -n --arg h "$HISTORY" --argjson n "$COMMITS" --arg range "${MERGE_BASE:-}..HEAD" \
+    --arg evidence "$(sed -n '/^-- commit history/,$p' "$OUT/analyzers.txt" 2>/dev/null | head -40)" '
+    { findings: (if $h != "leaks" then [] else [{
+        id: "F1", file: ".review/raw/analyzers.txt", line_start: 1, line_end: 1,
+        severity: "critical", category: "security", lens: "gitleaks", agreement: 1, confidence: 1,
+        title: "Secret in branch commit history",
+        why_it_matters: ("The net diff is empty, but commits in " + $range + " still carry it, and pushing them publishes it."),
+        evidence: $evidence,
+        suggested_fix: "Rotate the secret, then drop the commits that carry it (squash or rebase the branch)." }] end),
+      lenses_failed: [], complete: ($h != "failed") }
+    + (if $h == "" then {} else { history_scan: { commits: $n, result: $h } } end)
+  ' > .review/findings.json || die "could not write findings.json"
+  {
+    printf '# Codex pre-PR review\n\nNo changes to review against %s.\n' "$RANGE_LABEL"
+    case "$HISTORY" in
+      clean)  printf '\nIts %s commit(s) net out to no diff; their history was scanned for secrets and none were found.\n' "$COMMITS" ;;
+      leaks)  printf '\n> **SECRET IN BRANCH HISTORY.** The net diff is empty, but gitleaks found leaks in its %s commit(s), and pushing them publishes them. See `%s/analyzers.txt`.\n' "$COMMITS" "$OUT" ;;
+      failed) printf '\n> **INCOMPLETE — the secret scan of its %s commit(s) FAILED**, so their history was NOT checked. See `%s/analyzers.txt`.\n' "$COMMITS" "$OUT" ;;
+      not_scanned) printf '\n> Its %s commit(s) net out to no diff, and their history was NOT scanned for secrets: %s.\n' "$COMMITS" "$HISTORY_NOTE" ;;
+    esac
+  } > .review/findings.md
   REPORT_WRITTEN=1
+  case "$HISTORY" in
+    clean)  info "its $COMMITS commit(s) were scanned for secrets: none found" ;;
+    leaks)  warn "gitleaks found a secret in the branch history ($COMMITS commit(s)) — see $OUT/analyzers.txt"
+            case "$FAIL_ON" in critical|high|medium|low) exit 2 ;; esac ;;
+    failed) warn "INCOMPLETE: the secret scan of $COMMITS commit(s) failed — see $OUT/analyzers.txt" ;;
+    not_scanned) warn "$COMMITS commit(s) were not scanned for secrets: $HISTORY_NOTE" ;;
+  esac
   exit 0
 fi
 

@@ -6,14 +6,21 @@ allowed-tools: Bash, Read, Grep, Glob, Edit, Write
 Reduce false-positive noise in the Codex review by learning from what we rejected.
 
 1. Gather rejection history. You need the verdict BODIES — commit subjects say
-   nothing about what was rejected. Read `.review/verdict.md` if present, read
-   every file in `.review/archive/` if that directory exists, and recover the
-   superseded ones from git: `git log --format=%H -- .review/verdict.md`, then
-   `git show <sha>:.review/verdict.md` for each. Read each one's Rejected
-   section. Read `.review/spec-verdict.md` too if present (spec reviews), but
-   keep its rejections in their own classes: `learnings.md` reaches the code
-   lenses too, so a suppression drawn from spec rejections must say it
-   applies to spec review only.
+   nothing about what was rejected. Verdicts are gitignored, so git history has
+   none. `scripts/review.sh` and the pre-push hook archive them into the
+   clone's review history, shared by every worktree:
+   `ls "$(git rev-parse --git-common-dir)/review-history"`. Code verdicts are
+   `code-<date>-<sha>-<cksum>.md`, spec verdicts `spec-<date>-<sha>-<cksum>.md`;
+   each distinct verdict is kept once. Read every one, plus `.review/verdict.md`
+   and `.review/spec-verdict.md` if present (identical to an archived copy
+   unless written since the last run or push). Two files with the same mode
+   and SHA that judge the same findings are one review adjudicated twice:
+   count a rejection repeated across them once. Different reviews of one
+   commit, such as two specs, count separately. If the directory is missing
+   or empty, say so: that is no history, not a clean one. Read each one's
+   Rejected section. Keep spec rejections in their own classes:
+   `learnings.md` reaches the code lenses too, so a suppression drawn from
+   spec rejections must say it applies to spec review only.
 
 2. Group the REJECT reasons into classes. You are looking for the same rejection
    made two or more times — one rejection is a one-off, two is a pattern.

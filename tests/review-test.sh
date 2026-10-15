@@ -518,6 +518,89 @@ test_gitleaks_uncommitted_scans_diff_only() {
   assert     "g6: uncommitted mode scans the diff" grep -qF -- '--pipe' "$ASTUB/gitleaks.calls"
 }
 
+# A branch whose commits net out to no diff never reached the analyzers: the
+# zero-change exit reported complete:true and gitleaks never ran. Regression
+# for #19. The history scan runs there now, and its outcome is the report.
+reverted_secret_branch() { # reverted_secret_branch <id> — $AREPO: add a secret, then revert it
+  analyzer_repo "$1"
+  ( cd "$AREPO" && printf 'api_key = "%s"\n' "not-a-real-key-0123456789" > creds.txt \
+      && git add -A && git commit -qm 'add creds' && git rm -q creds.txt && git commit -qm 'drop creds' )
+}
+
+test_gitleaks_scans_history_of_an_empty_net_diff() {
+  reverted_secret_branch g7
+  local mb rc; mb="$(git -C "$AREPO" merge-base main HEAD)"
+  printf '%s\n' 'Finding:     REDACTED' 'RuleID:      generic-api-key' 'File:        creds.txt' \
+    '1:00PM INF 2 commits scanned.' '1:00PM WRN leaks found: 1' > "$ASTUB/gitleaks-history.out"
+  printf '3\n' > "$ASTUB/gitleaks-history.rc"
+  run_review_analyzers "$AREPO" "$ASTUB" main; rc=$?
+  local json="$AREPO/.review/findings.json"
+
+  assert     "g7: the net diff is empty" grep -qF 'no changes to review' "$LOG"
+  assert     "g7: history scanned with --log-opts=<merge-base>..HEAD" grep -qF -- "--log-opts=$mb..HEAD" "$ASTUB/gitleaks.calls"
+  assert     "g7: the leak is a critical finding" \
+    jq -e '[.findings[] | select(.severity == "critical" and .lens == "gitleaks")] | length == 1' "$json"
+  assert     "g7: … carrying gitleaks' output" jq -e '.findings[0].evidence | contains("generic-api-key")' "$json"
+  assert     "g7: history_scan names the leak" jq -e '.history_scan == {commits: 2, result: "leaks"}' "$json"
+  assert     "g7: findings.md says so" grep -qF 'SECRET IN BRANCH HISTORY' "$AREPO/.review/findings.md"
+  assert_not "g7: findings.md is not a bare no-changes report" \
+    test "$(grep -c . < "$AREPO/.review/findings.md")" -le 2
+  assert     "g7: exit 0 without --fail-on" test "$rc" -eq 0
+  run_review_analyzers "$AREPO" "$ASTUB" main --fail-on high; rc=$?
+  assert     "g7: --fail-on high exits 2" test "$rc" -eq 2
+
+  rm -f "$ASTUB/gitleaks-history.out" "$ASTUB/gitleaks-history.rc"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  assert     "g7: a clean history scan is complete" jq -e '.complete == true and .findings == []' "$json"
+  assert     "g7: … and says it scanned" jq -e '.history_scan.result == "clean"' "$json"
+
+  analyzer_repo g7b
+  : > "$ASTUB/gitleaks.calls"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  assert     "g7: no commits takes the zero-change exit" \
+    sh -c 'grep -qF "no changes to review" "$1" && jq -e ".complete == true" "$2"' _ "$LOG" "$AREPO/.review/findings.json"
+  assert_not "g7: no commits, no history scan" grep -q . "$ASTUB/gitleaks.calls"
+  assert     "g7: … and no history_scan field" jq -e 'has("history_scan") | not' "$AREPO/.review/findings.json"
+}
+
+test_gitleaks_failure_on_empty_net_diff_is_failed() {
+  reverted_secret_branch g8
+  printf '1:00PM FTL unable to load gitleaks config\n' > "$ASTUB/gitleaks-history.out"
+  printf '1\n' > "$ASTUB/gitleaks-history.rc"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  local json="$AREPO/.review/findings.json"
+
+  assert "g8: a failed scan is complete:false" jq -e '.complete == false' "$json"
+  assert "g8: history_scan names the failure" jq -e '.history_scan.result == "failed"' "$json"
+  assert "g8: findings.md says FAILED" grep -qF 'FAILED' "$AREPO/.review/findings.md"
+  assert "g8: the report says SCAN FAILED" grep -qF 'SCAN FAILED (rc=1' "$AREPO/.review/raw/analyzers.txt"
+
+  printf '%s\n' '1:00PM INF 0 commits scanned.' '1:00PM INF no leaks found' > "$ASTUB/gitleaks-history.out"
+  printf '0\n' > "$ASTUB/gitleaks-history.rc"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  assert "g8: 0 commits scanned of a range that added lines is FAILED" jq -e '.complete == false' "$json"
+}
+
+test_gitleaks_missing_on_empty_net_diff_is_named() {
+  reverted_secret_branch g9
+  local d p="" json="$AREPO/.review/findings.json" IFS=:
+  for d in $PATH; do [ -x "$d/gitleaks" ] || p="$p${p:+:}$d"; done
+  unset IFS
+  if ! PATH="$p" command -v git >/dev/null || ! PATH="$p" command -v jq >/dev/null; then
+    skip_test "g9: gitleaks shares a PATH dir with git or jq; cannot hide it"; return
+  fi
+  ( cd "$AREPO" && PATH="$WORK/bin:$p" CODEX_STUB_DIR="$ASTUB" REVIEW_SKIP_AUTH_CHECK=1 \
+      bash scripts/review.sh --lenses correctness main ) > "$AREPO.log" 2>&1
+  assert "g9: history_scan says not scanned" jq -e '.history_scan.result == "not_scanned"' "$json"
+  assert "g9: findings.md says the history was NOT scanned" \
+    grep -qF 'NOT scanned for secrets: gitleaks is not installed' "$AREPO/.review/findings.md"
+  assert "g9: … and so does stderr" grep -qF 'not scanned for secrets: gitleaks is not installed' "$AREPO.log"
+
+  run_review "$AREPO" "$ASTUB" --lenses correctness
+  assert "g9: --no-analyzers is named too" \
+    grep -qF 'NOT scanned for secrets: --no-analyzers' "$AREPO/.review/findings.md"
+}
+
 # The changed-file list is newline-delimited: a name with a space is one path.
 test_semgrep_gets_whole_paths() {
   analyzer_repo sg1
@@ -1566,6 +1649,87 @@ test_prepush_skips_a_sha256_deletion() {
   assert "h4: … for want of a verdict" grep -qF 'feature — no review verdict found' "$out"
 }
 
+# Verdicts are gitignored and overwritten each run, so /review-tune had no history
+# to mine. Regression for #28: each run archives the verdicts it is about to
+# supersede into the clone's git common dir, which every worktree shares and
+# which outlives any one of them.
+history_dir() { echo "$(cd "$1" && cd "$(git rev-parse --git-common-dir)" && pwd -P)/review-history"; }
+
+test_review_archives_the_previous_verdicts() {
+  local repo="$WORK/v1" stub="$WORK/v1-stub" hist
+  make_repo "$repo"; mkdir -p "$stub"
+  printf '# Review verdict — change — abc1234 — 2026-01-01\n\n## Rejected\nF2 — noise\n' > "$repo/.review/verdict.md"
+  printf '# Spec verdict — change — def5678 — 2026-01-02\n\n## Rejected\nF1 — spec noise\n' > "$repo/.review/spec-verdict.md"
+  run_review "$repo" "$stub" --lenses correctness
+  hist="$(history_dir "$repo")"
+
+  assert "v1: the code verdict is archived under the git common dir" \
+    sh -c 'cmp -s "$1" "$2"/code-2026-01-01-abc1234-*.md' _ "$repo/.review/verdict.md" "$hist"
+  assert "v1: the spec verdict is archived apart from it" \
+    sh -c 'cmp -s "$1" "$2"/spec-2026-01-02-def5678-*.md' _ "$repo/.review/spec-verdict.md" "$hist"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "v1: archiving the same verdicts again adds nothing" test "$(ls "$hist" | grep -c .)" -eq 2
+  printf 're-adjudicated\n' >> "$repo/.review/verdict.md"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "v1: a second verdict on the same commit is kept beside the first" \
+    test "$(ls "$hist" | grep -c '^code-2026-01-01-abc1234-')" -eq 2
+  printf '# Spec verdict — change — def5678 — 2026-01-02\n\n## Rejected\nF3 — other spec\n' > "$repo/.review/spec-verdict.md"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "v1: a second spec reviewed on the same commit and day is kept too" \
+    test "$(ls "$hist" | grep -c '^spec-2026-01-02-def5678-')" -eq 2
+
+  printf 'no header\n' > "$repo/.review/verdict.md"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "v1: a headerless verdict is still archived" sh -c 'ls "$1"/code-unparsed-*.md' _ "$hist"
+  assert "v1: … with a warning" grep -qF 'has no standard verdict header' "$LOG"
+  run_review "$repo" "$stub" --lenses correctness
+  assert_not "v1: … only the first time" grep -qF 'has no standard verdict header' "$LOG"
+  assert     "v1: … and the run that stayed quiet still reached the archive" \
+    sh -c 'grep -qF "no changes to review" "$1" && [ "$(ls "$2" | grep -c "^code-unparsed-")" -eq 1 ]' _ "$LOG" "$hist"
+}
+
+test_verdict_archive_is_shared_across_worktrees() {
+  local repo="$WORK/v2" stub="$WORK/v2-stub" wt="$WORK/v2-wt"
+  make_repo "$repo"; mkdir -p "$stub"
+  git -C "$repo" worktree add -q -b wt-branch "$wt" main
+  printf '# Review verdict — wt-branch — 1234abc — 2026-01-03\n\nclean\n' > "$wt/.review/verdict.md"
+  run_review "$wt" "$stub" --lenses correctness
+
+  assert "v2: a verdict archived from worktree A is visible from worktree B" \
+    sh -c 'test -f "$1"/code-2026-01-03-1234abc-*.md' _ "$(history_dir "$repo")"
+  git -C "$repo" worktree remove --force "$wt"
+  assert "v2: … and still there after A is removed" \
+    sh -c 'test -f "$1"/code-2026-01-03-1234abc-*.md' _ "$(history_dir "$repo")"
+}
+
+test_verdict_archive_failure_warns_without_failing() {
+  local repo="$WORK/v3" stub="$WORK/v3-stub" rc
+  make_repo "$repo"; mkdir -p "$stub"
+  printf '{"findings":[]}' > "$stub/correctness.json"
+  ( cd "$repo" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  printf '# Review verdict — change — abc1234 — 2026-01-01\n' > "$repo/.review/verdict.md"
+  printf 'not a directory\n' > "$(history_dir "$repo")"
+  run_review "$repo" "$stub" --lenses correctness; rc=$?
+
+  assert "v3: an unwritable archive warns" grep -qF 'is not writable — rejection history' "$LOG"
+  assert "v3: the run's exit code is unchanged" test "$rc" -eq 0
+  assert "v3: … and so is complete" jq -e '.complete == true' "$repo/.review/findings.json"
+}
+
+# A worktree's final verdict is written after its last review run, so the run alone
+# would never archive it before the worktree is removed. The push does.
+test_prepush_archives_the_verdict() {
+  local repo="$WORK/v4" stub="$WORK/v4-stub" remote="$WORK/v4-remote.git" short
+  hook_repo "$repo" "$stub"
+  git init -q --bare "$remote"
+  short=$(git -C "$repo" rev-parse --short HEAD)
+  printf '# Review verdict — change — %s — 2026-01-04\n\nclean\n' "$short" > "$repo/.review/verdict.md"
+  ( cd "$repo" && git config core.hooksPath .githooks && git push -q "$remote" HEAD:refs/heads/change ) \
+    > "$WORK/v4.push.log" 2>&1
+  assert "v4: pushing archives the verdict" \
+    sh -c 'test -f "$1"/code-2026-01-04-"$2"-*.md' _ "$(history_dir "$repo")" "$short"
+}
+
 # A hook that never runs looks exactly like one that ran and found the verdict
 # current, so every review run says when this clone would not run it. A
 # warning only: the run's exit code and `complete` must not move.
@@ -1785,9 +1949,12 @@ test_make_plugin_failed_rebuild_keeps_previous_build() {
   local kept
   kept=$(ls -d "$WORK"/m2-out/.make-plugin-stage.* 2>/dev/null)
   assert "m2: rebuild failing after a complete backup fails" test "$rc" -ne 0
+  assert "m2: exactly one stage dir is kept" \
+    sh -c '[ -n "$1" ] && [ "$(printf "%s\n" "$1" | wc -l)" -eq 1 ]' _ "$kept"
   assert "m2: the only complete backup is kept" \
     test -f "$kept/old/skills/pre-pr-review/old-only"
-  assert "m2: the kept backup is named on stderr" grep -qF "$kept" "$out"
+  assert "m2: the kept backup is named on stderr" \
+    sh -c '[ -n "$1" ] && grep -qF "$1/old" "$2"' _ "$kept" "$out"
   assert "m2: other entries are still restored" test -f "$dest/README.md"
   rm -rf "$WORK"/m2-out/.make-plugin-stage.*
 }
@@ -1820,6 +1987,9 @@ run_tests \
   test_gitleaks_commit_count_checked \
   test_gitleaks_leaks_reported \
   test_gitleaks_uncommitted_scans_diff_only \
+  test_gitleaks_scans_history_of_an_empty_net_diff \
+  test_gitleaks_failure_on_empty_net_diff_is_failed \
+  test_gitleaks_missing_on_empty_net_diff_is_named \
   test_semgrep_gets_whole_paths \
   test_semgrep_failure_is_named \
   test_js_runner_follows_package_manager \
@@ -1856,6 +2026,10 @@ run_tests \
   test_prepush_reads_the_verdict_header \
   test_prepush_rejects_a_spec_verdict \
   test_prepush_skips_a_sha256_deletion \
+  test_review_archives_the_previous_verdicts \
+  test_verdict_archive_is_shared_across_worktrees \
+  test_verdict_archive_failure_warns_without_failing \
+  test_prepush_archives_the_verdict \
   test_review_warns_when_hook_unwired \
   test_review_warns_when_hooks_path_points_elsewhere \
   test_review_quiet_when_git_hooks_chain \

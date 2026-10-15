@@ -196,6 +196,9 @@ These are what make it improve rather than plateau:
 **Noise down** (`/review-tune`): recurring REJECT reasons become SUPPRESS entries
 in `learnings.md`, injected into every future prompt. Requires two occurrences —
 one rejection is a one-off.
+Verdicts are gitignored, so `review.sh` and the pre-push hook archive each one
+to `$(git rev-parse --git-common-dir)/review-history/`: shared by every
+worktree of the clone, kept after a worktree is removed, never committed.
 
 **Coverage up** (`/review-postmortem`): every CodeRabbit finding you missed gets
 diagnosed — wrong lens, insufficient tracing, filtered by threshold, or
