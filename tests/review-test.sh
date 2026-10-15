@@ -557,6 +557,8 @@ test_gitleaks_scans_history_of_an_empty_net_diff() {
   analyzer_repo g7b
   : > "$ASTUB/gitleaks.calls"
   run_review_analyzers "$AREPO" "$ASTUB" main
+  assert     "g7: no commits takes the zero-change exit" \
+    sh -c 'grep -qF "no changes to review" "$1" && jq -e ".complete == true" "$2"' _ "$LOG" "$AREPO/.review/findings.json"
   assert_not "g7: no commits, no history scan" grep -q . "$ASTUB/gitleaks.calls"
   assert     "g7: … and no history_scan field" jq -e 'has("history_scan") | not' "$AREPO/.review/findings.json"
 }
@@ -1662,20 +1664,28 @@ test_review_archives_the_previous_verdicts() {
   hist="$(history_dir "$repo")"
 
   assert "v1: the code verdict is archived under the git common dir" \
-    cmp -s "$repo/.review/verdict.md" "$hist/code-2026-01-01-abc1234.md"
+    sh -c 'cmp -s "$1" "$2"/code-2026-01-01-abc1234-*.md' _ "$repo/.review/verdict.md" "$hist"
   assert "v1: the spec verdict is archived apart from it" \
-    cmp -s "$repo/.review/spec-verdict.md" "$hist/spec-2026-01-02-def5678.md"
+    sh -c 'cmp -s "$1" "$2"/spec-2026-01-02-def5678-*.md' _ "$repo/.review/spec-verdict.md" "$hist"
   run_review "$repo" "$stub" --lenses correctness
   assert "v1: archiving the same verdicts again adds nothing" test "$(ls "$hist" | grep -c .)" -eq 2
   printf 're-adjudicated\n' >> "$repo/.review/verdict.md"
   run_review "$repo" "$stub" --lenses correctness
-  assert "v1: a rewritten verdict for the same commit replaces its copy" \
-    sh -c 'grep -qF re-adjudicated "$1" && [ "$(ls "$2" | grep -c .)" -eq 2 ]' _ "$hist/code-2026-01-01-abc1234.md" "$hist"
+  assert "v1: a second verdict on the same commit is kept beside the first" \
+    test "$(ls "$hist" | grep -c '^code-2026-01-01-abc1234-')" -eq 2
+  printf '# Spec verdict — change — def5678 — 2026-01-02\n\n## Rejected\nF3 — other spec\n' > "$repo/.review/spec-verdict.md"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "v1: a second spec reviewed on the same commit and day is kept too" \
+    test "$(ls "$hist" | grep -c '^spec-2026-01-02-def5678-')" -eq 2
 
   printf 'no header\n' > "$repo/.review/verdict.md"
   run_review "$repo" "$stub" --lenses correctness
   assert "v1: a headerless verdict is still archived" sh -c 'ls "$1"/code-unparsed-*.md' _ "$hist"
   assert "v1: … with a warning" grep -qF 'has no standard verdict header' "$LOG"
+  run_review "$repo" "$stub" --lenses correctness
+  assert_not "v1: … only the first time" grep -qF 'has no standard verdict header' "$LOG"
+  assert     "v1: … and the run that stayed quiet still reached the archive" \
+    sh -c 'grep -qF "no changes to review" "$1" && [ "$(ls "$2" | grep -c "^code-unparsed-")" -eq 1 ]' _ "$LOG" "$hist"
 }
 
 test_verdict_archive_is_shared_across_worktrees() {
@@ -1686,10 +1696,10 @@ test_verdict_archive_is_shared_across_worktrees() {
   run_review "$wt" "$stub" --lenses correctness
 
   assert "v2: a verdict archived from worktree A is visible from worktree B" \
-    test -f "$(history_dir "$repo")/code-2026-01-03-1234abc.md"
+    sh -c 'test -f "$1"/code-2026-01-03-1234abc-*.md' _ "$(history_dir "$repo")"
   git -C "$repo" worktree remove --force "$wt"
   assert "v2: … and still there after A is removed" \
-    test -f "$(history_dir "$repo")/code-2026-01-03-1234abc.md"
+    sh -c 'test -f "$1"/code-2026-01-03-1234abc-*.md' _ "$(history_dir "$repo")"
 }
 
 test_verdict_archive_failure_warns_without_failing() {
@@ -1716,7 +1726,8 @@ test_prepush_archives_the_verdict() {
   printf '# Review verdict — change — %s — 2026-01-04\n\nclean\n' "$short" > "$repo/.review/verdict.md"
   ( cd "$repo" && git config core.hooksPath .githooks && git push -q "$remote" HEAD:refs/heads/change ) \
     > "$WORK/v4.push.log" 2>&1
-  assert "v4: pushing archives the verdict" test -f "$(history_dir "$repo")/code-2026-01-04-$short.md"
+  assert "v4: pushing archives the verdict" \
+    sh -c 'test -f "$1"/code-2026-01-04-"$2"-*.md' _ "$(history_dir "$repo")" "$short"
 }
 
 # A hook that never runs looks exactly like one that ran and found the verdict

@@ -120,10 +120,11 @@ hook_wiring() {
 
 # Copy the verdicts into the clone's review history: under the git common dir, so
 # every worktree shares it, it outlives worktree removal, and it is never committed.
-# Keyed <mode>-<date>-<sha>.md from the header, so a re-run never duplicates a
-# verdict. Run from the repo root. Warns on failure; never fails the caller.
+# Keyed <mode>-<date>-<sha>-<cksum>.md: a re-run never duplicates a verdict, and a
+# second verdict on the same commit never replaces the first. Run from the repo
+# root. Warns on failure; never fails the caller.
 archive_verdicts() {
-  local f dir="" key target
+  local f dir="" key target unparsed
   for f in .review/verdict.md .review/spec-verdict.md; do
     [ -f "$f" ] || continue
     if [ -z "$dir" ]; then
@@ -132,21 +133,26 @@ archive_verdicts() {
         || { warn "verdict archive ${dir:-<git common dir>/review-history} is not writable — rejection history for /review-tune is not being kept"; return 0; }
     fi
     key="$(awk -F ' — ' 'NR == 1 {
-      if (NF == 4 && ($1 == "# Review verdict" || $1 == "# Spec verdict") && $3 ~ /^[0-9a-f]+$/ && $4 != "") {
+      if (NF == 4 && ($1 == "# Review verdict" || $1 == "# Spec verdict") && $3 ~ /^[0-9a-f]+$/ \
+          && length($3) >= 4 && length($3) <= 64 && $4 != "") {
         gsub(/[^A-Za-z0-9-]/, "_", $4)
         print ($1 == "# Spec verdict" ? "spec" : "code") "-" $4 "-" $3
       }
       exit
     }' "$f" 2>/dev/null)"
+    unparsed=""
     if [ -z "$key" ]; then
-      key="$(cksum < "$f" | awk '{ print $1 }')"
-      case "$f" in *spec-verdict.md) key="spec-unparsed-$key" ;; *) key="code-unparsed-$key" ;; esac
-      warn "$f has no standard verdict header — archived as $key.md"
+      unparsed=1
+      case "$f" in *spec-verdict.md) key="spec-unparsed" ;; *) key="code-unparsed" ;; esac
     fi
+    key="$key-$(cksum < "$f" | awk '{ print $1 }')"
     target="$dir/$key.md"
     cmp -s "$f" "$target" 2>/dev/null && continue
-    { cp "$f" "$target.tmp.$$" && mv -f "$target.tmp.$$" "$target"; } 2>/dev/null \
-      || { rm -f "$target.tmp.$$" 2>/dev/null; warn "could not archive $f to $target"; }
+    if { cp "$f" "$target.tmp.$$" && mv -f "$target.tmp.$$" "$target"; } 2>/dev/null; then
+      [ -z "$unparsed" ] || warn "$f has no standard verdict header — archived as $key.md"
+    else
+      rm -f "$target.tmp.$$" 2>/dev/null; warn "could not archive $f to $target"
+    fi
   done
   return 0
 }
