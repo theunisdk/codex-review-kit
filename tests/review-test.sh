@@ -1938,9 +1938,12 @@ test_make_plugin_failed_rebuild_keeps_previous_build() {
   local kept
   kept=$(ls -d "$WORK"/m2-out/.make-plugin-stage.* 2>/dev/null)
   assert "m2: rebuild failing after a complete backup fails" test "$rc" -ne 0
+  assert "m2: exactly one stage dir is kept" \
+    sh -c '[ -n "$1" ] && [ "$(printf "%s\n" "$1" | wc -l)" -eq 1 ]' _ "$kept"
   assert "m2: the only complete backup is kept" \
     test -f "$kept/old/skills/pre-pr-review/old-only"
-  assert "m2: the kept backup is named on stderr" grep -qF "$kept" "$out"
+  assert "m2: the kept backup is named on stderr" \
+    sh -c '[ -n "$1" ] && grep -qF "$1/old" "$2"' _ "$kept" "$out"
   assert "m2: other entries are still restored" test -f "$dest/README.md"
   rm -rf "$WORK"/m2-out/.make-plugin-stage.*
 }
