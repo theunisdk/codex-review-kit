@@ -1619,9 +1619,28 @@ test_review_warns_when_hooks_path_points_elsewhere() {
   assert "h6: exit code unchanged" test "$rc" -eq 0
   assert "h6: complete unchanged" jq -e '.complete == true' "$repo/.review/findings.json"
 
-  printf '# .githooks/pre-push\n' >> "$repo/.husky/pre-push"
+  # the fix the warning prints must be one the scanner accepts
+  local fix
+  fix="$(sed -n 's/.* — fix: //p' "$LOG" | head -n 1)"
+  ( cd "$repo" && eval "$fix" )
   run_review "$repo" "$stub" --lenses correctness
-  assert "h6: a commented-out chain is not a chain" grep -qF 'pre-push hook not wired' "$LOG"
+  assert_hook_quiet "h6 (the printed fix)" "$repo"
+
+  local form
+  for form in '.githooks/pre-push' './.githooks/pre-push "$@"' 'bash .githooks/pre-push "$@"' \
+      'sh ./.githooks/pre-push' 'exec .githooks/pre-push "$@"' \
+      '"$(git rev-parse --show-toplevel)/.githooks/pre-push" "$@"'; do
+    printf '#!/bin/sh\n%s\n' "$form" > "$repo/.husky/pre-push"
+    run_review "$repo" "$stub" --lenses correctness
+    assert_hook_quiet "h6 (chain form: $form)" "$repo"
+  done
+
+  for form in "echo '.githooks/pre-push'" 'MSG="run .githooks/pre-push first"' \
+      '# .githooks/pre-push' 'true .githooks/pre-push'; do
+    printf '#!/bin/sh\n%s\n' "$form" > "$repo/.husky/pre-push"
+    run_review "$repo" "$stub" --lenses correctness
+    assert "h6: not a chain: $form" grep -qF 'pre-push hook not wired' "$LOG"
+  done
 
   ( cd "$repo" && printf '#!/bin/sh\nexec npm test\n.githooks/pre-push "$@" || exit $?\n' > .husky/pre-push )
   run_review "$repo" "$stub" --lenses correctness

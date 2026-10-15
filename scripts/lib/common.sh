@@ -52,7 +52,8 @@ hook_wiring() {
   hooks_dir="${hooks_dir%/}"; hook="$hooks_dir/pre-push"; user_hook="$hook"
   # husky 9: core.hooksPath is .husky/_, whose stubs run the user's .husky/<hook>
   case "$hooks_dir" in _|*/_) [ -f "$hooks_dir/h" ] && user_hook="${hooks_dir%_}pre-push" ;; esac
-  # a chain line after any exec or exit is not proven to run; exec with only redirections returns
+  # a chain runs .githooks/pre-push as the line's command; after any exec or exit it is not proven
+  # to run, though exec with only redirections returns
   chain=1
   if [ -f "$user_hook" ] && [ ! -r "$user_hook" ]; then
     chain=2
@@ -69,7 +70,8 @@ hook_wiring() {
         return !op
       }
       /^[[:space:]]*#/ { next }
-      /\.githooks\/pre-push/ { found = 1; exit }
+      /^[[:space:]]*((exec|sh|bash)[[:space:]]+)?(\.\/)?\.githooks\/pre-push([[:space:]]|;|$)/ { found = 1; exit }
+      /^[[:space:]]*((exec|sh|bash)[[:space:]]+)?"\$\(git rev-parse --show-toplevel\)\/\.githooks\/pre-push"([[:space:]]|;|$)/ { found = 1; exit }
       /^[[:space:]]*exec([[:space:]]|;|$)/ && redirect_only($0) { next }
       /^[[:space:]]*(exec|exit)([[:space:]]|;|$)/ { blocked = 1; exit }
       END { exit(found ? 0 : blocked ? 3 : 1) }' "$user_hook" 2>/dev/null
