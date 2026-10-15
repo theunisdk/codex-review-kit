@@ -118,6 +118,39 @@ hook_wiring() {
   return 1
 }
 
+# Copy the verdicts into the clone's review history: under the git common dir, so
+# every worktree shares it, it outlives worktree removal, and it is never committed.
+# Keyed <mode>-<date>-<sha>.md from the header, so a re-run never duplicates a
+# verdict. Run from the repo root. Warns on failure; never fails the caller.
+archive_verdicts() {
+  local f dir="" key target
+  for f in .review/verdict.md .review/spec-verdict.md; do
+    [ -f "$f" ] || continue
+    if [ -z "$dir" ]; then
+      dir="$(git rev-parse --git-common-dir 2>/dev/null)" && dir="$(cd "$dir" 2>/dev/null && pwd -P)" \
+        && dir="$dir/review-history" && mkdir -p "$dir" 2>/dev/null && [ -d "$dir" ] && [ -w "$dir" ] \
+        || { warn "verdict archive ${dir:-<git common dir>/review-history} is not writable — rejection history for /review-tune is not being kept"; return 0; }
+    fi
+    key="$(awk -F ' — ' 'NR == 1 {
+      if (NF == 4 && ($1 == "# Review verdict" || $1 == "# Spec verdict") && $3 ~ /^[0-9a-f]+$/ && $4 != "") {
+        gsub(/[^A-Za-z0-9-]/, "_", $4)
+        print ($1 == "# Spec verdict" ? "spec" : "code") "-" $4 "-" $3
+      }
+      exit
+    }' "$f" 2>/dev/null)"
+    if [ -z "$key" ]; then
+      key="$(cksum < "$f" | awk '{ print $1 }')"
+      case "$f" in *spec-verdict.md) key="spec-unparsed-$key" ;; *) key="code-unparsed-$key" ;; esac
+      warn "$f has no standard verdict header — archived as $key.md"
+    fi
+    target="$dir/$key.md"
+    cmp -s "$f" "$target" 2>/dev/null && continue
+    { cp "$f" "$target.tmp.$$" && mv -f "$target.tmp.$$" "$target"; } 2>/dev/null \
+      || { rm -f "$target.tmp.$$" 2>/dev/null; warn "could not archive $f to $target"; }
+  done
+  return 0
+}
+
 # Portable timeout: run_with_timeout SECS cmd args...
 # (macOS has no coreutils `timeout` by default.)
 run_with_timeout() {

@@ -8,6 +8,9 @@ REPO_ROOT="$(git rev-parse --show-toplevel)" || exit 0
 cd "$REPO_ROOT" || exit 0
 [ -f scripts/review.sh ] || exit 0
 
+# A worktree's last verdict is otherwise lost when the worktree is removed.
+[ -f scripts/lib/common.sh ] && . scripts/lib/common.sh && archive_verdicts
+
 # Judge the refs git is actually pushing, read from stdin as
 # "<local_ref> <local_sha> <remote_ref> <remote_sha>". Using the checked-out
 # branch instead would clear `git push origin other-branch` on the strength of

@@ -89,6 +89,9 @@ if ! hook_wiring; then
   [ -z "$HOOK_FIX" ] || HOOK_WARNING="$HOOK_WARNING Fix: \`$HOOK_FIX\`"
 fi
 
+# The previous verdicts, before this run's adjudication overwrites them.
+archive_verdicts
+
 OUT=".review/raw"
 rm -rf "$OUT"; mkdir -p "$OUT"
 rm -f .review/findings.json .review/findings.md

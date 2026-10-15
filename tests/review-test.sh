@@ -1647,6 +1647,78 @@ test_prepush_skips_a_sha256_deletion() {
   assert "h4: … for want of a verdict" grep -qF 'feature — no review verdict found' "$out"
 }
 
+# Verdicts are gitignored and overwritten each run, so /review-tune had no history
+# to mine. Regression for #28: each run archives the verdicts it is about to
+# supersede into the clone's git common dir, which every worktree shares and
+# which outlives any one of them.
+history_dir() { echo "$(cd "$1" && cd "$(git rev-parse --git-common-dir)" && pwd -P)/review-history"; }
+
+test_review_archives_the_previous_verdicts() {
+  local repo="$WORK/v1" stub="$WORK/v1-stub" hist
+  make_repo "$repo"; mkdir -p "$stub"
+  printf '# Review verdict — change — abc1234 — 2026-01-01\n\n## Rejected\nF2 — noise\n' > "$repo/.review/verdict.md"
+  printf '# Spec verdict — change — def5678 — 2026-01-02\n\n## Rejected\nF1 — spec noise\n' > "$repo/.review/spec-verdict.md"
+  run_review "$repo" "$stub" --lenses correctness
+  hist="$(history_dir "$repo")"
+
+  assert "v1: the code verdict is archived under the git common dir" \
+    cmp -s "$repo/.review/verdict.md" "$hist/code-2026-01-01-abc1234.md"
+  assert "v1: the spec verdict is archived apart from it" \
+    cmp -s "$repo/.review/spec-verdict.md" "$hist/spec-2026-01-02-def5678.md"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "v1: archiving the same verdicts again adds nothing" test "$(ls "$hist" | grep -c .)" -eq 2
+  printf 're-adjudicated\n' >> "$repo/.review/verdict.md"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "v1: a rewritten verdict for the same commit replaces its copy" \
+    sh -c 'grep -qF re-adjudicated "$1" && [ "$(ls "$2" | grep -c .)" -eq 2 ]' _ "$hist/code-2026-01-01-abc1234.md" "$hist"
+
+  printf 'no header\n' > "$repo/.review/verdict.md"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "v1: a headerless verdict is still archived" sh -c 'ls "$1"/code-unparsed-*.md' _ "$hist"
+  assert "v1: … with a warning" grep -qF 'has no standard verdict header' "$LOG"
+}
+
+test_verdict_archive_is_shared_across_worktrees() {
+  local repo="$WORK/v2" stub="$WORK/v2-stub" wt="$WORK/v2-wt"
+  make_repo "$repo"; mkdir -p "$stub"
+  git -C "$repo" worktree add -q -b wt-branch "$wt" main
+  printf '# Review verdict — wt-branch — 1234abc — 2026-01-03\n\nclean\n' > "$wt/.review/verdict.md"
+  run_review "$wt" "$stub" --lenses correctness
+
+  assert "v2: a verdict archived from worktree A is visible from worktree B" \
+    test -f "$(history_dir "$repo")/code-2026-01-03-1234abc.md"
+  git -C "$repo" worktree remove --force "$wt"
+  assert "v2: … and still there after A is removed" \
+    test -f "$(history_dir "$repo")/code-2026-01-03-1234abc.md"
+}
+
+test_verdict_archive_failure_warns_without_failing() {
+  local repo="$WORK/v3" stub="$WORK/v3-stub" rc
+  make_repo "$repo"; mkdir -p "$stub"
+  printf '{"findings":[]}' > "$stub/correctness.json"
+  ( cd "$repo" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  printf '# Review verdict — change — abc1234 — 2026-01-01\n' > "$repo/.review/verdict.md"
+  printf 'not a directory\n' > "$(history_dir "$repo")"
+  run_review "$repo" "$stub" --lenses correctness; rc=$?
+
+  assert "v3: an unwritable archive warns" grep -qF 'is not writable — rejection history' "$LOG"
+  assert "v3: the run's exit code is unchanged" test "$rc" -eq 0
+  assert "v3: … and so is complete" jq -e '.complete == true' "$repo/.review/findings.json"
+}
+
+# A worktree's final verdict is written after its last review run, so the run alone
+# would never archive it before the worktree is removed. The push does.
+test_prepush_archives_the_verdict() {
+  local repo="$WORK/v4" stub="$WORK/v4-stub" remote="$WORK/v4-remote.git" short
+  hook_repo "$repo" "$stub"
+  git init -q --bare "$remote"
+  short=$(git -C "$repo" rev-parse --short HEAD)
+  printf '# Review verdict — change — %s — 2026-01-04\n\nclean\n' "$short" > "$repo/.review/verdict.md"
+  ( cd "$repo" && git config core.hooksPath .githooks && git push -q "$remote" HEAD:refs/heads/change ) \
+    > "$WORK/v4.push.log" 2>&1
+  assert "v4: pushing archives the verdict" test -f "$(history_dir "$repo")/code-2026-01-04-$short.md"
+}
+
 # A hook that never runs looks exactly like one that ran and found the verdict
 # current, so every review run says when this clone would not run it. A
 # warning only: the run's exit code and `complete` must not move.
@@ -1940,6 +2012,10 @@ run_tests \
   test_prepush_reads_the_verdict_header \
   test_prepush_rejects_a_spec_verdict \
   test_prepush_skips_a_sha256_deletion \
+  test_review_archives_the_previous_verdicts \
+  test_verdict_archive_is_shared_across_worktrees \
+  test_verdict_archive_failure_warns_without_failing \
+  test_prepush_archives_the_verdict \
   test_review_warns_when_hook_unwired \
   test_review_warns_when_hooks_path_points_elsewhere \
   test_review_quiet_when_git_hooks_chain \
