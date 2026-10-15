@@ -49,9 +49,13 @@ _gitleaks() { # _gitleaks <label> <min-commits|-> <gitleaks args...>
 }
 
 _gitleaks_history() { # each commit in $MERGE_BASE..HEAD
-  local adds
-  adds="$(git log --no-merges --numstat --format= "$MERGE_BASE..HEAD" \
-    | awk '$1 ~ /^[0-9]+$/ && $1 > 0 { n = 1 } END { print n + 0 }')"
+  local numstat adds
+  if ! numstat="$(git log --no-merges --numstat --format= "$MERGE_BASE..HEAD" 2>&1)"; then
+    printf -- '-- commit history %s\nSCAN FAILED (git log could not list the range) — secrets were NOT checked:\n%s\n' \
+      "$MERGE_BASE..HEAD" "$(printf '%s\n' "$numstat" | head -5)" >> "$report"
+    return 1
+  fi
+  adds="$(printf '%s\n' "$numstat" | awk '$1 ~ /^[0-9]+$/ && $1 > 0 { n = 1 } END { print n + 0 }')"
   _gitleaks "commit history $MERGE_BASE..HEAD" "$adds" \
     detect --source . --log-opts="$MERGE_BASE..HEAD" < /dev/null
 }

@@ -497,6 +497,27 @@ test_gitleaks_commit_count_checked() {
     grep -qF -- '-- commit history' "$AREPO/.review/raw/analyzers.txt"
 }
 
+# The added-lines count sets how many commits gitleaks must report. A git log that
+# failed counted as zero added lines, so a scan of zero commits passed as clean.
+test_gitleaks_failed_line_count_is_scan_failed() {
+  local real; real="$(command -v git)"
+  mkdir -p "$WORK/g10-bin"
+  printf '#!/bin/sh\ncase " $* " in *" --numstat "*) echo "fatal: shim" >&2; exit 128 ;; esac\nexec %s "$@"\n' \
+    "$real" > "$WORK/g10-bin/git"
+  chmod +x "$WORK/g10-bin/git"
+  analyzer_repo g10
+  ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  printf '%s\n' '1:00PM INF 0 commits scanned.' '1:00PM INF no leaks found' > "$ASTUB/gitleaks-history.out"
+  PATH="$WORK/g10-bin:$PATH" run_review_analyzers "$AREPO" "$ASTUB" main
+  assert "g10: a failed added-lines count is SCAN FAILED" \
+    grep -qF 'SCAN FAILED' "$AREPO/.review/raw/analyzers.txt"
+
+  reverted_secret_branch g10b
+  PATH="$WORK/g10-bin:$PATH" run_review_analyzers "$AREPO" "$ASTUB" main
+  assert "g10: … and on an empty net diff the run is incomplete" \
+    jq -e '.complete == false and .history_scan.result == "failed"' "$AREPO/.review/findings.json"
+}
+
 test_gitleaks_leaks_reported() {
   analyzer_repo g5
   ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
@@ -1985,6 +2006,7 @@ run_tests \
   test_gitleaks_fatal_is_scan_failed \
   test_gitleaks_error_line_is_scan_failed \
   test_gitleaks_commit_count_checked \
+  test_gitleaks_failed_line_count_is_scan_failed \
   test_gitleaks_leaks_reported \
   test_gitleaks_uncommitted_scans_diff_only \
   test_gitleaks_scans_history_of_an_empty_net_diff \
