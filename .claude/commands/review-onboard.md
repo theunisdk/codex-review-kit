@@ -54,8 +54,12 @@ one by default.
 )
 ```
 
-If `core.hooksPath` was already set, check whether it points somewhere real
-before leaving it alone — stale absolute paths from repo moves are common.
+If `core.hooksPath` already points elsewhere, or is unset while `.git/hooks`
+holds live hooks, the installer leaves those hooks alone. It reports the
+pre-push hook as wired when the existing `pre-push` already chains
+`.githooks/pre-push`, and as not wired otherwise, with the line that chains it.
+Add that line, and check that a set `core.hooksPath` points somewhere real —
+stale absolute paths from repo moves are common.
 
 ## 1 — Survey the stack
 

@@ -45,15 +45,18 @@ LENSES_FLAG=0
 
 # Any failed exit before a report is written must not leave the previous run's
 # report — and its complete:true — standing in for this one.
-STARTED=0; REPORT_WRITTEN=0
-write_aborted_report() {
+STARTED=0; REPORT_WRITTEN=0; HOOK_WARNING=""
+finish_report() {
   local rc=$?
-  [ "$STARTED" = 1 ] && [ "$REPORT_WRITTEN" = 0 ] || return
-  printf '{"findings":[],"lenses_failed":[],"complete":false}\n' > .review/findings.json
-  printf '# Codex pre-PR review\n\n> **INCOMPLETE — the run stopped (rc=%s) before producing a report.** Nothing was reviewed.\n' \
-    "$rc" > .review/findings.md
+  [ "$STARTED" = 1 ] || return
+  if [ "$REPORT_WRITTEN" = 0 ]; then
+    printf '{"findings":[],"lenses_failed":[],"complete":false}\n' > .review/findings.json
+    printf '# Codex pre-PR review\n\n> **INCOMPLETE — the run stopped (rc=%s) before producing a report.** Nothing was reviewed.\n' \
+      "$rc" > .review/findings.md
+  fi
+  [ -z "$HOOK_WARNING" ] || printf '\n> %s\n' "$HOOK_WARNING" >> .review/findings.md
 }
-trap write_aborted_report EXIT
+trap finish_report EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -74,10 +77,17 @@ while [ $# -gt 0 ]; do
     --parallel)     MAX_PARALLEL="$2"; shift ;;
     -h|--help)      sed -n '2,18p' "$0"; exit 0 ;;
     -*)             die "unknown flag: $1" ;;
-    *)              BASE="$1" ;;
+    *)              [ -n "$1" ] || die "empty base ref — name a branch or commit, or omit it to diff against the default base"
+                    BASE="$1" ;;
   esac
   shift
 done
+
+if ! hook_wiring; then
+  warn "pre-push hook not wired in this clone: $HOOK_NOTE${HOOK_FIX:+ — fix: $HOOK_FIX}"
+  HOOK_WARNING="**Pre-push hook not wired in this clone:** $HOOK_NOTE."
+  [ -z "$HOOK_FIX" ] || HOOK_WARNING="$HOOK_WARNING Fix: \`$HOOK_FIX\`"
+fi
 
 OUT=".review/raw"
 rm -rf "$OUT"; mkdir -p "$OUT"

@@ -28,6 +28,96 @@ detect_base_branch() {
   echo "main"
 }
 
+# Will git run .githooks/pre-push on push? Run from the repo root. Sets HOOK_STATE
+# (wired|chained|missing|noexec|unset|unset-live|foreign), HOOK_NOTE (what was found)
+# and HOOK_FIX (the command that wires it; empty when wired). Returns 1 when unwired.
+HOOK_CHAIN='.githooks/pre-push "$@" || exit $?'
+hook_wiring() {
+  local hooks_path hooks_dir hook user_hook live="" f chain
+  HOOK_STATE=""; HOOK_NOTE=""; HOOK_FIX=""
+  hooks_path="$(git config --get core.hooksPath 2>/dev/null)"
+  hooks_dir="$(git rev-parse --git-path hooks 2>/dev/null)" \
+    || { HOOK_STATE=missing; HOOK_NOTE="git could not resolve its hooks directory"; return 1; }
+  if [ ! -f .githooks/pre-push ]; then
+    HOOK_STATE=missing; HOOK_NOTE=".githooks/pre-push is missing"
+    HOOK_FIX="re-sync the kit: scripts/review-update.sh"; return 1
+  fi
+  if [ ! -x .githooks/pre-push ]; then
+    HOOK_STATE=noexec; HOOK_NOTE=".githooks/pre-push is not executable, so git skips it"
+    HOOK_FIX="chmod +x .githooks/pre-push"; return 1
+  fi
+  if [ -d "$hooks_dir" ] && [ "$(cd "$hooks_dir" && pwd -P)" = "$(cd .githooks && pwd -P)" ]; then
+    HOOK_STATE=wired; HOOK_NOTE="core.hooksPath = $hooks_path"; return 0
+  fi
+  hooks_dir="${hooks_dir%/}"; hook="$hooks_dir/pre-push"; user_hook="$hook"
+  # husky 9: core.hooksPath is .husky/_, whose stubs run the user's .husky/<hook>
+  case "$hooks_dir" in _|*/_) [ -f "$hooks_dir/h" ] && user_hook="${hooks_dir%_}pre-push" ;; esac
+  # a chain runs .githooks/pre-push as the line's command; after any exec or exit it is not proven
+  # to run, though exec with only redirections returns
+  chain=1
+  if [ -f "$user_hook" ] && [ ! -r "$user_hook" ]; then
+    chain=2
+  elif [ -f "$user_hook" ]; then
+    awk 'function redirect_only(line,   w, n, i, op) {
+        sub(/^[[:space:]]*exec/, "", line); sub(/[[:space:]]#.*$/, "", line)
+        n = split(line, w, /[[:space:]]+/); op = 0
+        for (i = 1; i <= n; i++) {
+          if (w[i] == "") continue
+          if (op) { op = 0; continue }
+          if (w[i] ~ /^[0-9]*(<|>|>>|<>|>&|<&|>\|)$/) { op = 1; continue }
+          if (w[i] !~ /^[0-9]*[<>]/) return 0
+        }
+        return !op
+      }
+      /^[[:space:]]*#/ { next }
+      /^[[:space:]]*((exec|sh|bash)[[:space:]]+)?(\.\/)?\.githooks\/pre-push([[:space:]]|;|$)/ { found = 1; exit }
+      /^[[:space:]]*((exec|sh|bash)[[:space:]]+)?"\$\(git rev-parse --show-toplevel\)\/\.githooks\/pre-push"([[:space:]]|;|$)/ { found = 1; exit }
+      /^[[:space:]]*exec([[:space:]]|;|$)/ && redirect_only($0) { next }
+      /^[[:space:]]*(exec|exit)([[:space:]]|;|$)/ { blocked = 1; exit }
+      END { exit(found ? 0 : blocked ? 3 : 1) }' "$user_hook" 2>/dev/null
+    chain=$?
+  fi
+  if [ "$chain" = 0 ] && [ -x "$hook" ]; then
+    HOOK_STATE=chained; HOOK_NOTE="$user_hook chains .githooks/pre-push"; return 0
+  fi
+  case "$chain" in
+    0) HOOK_FIX="chmod +x $(printf %q "$hook")" ;;
+    1) if [ -f "$user_hook" ]; then
+           HOOK_FIX="printf '\\n%s\\n' '$HOOK_CHAIN' >> $(printf %q "$user_hook")"
+         else
+           HOOK_FIX="printf '#!/bin/sh\\n%s\\n' '$HOOK_CHAIN' > $(printf %q "$user_hook")"
+         fi ;;
+    3) HOOK_FIX="add the line  $HOOK_CHAIN  to $user_hook, above its first exec/exit" ;;
+  esac
+  [ -z "$HOOK_FIX" ] || [ "$chain" = 0 ] || [ "$user_hook" != "$hook" ] || [ -x "$hook" ] \
+    || HOOK_FIX="$HOOK_FIX && chmod +x $(printf %q "$hook")"
+  if [ -n "$hooks_path" ]; then
+    HOOK_STATE=foreign
+    HOOK_NOTE="core.hooksPath is '$hooks_path', and its pre-push does not call .githooks/pre-push"
+    [ "$chain" != 0 ] || HOOK_NOTE="core.hooksPath is '$hooks_path', and $hook is not executable, so git skips it"
+    [ "$chain" != 3 ] || HOOK_NOTE="core.hooksPath is '$hooks_path', and $user_hook can exec or exit before any call to .githooks/pre-push"
+    [ "$chain" != 2 ] || HOOK_NOTE="core.hooksPath is '$hooks_path', and $user_hook cannot be read to check that it calls .githooks/pre-push"
+    return 1
+  fi
+  if [ -d "$hooks_dir" ] && [ ! -r "$hooks_dir" ]; then
+    HOOK_STATE=unset-live
+    HOOK_NOTE="core.hooksPath is unset, and $hooks_dir cannot be listed to rule out live hooks that pointing it at .githooks would disable"
+    return 1
+  fi
+  for f in "$hooks_dir"/*; do
+    case "$f" in *.sample) continue ;; esac
+    [ -f "$f" ] && [ -x "$f" ] && live="$live ${f##*/}"
+  done
+  if [ -n "$live" ]; then
+    HOOK_STATE=unset-live
+    HOOK_NOTE="core.hooksPath is unset, and $hooks_dir has live hooks (${live# }) that pointing it at .githooks would disable — chain the kit's hook from there, or move them into .githooks"
+    return 1
+  fi
+  HOOK_STATE=unset; HOOK_NOTE="core.hooksPath is unset, so git never runs .githooks/pre-push"
+  HOOK_FIX="git config core.hooksPath .githooks"
+  return 1
+}
+
 # Portable timeout: run_with_timeout SECS cmd args...
 # (macOS has no coreutils `timeout` by default.)
 run_with_timeout() {

@@ -27,6 +27,10 @@ contributed findings (partial output salvaged before it died): treat those as
 real, but never as evidence its area was covered. Fix the cause and re-run,
 or, if you genuinely must proceed, say plainly in the verdict and to the user
 which lenses did not finish.
+`unreadable_paths` names changed paths the run could not read — a permission
+problem, a nested repository, a symlinked directory — so no lens saw them at
+all. That is not a partial pass: make the paths readable (or take them out of
+the change set) and re-run.
 Never report a run with `complete: false` as a clean review.
 
 ## 2 — Verify before you trust

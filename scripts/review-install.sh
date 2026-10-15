@@ -164,18 +164,19 @@ fi
 
 # --- 5. git hooks ----------------------------------------------------------
 hdr "Git hooks"
-current="$(git config --get core.hooksPath 2>/dev/null || true)"
-if [ "$current" = ".githooks" ]; then
-  ok "core.hooksPath = .githooks"
-elif [ -n "$current" ]; then
-  skip "core.hooksPath already set to '$current' — leaving alone; add .githooks/pre-push yourself"
-elif [ "$CHECK_ONLY" -eq 1 ]; then
-  no "core.hooksPath not set"
-elif git config core.hooksPath .githooks; then
-  ok "set core.hooksPath = .githooks"
-  skip "hook warns on a stale verdict by default; blocks when REVIEW_STRICT=1"
+if hook_wiring; then
+  ok "$HOOK_NOTE"
+elif [ "$HOOK_STATE" = unset ] && [ "$CHECK_ONLY" -eq 0 ]; then
+  if git config core.hooksPath .githooks; then
+    ok "set core.hooksPath = .githooks"
+    skip "hook warns on a stale verdict by default; blocks when REVIEW_STRICT=1"
+  else
+    no "could not set core.hooksPath — the pre-push hook will not run"
+  fi
 else
-  no "could not set core.hooksPath — the pre-push hook will not run"
+  no "pre-push hook not wired: $HOOK_NOTE"
+  [ -z "$HOOK_FIX" ] || skip "fix: $HOOK_FIX"
+  [ "$HOOK_STATE" != foreign ] || skip "e.g. husky: echo '$HOOK_CHAIN' >> .husky/pre-push"
 fi
 
 # --- 6. agent pointer files ------------------------------------------------
