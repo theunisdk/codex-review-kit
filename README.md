@@ -18,7 +18,8 @@ In Claude Code, say `/review-onboard` (or use the `review-kit-install` skill) â€
 it bootstraps the files and does the adaptation properly. By hand:
 
 ```bash
-# From a local hub clone â€” no download, and the default path:
+# The clone supplies the updater; it installs the hub's latest release tag.
+# Add --local to install the clone's working tree instead (unreleased).
 bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
 ./scripts/review-install.sh
 ```

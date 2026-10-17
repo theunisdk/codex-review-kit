@@ -1113,12 +1113,20 @@ run_update() { # run_update <spoke> [VAR=val ...] — output in $LOG
       bash "$KIT/scripts/review-update.sh" ) > "$LOG" 2>&1
 }
 
-run_update_init() { # run_update_init <spoke> [VAR=val ...] — --init run, output in $LOG
+run_update_local() { # run_update_local <spoke> [VAR=val ...] — --local run, output in $LOG
   local dir="$1"; shift
   LOG="$dir.log"
   mkdir -p "$WORK/nohome"
   ( cd "$dir" && env -i HOME="$WORK/nohome" PATH="$PATH" "$@" \
-      bash "$KIT/scripts/review-update.sh" --init ) > "$LOG" 2>&1
+      bash "$KIT/scripts/review-update.sh" --local ) > "$LOG" 2>&1
+}
+
+run_update_init() { # run_update_init <spoke> [VAR=val ...] — --init --local run, output in $LOG
+  local dir="$1"; shift
+  LOG="$dir.log"
+  mkdir -p "$WORK/nohome"
+  ( cd "$dir" && env -i HOME="$WORK/nohome" PATH="$PATH" "$@" \
+      bash "$KIT/scripts/review-update.sh" --init --local ) > "$LOG" 2>&1
 }
 
 # YAML well-formedness, when a parser is available. A malformed seeded config
@@ -1148,23 +1156,25 @@ assert "review-update.sh parses (bash -n)" bash -n "$KIT/scripts/review-update.s
 test_update_reports_source_and_revision() {
   local spoke="$WORK/u1-spoke"
   make_spoke "$spoke"
-  run_update "$spoke" REVIEW_KIT_DIR="$KIT"; local rc=$?
+  run_update_local "$spoke" REVIEW_KIT_DIR="$KIT"; local rc=$?
 
   assert "u1: run exits 0" test "$rc" -eq 0
   assert "u1: resolved source printed" grep -F "installing from $KIT" "$LOG"
   assert "u1: files synced" test -x "$spoke/scripts/review.sh"
   assert "u1: kit-version records a ref" grep -q '^ref: ..*' "$spoke/.review/kit-version"
   assert "u1: kit-version records the source" grep -qF "source: $KIT" "$spoke/.review/kit-version"
+  assert "u1: kit-version marks a --local sync unreleased" \
+    grep -qx 'release: unreleased' "$spoke/.review/kit-version"
 }
 
-# A local hub is installed from its WORKING TREE, so uncommitted edits there are
+# --local installs the hub's WORKING TREE, so uncommitted edits there are
 # real content in the spoke — and a bare HEAD in kit-version would name a commit
 # that cannot reproduce what was installed.
 test_update_marks_a_dirty_local_hub() {
   local hub="$WORK/u9-hub" spoke="$WORK/u9-spoke"
   make_hub "$hub"; make_spoke "$spoke"
   printf '\n# uncommitted hub edit\n' >> "$hub/scripts/review.sh"
-  run_update "$spoke" REVIEW_KIT_DIR="$hub"; local rc=$?
+  run_update_local "$spoke" REVIEW_KIT_DIR="$hub"; local rc=$?
 
   assert "u9: run exits 0" test "$rc" -eq 0
   assert "u9: the uncommitted edit was installed" \
@@ -1182,7 +1192,7 @@ test_update_marks_an_untracked_hub_file() {
   local hub="$WORK/u11-hub" spoke="$WORK/u11-spoke"
   make_hub "$hub"; make_spoke "$spoke"
   printf '# untracked helper\n' > "$hub/scripts/lib/extra.sh"
-  run_update "$spoke" REVIEW_KIT_DIR="$hub"; local rc=$?
+  run_update_local "$spoke" REVIEW_KIT_DIR="$hub"; local rc=$?
 
   assert "u11: run exits 0" test "$rc" -eq 0
   assert "u11: the untracked file was installed" test -f "$spoke/scripts/lib/extra.sh"
@@ -1195,7 +1205,7 @@ test_update_marks_an_untracked_hub_file() {
 test_update_leaves_a_clean_local_hub_unmarked() {
   local hub="$WORK/u10-hub" spoke="$WORK/u10-spoke"
   make_hub "$hub"; make_spoke "$spoke"
-  run_update "$spoke" REVIEW_KIT_DIR="$hub"; local rc=$?
+  run_update_local "$spoke" REVIEW_KIT_DIR="$hub"; local rc=$?
 
   assert     "u10: run exits 0" test "$rc" -eq 0
   assert_not "u10: kit-version not marked dirty" grep -q -- '-dirty' "$spoke/.review/kit-version"
@@ -1217,7 +1227,7 @@ test_update_survives_replacing_itself() {
   )
   LOG="$spoke.log"
   ( cd "$spoke" && env -i HOME="$WORK/nohome" PATH="$PATH" REVIEW_KIT_DIR="$hub" \
-      bash scripts/review-update.sh ) > "$LOG" 2>&1; local rc=$?
+      bash scripts/review-update.sh --local ) > "$LOG" 2>&1; local rc=$?
 
   assert     "u12: run exits 0" test "$rc" -eq 0
   assert_not "u12: no syntax error" grep -q 'syntax error' "$LOG"
@@ -1244,6 +1254,7 @@ test_update_network_pins_to_latest_tag() {
   assert     "u2: latest tag content installed" grep -q 'MARKER: ten' "$spoke/REVIEW.md"
   assert_not "u2: branch tip content NOT installed" grep -q 'MARKER: tip' "$spoke/REVIEW.md"
   assert     "u2: kit-version records the tag" grep -q '^ref: v0\.10\.0$' "$spoke/.review/kit-version"
+  assert     "u2: kit-version records the release" grep -qx 'release: v0.10.0' "$spoke/.review/kit-version"
   assert     "u2: pinned revision printed" grep -q 'v0\.10\.0' "$LOG"
 }
 
@@ -1300,6 +1311,15 @@ test_update_network_honors_a_commit_sha() {
   assert     "u14: pinned commit content installed" grep -q 'MARKER: nine' "$spoke/REVIEW.md"
   assert_not "u14: branch tip content NOT installed" grep -q 'MARKER: tip' "$spoke/REVIEW.md"
   assert     "u14: kit-version records the SHA" grep -q "^ref: $sha\$" "$spoke/.review/kit-version"
+  assert     "u14: a SHA a release tag points at records that release" \
+    grep -qx 'release: v0.9.0' "$spoke/.review/kit-version"
+
+  local tip; tip="$(git -C "$hub" rev-parse HEAD)"
+  rm -rf "$spoke"; make_spoke "$spoke"
+  run_update "$spoke" REVIEW_KIT_URL="file://$hub" REVIEW_KIT_REF="$tip"; rc=$?
+  assert     "u14: an untagged SHA exits 0" test "$rc" -eq 0
+  assert     "u14: an untagged SHA is recorded unreleased" \
+    grep -qx 'release: unreleased' "$spoke/.review/kit-version"
 
   rm -rf "$spoke"; make_spoke "$spoke"
   run_update "$spoke" REVIEW_KIT_URL="file://$hub" REVIEW_KIT_REF=v0.9.0; rc=$?
@@ -1343,6 +1363,42 @@ test_update_network_refuses_without_pin() {
   assert     "u4: run refuses" test "$rc" -ne 0
   assert     "u4: refusal names the fix" grep -q 'REVIEW_KIT_REF' "$LOG"
   assert_not "u4: nothing synced" test -f "$spoke/.review/kit-version"
+}
+
+# The header's "synced (overwritten)" list is what a spoke maintainer reads to
+# learn which files a sync clobbers; it must name everything the cp block copies,
+# and nothing it does not. Regression for OPERATING.md missing from the list.
+test_update_header_lists_what_it_copies() {
+  local f="$KIT/scripts/review-update.sh" names paths n p hit missing="" extra=""
+  names="$(awk '/^#   synced \(overwritten\):/ {on=1; sub(/^#   synced \(overwritten\):/, "")}
+                on && /^#   [a-z-]+ \(/ && !/synced/ {exit}
+                on {sub(/^#/, ""); print}' "$f" | tr ',' '\n' | tr -d ' ' | grep .)"
+  paths="$(sed -n '/^# --- sync the shared half/,/^chmod/p' "$f" \
+    | grep -o '"\$KIT"/[^ ]*' | sed 's|"\$KIT"/||')"
+  set -f   # the lists hold globs; match them, never expand them
+  for p in $paths; do
+    hit=0
+    for n in $names; do
+      case "$p" in $n|"${n%/}"/*|*/"$n") hit=1 ;; esac
+      case "$p/" in "$n") hit=1 ;; esac
+    done
+    [ "$hit" = 1 ] || missing="$missing $p"
+  done
+  for n in $names; do
+    hit=0
+    for p in $paths; do
+      case "$p" in $n|"${n%/}"/*|*/"$n") hit=1 ;; esac
+      case "$p/" in "$n") hit=1 ;; esac
+    done
+    [ "$hit" = 1 ] || extra="$extra $n"
+  done
+  set +f
+  assert "u20: header list parsed" test -n "$names"
+  assert "u20: cp block parsed" test -n "$paths"
+  assert "u20: header names every copied path (missing:${missing:- none})" test -z "$missing"
+  assert "u20: header names nothing uncopied (extra:${extra:- none})" test -z "$extra"
+  assert "u20: header calls kit-version generated" \
+    grep -q '^#   generated (rewritten): \.review/kit-version' "$f"
 }
 
 # --- no-clone bootstrap ----------------------------------------------------
@@ -1438,22 +1494,123 @@ test_bootstrap_tells_unreachable_from_missing() {
   assert_not "b3: nothing synced" test -f "$spoke/.review/kit-version"
 }
 
-# A local hub clone that is behind its own origin must warn — a stale clone
-# silently winning over the network is the failure mode from the issue.
+# --local is the opt-in that installs a clone's working tree as-is, so a clone
+# behind its origin still installs — with a warning, and recorded unreleased.
 test_update_warns_on_stale_local_clone() {
   local origin="$WORK/u5-origin" clone="$WORK/u5-clone" spoke="$WORK/u5-spoke"
   make_hub "$origin"
   git clone -q "$origin" "$clone"
   make_spoke "$spoke"
 
-  run_update "$spoke" REVIEW_KIT_DIR="$clone"; local rc=$?
+  run_update_local "$spoke" REVIEW_KIT_DIR="$clone"; local rc=$?
   assert     "u5: fresh clone exits 0" test "$rc" -eq 0
   assert_not "u5: fresh clone does not warn" grep -q 'behind' "$LOG"
 
   ( cd "$origin" && printf 'MARKER: ahead\n' >> REVIEW.md && git commit -aqm ahead )
-  run_update "$spoke" REVIEW_KIT_DIR="$clone"; rc=$?
-  assert "u5: stale clone still exits 0" test "$rc" -eq 0
-  assert "u5: stale clone warns it is behind" grep -q 'behind' "$LOG"
+  run_update_local "$spoke" REVIEW_KIT_DIR="$clone"; rc=$?
+  assert     "u5: stale clone installs under --local" test "$rc" -eq 0
+  assert     "u5: stale clone warns it is behind" grep -q 'behind' "$LOG"
+  assert_not "u5: the clone's tree, not origin's, was installed" grep -q 'MARKER: ahead' "$spoke/REVIEW.md"
+  assert     "u5: recorded unreleased" grep -qx 'release: unreleased' "$spoke/.review/kit-version"
+}
+
+make_home_clone() { # make_home_clone <home> <hub> — a hub clone where the updater used to look for one
+  mkdir -p "$1/dev/private"
+  git clone -q "$2" "$1/dev/private/codex-review-kit"
+  git -C "$1/dev/private/codex-review-kit" config user.email review-test@example.invalid
+  git -C "$1/dev/private/codex-review-kit" config user.name review-test
+}
+
+# Without --local, a local hub clone never decides what installs: one AHEAD of
+# the latest release (unreleased commits, uncommitted edits) and one BEHIND it
+# both install the release tag. Regression for the clone that shipped as-is.
+test_update_installs_the_release_over_a_local_clone() {
+  local hub="$WORK/u16-hub" home="$WORK/u16-home" spoke="$WORK/u16-spoke" lc
+  make_tagged_hub "$hub"; make_spoke "$spoke"
+  make_home_clone "$home" "$hub"; lc="$home/dev/private/codex-review-kit"
+  ( cd "$lc" && printf 'MARKER: clone-ahead\n' >> REVIEW.md && git commit -aqm ahead \
+      && printf 'MARKER: clone-dirty\n' >> OPERATING.md )
+
+  run_update "$spoke" REVIEW_KIT_URL="file://$hub" HOME="$home"; local rc=$?
+  assert     "u16: ahead clone: exits 0" test "$rc" -eq 0
+  assert     "u16: ahead clone: the release installed" grep -q 'MARKER: nine' "$spoke/REVIEW.md"
+  assert_not "u16: ahead clone: its commits NOT installed" grep -q 'MARKER: clone-ahead' "$spoke/REVIEW.md"
+  assert_not "u16: ahead clone: its edits NOT installed" grep -q 'MARKER: clone-dirty' "$spoke/OPERATING.md"
+  assert_not "u16: ahead clone: hub tip NOT installed" grep -q 'MARKER: tip' "$spoke/REVIEW.md"
+  assert     "u16: ahead clone: kit-version records the release" \
+    grep -qx 'release: v0.9.0' "$spoke/.review/kit-version"
+  assert     "u16: the unused clone is named" grep -qF "not using the hub clone at $lc" "$LOG"
+
+  ( cd "$hub" && git -c tag.gpgSign=false tag -a -m ten v0.10.0 )
+  git -C "$lc" checkout -q -- OPERATING.md && git -C "$lc" reset -q --hard v0.9.0
+  run_update "$spoke" REVIEW_KIT_URL="file://$hub" HOME="$home"; rc=$?
+  assert     "u16: behind clone: exits 0" test "$rc" -eq 0
+  assert     "u16: behind clone: the newer release installed" grep -q 'MARKER: tip' "$spoke/REVIEW.md"
+  assert     "u16: behind clone: kit-version records it" \
+    grep -qx 'release: v0.10.0' "$spoke/.review/kit-version"
+}
+
+# A hub that cannot be listed fails the sync even when a local clone could have
+# stood in — the clone's state is unverified, so installing it would be the
+# stale-kit-under-a-success-message failure.
+test_update_unreachable_hub_fails_despite_a_clone() {
+  local hub="$WORK/u17-hub" home="$WORK/u17-home" spoke="$WORK/u17-spoke"
+  make_tagged_hub "$hub"; make_spoke "$spoke"; make_home_clone "$home" "$hub"
+
+  run_update "$spoke" REVIEW_KIT_URL="file://$WORK/u17-nowhere" HOME="$home"; local rc=$?
+  assert     "u17: unreachable hub fails" test "$rc" -ne 0
+  assert     "u17: says it cannot reach the hub" grep -q 'cannot reach' "$LOG"
+  assert_not "u17: no success line" grep -q '^synced from' "$LOG"
+  assert_not "u17: nothing synced" test -e "$spoke/REVIEW.md"
+  assert_not "u17: no kit-version" test -e "$spoke/.review/kit-version"
+}
+
+# REVIEW_KIT_DIR used to mean "install this tree". Without --local it is refused
+# rather than silently ignored or silently honoured; with REVIEW_KIT_REF it conflicts.
+test_update_local_needs_the_flag() {
+  local hub="$WORK/u18-hub" spoke="$WORK/u18-spoke"
+  make_tagged_hub "$hub"; make_spoke "$spoke"
+
+  run_update "$spoke" REVIEW_KIT_URL="file://$hub" REVIEW_KIT_DIR="$hub"; local rc=$?
+  assert     "u18: REVIEW_KIT_DIR without --local refuses" test "$rc" -ne 0
+  assert     "u18: refusal names --local" grep -q -- '--local' "$LOG"
+  assert_not "u18: nothing synced" test -e "$spoke/.review/kit-version"
+
+  run_update_local "$spoke" REVIEW_KIT_DIR="$hub" REVIEW_KIT_REF=v0.9.0; rc=$?
+  assert     "u18: --local with REVIEW_KIT_REF refuses" test "$rc" -ne 0
+  assert_not "u18: still nothing synced" test -e "$spoke/.review/kit-version"
+
+  run_update_local "$spoke" REVIEW_KIT_DIR="$WORK/u18-nowhere"; rc=$?
+  assert     "u18: --local with a missing dir refuses" test "$rc" -ne 0
+  assert_not "u18: still nothing synced" test -e "$spoke/.review/kit-version"
+}
+
+# --latest-release is the lookup other tooling reuses: the tag on stdout, and an
+# exit code that tells "unreachable" (1) from "reachable, no release" (2).
+test_update_latest_release_lookup() {
+  local hub="$WORK/u19-hub" bare="$WORK/u19-bare" out="$WORK/u19.out" rc
+  make_hub "$hub"; make_hub "$bare"
+  (
+    cd "$hub" || exit 1
+    git -c tag.gpgSign=false tag -a -m nine v0.9.0
+    git tag v0.10.0 && git tag v0.11 && git tag v1.0.0-rc1 && git tag v2
+  )
+  ( cd "$WORK" && env -i HOME="$WORK/nohome" PATH="$PATH" REVIEW_KIT_URL="file://$hub" \
+      bash "$KIT/scripts/review-update.sh" --latest-release ) > "$out" 2>"$out.err"; rc=$?
+  assert "u19: lookup exits 0" test "$rc" -eq 0
+  assert "u19: prints the highest strict vN.N.N" test "$(cat "$out")" = v0.10.0
+
+  ( cd "$WORK" && env -i HOME="$WORK/nohome" PATH="$PATH" REVIEW_KIT_URL="file://$bare" \
+      bash "$KIT/scripts/review-update.sh" --latest-release ) > "$out" 2>"$out.err"; rc=$?
+  assert "u19: no release tag exits 2" test "$rc" -eq 2
+  assert "u19: no release tag prints nothing" test ! -s "$out"
+  assert "u19: no release tag says so" grep -q 'no release tag' "$out.err"
+
+  ( cd "$WORK" && env -i HOME="$WORK/nohome" PATH="$PATH" REVIEW_KIT_URL="file://$WORK/u19-nowhere" \
+      bash "$KIT/scripts/review-update.sh" --latest-release ) > "$out" 2>"$out.err"; rc=$?
+  assert "u19: unreachable exits 1" test "$rc" -eq 1
+  assert "u19: unreachable prints nothing" test ! -s "$out"
+  assert "u19: unreachable says so" grep -q 'cannot reach' "$out.err"
 }
 
 # --init seeds repo-owned files that are missing. Nothing seeds without it,
@@ -1466,7 +1623,7 @@ test_init_seeds_coderabbit_config() {
   local spoke="$WORK/u6-spoke"
   make_spoke "$spoke"
 
-  run_update "$spoke" REVIEW_KIT_DIR="$KIT"; local rc=$?
+  run_update_local "$spoke" REVIEW_KIT_DIR="$KIT"; local rc=$?
   assert     "u6: plain sync exits 0" test "$rc" -eq 0
   assert_not "u6: plain sync seeds no config" test -f "$spoke/.coderabbit.yaml"
   assert_not "u6: plain sync seeds no rubric" test -f "$spoke/.review/rubric.md"
@@ -1540,14 +1697,14 @@ make_installed_spoke() { # <dir> — a spoke with the kit synced and seeded
   local dir="$1"
   make_spoke "$dir"
   ( cd "$dir" && env -i HOME="$WORK/nohome" PATH="$PATH" REVIEW_KIT_DIR="$KIT" \
-      bash "$KIT/scripts/review-update.sh" --init ) >/dev/null 2>&1
+      bash "$KIT/scripts/review-update.sh" --init --local ) >/dev/null 2>&1
 }
 
 make_synced_spoke() { # <dir> — synced but NOT seeded, for bring-your-own configs
   local dir="$1"
   make_spoke "$dir"
   ( cd "$dir" && env -i HOME="$WORK/nohome" PATH="$PATH" REVIEW_KIT_DIR="$KIT" \
-      bash "$KIT/scripts/review-update.sh" ) >/dev/null 2>&1
+      bash "$KIT/scripts/review-update.sh" --local ) >/dev/null 2>&1
 }
 
 run_install_check() { # <spoke> — --check output in $LOG (stubbed codex on PATH)
@@ -2176,6 +2333,128 @@ test_review_quiet_when_git_hooks_chain() {
   assert_hook_quiet "h7 (chained from .git/hooks)" "$repo"
 }
 
+# --- kit staleness ---------------------------------------------------------
+kit_repo() { # kit_repo <dir> <stubdir> <hub url> <release line> — make_repo plus the updater, a kit-version, one change
+  make_repo "$1"; mkdir -p "$2"
+  printf '{"findings":[]}' > "$2/correctness.json"
+  ( cd "$1" && cp "$KIT/scripts/review-update.sh" scripts/ \
+      && printf 'kit: %s abc1234\nref: %s\n%ssource: %s\nsynced: 2026-01-01\n' \
+           "$3" "${4#release: }" "${4:+$4
+}" "$3" > .review/kit-version \
+      && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+}
+
+kit_hub() { # kit_hub <dir> — a hub listing v0.9.0 (annotated) and v0.10.0
+  make_hub "$1"
+  ( cd "$1" && git -c tag.gpgSign=false tag -a -m nine v0.9.0 && git tag v0.10.0 )
+}
+
+# review.sh compares kit-version's release with the hub's latest: behind warns,
+# current does not, and a failed lookup says "unknown" — never "latest".
+test_review_warns_when_kit_is_behind() {
+  local hub="$WORK/k1-hub" repo="$WORK/k1" stub="$WORK/k1-stub" rc
+  kit_hub "$hub"
+
+  kit_repo "$repo" "$stub" "file://$hub" "release: v0.9.0"
+  run_review "$repo" "$stub" --lenses correctness; rc=$?
+  assert     "k1: behind: review still exits 0" test "$rc" -eq 0
+  assert     "k1: behind: warns with both versions" \
+    grep -qF 'warn: review kit v0.9.0 is behind the latest release v0.10.0' "$LOG"
+
+  rm -rf "$repo"; kit_repo "$repo" "$stub" "file://$hub" "release: v0.10.0"
+  run_review "$repo" "$stub" --lenses correctness; rc=$?
+  assert     "k1: current: exits 0" test "$rc" -eq 0
+  assert     "k1: current: says so" grep -qF 'review kit v0.10.0 is the latest release' "$LOG"
+  assert_not "k1: current: no behind warning" grep -qF 'behind' "$LOG"
+  assert_not "k1: current: no unknown" grep -qF 'unknown' "$LOG"
+
+  rm -rf "$repo"; kit_repo "$repo" "$stub" "file://$hub" ""
+  sed -i.bak 's/^ref: .*/ref: v0.9.0/' "$repo/.review/kit-version" && rm -f "$repo/.review/kit-version.bak"
+  run_review "$repo" "$stub" --lenses correctness
+  assert     "k1: a kit-version without release: falls back to a vN.N.N ref" \
+    grep -qF 'review kit v0.9.0 is behind the latest release v0.10.0' "$LOG"
+}
+
+test_review_kit_staleness_unknown() {
+  local hub="$WORK/k2-hub" bare="$WORK/k2-bare" repo="$WORK/k2" stub="$WORK/k2-stub" rc
+  kit_hub "$hub"; make_hub "$bare"
+
+  kit_repo "$repo" "$stub" "file://$WORK/k2-nowhere" "release: v0.9.0"
+  run_review "$repo" "$stub" --lenses correctness; rc=$?
+  assert     "k2: unreachable: review still exits 0" test "$rc" -eq 0
+  assert     "k2: unreachable: warns unknown" grep -qF 'staleness unknown: could not reach' "$LOG"
+  assert_not "k2: unreachable: never claims latest" grep -qF 'latest release' "$LOG"
+  assert     "k2: unreachable: report still complete" jq -e '.complete == true' "$repo/.review/findings.json"
+  run_review "$repo" "$stub" --lenses correctness
+  assert     "k2: the failed lookup is cached" grep -qF '(cached)' "$LOG"
+
+  rm -rf "$repo"; kit_repo "$repo" "$stub" "file://$bare" "release: v0.9.0"
+  run_review "$repo" "$stub" --lenses correctness
+  assert     "k2: no release tag: warns unknown" grep -qF 'staleness unknown: file://'"$bare"' lists no release tag' "$LOG"
+
+  rm -rf "$repo"; kit_repo "$repo" "$stub" "file://$hub" "release: unreleased"
+  run_review "$repo" "$stub" --lenses correctness
+  assert     "k2: unreleased sync is named, not called current" grep -qF 'unreleased sync' "$LOG"
+  assert_not "k2: unreleased: never claims latest" grep -qF 'latest release' "$LOG"
+
+  rm -rf "$repo"; kit_repo "$repo" "$stub" "file://$hub" ""
+  run_review "$repo" "$stub" --lenses correctness
+  assert     "k2: a kit-version naming no release is unknown" grep -qF 'names no release' "$LOG"
+
+  rm -rf "$repo"; make_repo "$repo"
+  run_review "$repo" "$stub" --lenses correctness
+  assert     "k2: no kit-version is named" grep -qF 'no .review/kit-version' "$LOG"
+  assert_not "k2: no kit-version: never claims latest" grep -qF 'latest release' "$LOG"
+}
+
+# An updater from before --latest-release ignores the flag and runs a full sync;
+# review.sh must not call it.
+test_review_kit_check_skips_an_old_updater() {
+  local hub="$WORK/k3-hub" repo="$WORK/k3" stub="$WORK/k3-stub"
+  kit_hub "$hub"
+  kit_repo "$repo" "$stub" "file://$hub" "release: v0.9.0"
+  ( cd "$repo" && printf '#!/usr/bin/env bash\ntouch OLD-UPDATER-RAN\n' > scripts/review-update.sh )
+  run_review "$repo" "$stub" --lenses correctness
+  assert     "k3: old updater: unknown" grep -qF 'predates --latest-release' "$LOG"
+  assert_not "k3: old updater never ran" test -e "$repo/OLD-UPDATER-RAN"
+}
+
+# A day-long cache: a release published after a lookup is not seen until it
+# expires — so a lookup happens at most once a day, not on every review.
+test_review_kit_lookup_is_cached() {
+  local hub="$WORK/k4-hub" repo="$WORK/k4" stub="$WORK/k4-stub" cache
+  kit_hub "$hub"
+  kit_repo "$repo" "$stub" "file://$hub" "release: v0.10.0"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "k4: first run: current" grep -qF 'v0.10.0 is the latest release' "$LOG"
+  ( cd "$hub" && git tag v0.11.0 )
+  run_review "$repo" "$stub" --lenses correctness
+  assert "k4: within the day: cached answer" grep -qF 'v0.10.0 is the latest release' "$LOG"
+  cache="$(cd "$repo" && cd "$(git rev-parse --git-common-dir)" && pwd)/review-kit-latest"
+  assert "k4: cache lives under the git common dir" test -f "$cache"
+  awk 'BEGIN{FS=OFS="\t"} {$1 = $1 - 90000; print}' "$cache" > "$cache.new" && mv "$cache.new" "$cache"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "k4: expired cache: looks again" grep -qF 'v0.10.0 is behind the latest release v0.11.0' "$LOG"
+}
+
+# A hub that hangs costs a few seconds, then reads as unknown.
+test_review_kit_lookup_times_out() {
+  local hub="$WORK/k5-hub" repo="$WORK/k5" stub="$WORK/k5-stub" bin="$WORK/k5-bin" t0 t1 real
+  kit_hub "$hub"
+  kit_repo "$repo" "$stub" "file://$hub" "release: v0.9.0"
+  real="$(command -v git)"; mkdir -p "$bin"
+  printf '#!/usr/bin/env bash\n[ "$1" = ls-remote ] && exec sleep 20\nexec "%s" "$@"\n' "$real" > "$bin/git"
+  chmod +x "$bin/git"
+  t0="$(date +%s)"
+  LOG="$repo.log"
+  ( cd "$repo" && PATH="$bin:$WORK/bin:$PATH" CODEX_STUB_DIR="$stub" REVIEW_SKIP_AUTH_CHECK=1 \
+      bash scripts/review.sh --no-analyzers --lenses correctness main ) > "$LOG" 2>&1
+  t1="$(date +%s)"
+  assert     "k5: hung hub: unknown" grep -qF 'did not answer within' "$LOG"
+  assert_not "k5: hung hub: never claims latest" grep -qF 'latest release' "$LOG"
+  assert     "k5: hung hub costs under 15s" test $((t1 - t0)) -lt 15
+}
+
 # A signal can land between any two steps of the swap, or during the rollback.
 # The mv stub signals the script right after the move whose "src>dst" matches
 # $M3_TRIP (or $M3_TRIP2), so each window is hit every time, not by timing.
@@ -2372,10 +2651,15 @@ run_tests \
   test_update_network_honors_a_commit_sha \
   test_update_network_tells_unreachable_from_missing \
   test_update_network_refuses_without_pin \
+  test_update_header_lists_what_it_copies \
   test_bootstrap_block_matches_in_both_docs \
   test_bootstrap_pins_and_refuses_a_branch \
   test_bootstrap_tells_unreachable_from_missing \
   test_update_warns_on_stale_local_clone \
+  test_update_installs_the_release_over_a_local_clone \
+  test_update_unreachable_hub_fails_despite_a_clone \
+  test_update_local_needs_the_flag \
+  test_update_latest_release_lookup \
   test_init_seeds_coderabbit_config \
   test_init_never_overwrites_existing_config \
   test_init_respects_other_config_spellings \
@@ -2395,6 +2679,11 @@ run_tests \
   test_review_warns_when_hook_unwired \
   test_review_warns_when_hooks_path_points_elsewhere \
   test_review_quiet_when_git_hooks_chain \
+  test_review_warns_when_kit_is_behind \
+  test_review_kit_staleness_unknown \
+  test_review_kit_check_skips_an_old_updater \
+  test_review_kit_lookup_is_cached \
+  test_review_kit_lookup_times_out \
   test_make_plugin_interrupted_swap_keeps_previous_build \
   test_make_plugin_refuses_an_unlistable_destination \
   test_make_plugin_failed_rebuild_keeps_previous_build

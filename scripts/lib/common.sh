@@ -157,6 +157,88 @@ archive_verdicts() {
   return 0
 }
 
+# Is release tag $1 older than $2? Both vN.N.N.
+release_older() {
+  [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "${1#v}" "${2#v}" \
+    | sort -t. -k1,1n -k2,2n -k3,3n | head -n1)" = "${1#v}" ]
+}
+
+# Compare the synced kit (.review/kit-version) with the hub's latest release, as
+# `scripts/review-update.sh --latest-release` resolves it. Run from the repo root.
+# Sets KIT_STATE (current|behind|newer|unreleased|unsynced|unknown) and KIT_NOTE.
+# The lookup is cached under the git common dir — a day when the hub answered, an
+# hour when it did not — and capped at KIT_CHECK_TIMEOUT seconds. Never fails.
+KIT_CHECK_TIMEOUT=5
+kit_staleness() {
+  local f=.review/kit-version tab url installed ref cache now stamp cstate curl cval
+  local ttl latest="" why="" out rc
+  KIT_STATE=unknown; KIT_NOTE=""; tab="$(printf '\t')"
+  if [ ! -f "$f" ]; then
+    KIT_STATE=unsynced; KIT_NOTE="review kit version unknown: no $f (not synced by scripts/review-update.sh)"
+    return 0
+  fi
+  url="$(sed -n 's/^kit: \([^ ]*\) .*/\1/p' "$f" | head -n1)"
+  ref="$(sed -n 's/^ref: //p' "$f" | head -n1)"
+  installed="$(sed -n 's/^release: //p' "$f" | head -n1)"
+  # a kit-version from before release: was recorded names a release only as its ref
+  [ -n "$installed" ] || installed="$(printf '%s\n' "$ref" | grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+')"
+  if [ "$installed" = unreleased ]; then
+    KIT_STATE=unreleased; KIT_NOTE="review kit is an unreleased sync (${ref:-no ref}) — staleness unknown"
+    return 0
+  fi
+  if ! printf '%s\n' "$installed" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+' || [ -z "$url" ]; then
+    KIT_NOTE="review kit staleness unknown: $f names no release (ref: ${ref:-none}) — re-sync with scripts/review-update.sh"
+    return 0
+  fi
+
+  cache="$(git rev-parse --git-common-dir 2>/dev/null)/review-kit-latest"
+  now="$(date +%s)"
+  if [ -f "$cache" ] && IFS="$tab" read -r stamp cstate curl cval < "$cache" 2>/dev/null; then
+    case "$stamp" in ''|*[!0-9]*) stamp=0 ;; esac
+    ttl=86400; [ "$cstate" = ok ] || ttl=3600
+    if [ "$curl" = "$url" ] && [ "$now" -ge "$stamp" ] && [ $((now - stamp)) -lt "$ttl" ]; then
+      if [ "$cstate" = ok ]; then latest="$cval"; else why="$cval (cached)"; fi
+    fi
+  fi
+  if [ -z "$latest" ] && [ -z "$why" ]; then
+    # an updater from before the flag ignores it and runs a full sync
+    if ! grep -q -- '--latest-release)' scripts/review-update.sh 2>/dev/null; then
+      why="scripts/review-update.sh is missing or predates --latest-release"
+    elif ! out="$(mktemp 2>/dev/null)"; then
+      why="no temp file for the lookup"
+    else
+      run_with_timeout "$KIT_CHECK_TIMEOUT" env GIT_TERMINAL_PROMPT=0 REVIEW_KIT_URL="$url" \
+        bash scripts/review-update.sh --latest-release > "$out" 2>/dev/null; rc=$?
+      latest="$(head -n1 "$out" 2>/dev/null | grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+')"
+      rm -f "$out"
+      if [ "$rc" != 0 ] || [ -z "$latest" ]; then
+        latest=""
+        case "$rc" in
+          2)       why="$url lists no release tag" ;;
+          137|143) why="$url did not answer within ${KIT_CHECK_TIMEOUT}s" ;;
+          *)       why="could not reach $url" ;;
+        esac
+        printf '%s\t%s\t%s\t%s\n' "$now" fail "$url" "$why" > "$cache.tmp.$$" 2>/dev/null
+      else
+        printf '%s\t%s\t%s\t%s\n' "$now" ok "$url" "$latest" > "$cache.tmp.$$" 2>/dev/null
+      fi
+      mv -f "$cache.tmp.$$" "$cache" 2>/dev/null || rm -f "$cache.tmp.$$" 2>/dev/null
+    fi
+  fi
+
+  if [ -z "$latest" ]; then
+    KIT_NOTE="review kit $installed — staleness unknown: $why"
+  elif [ "$installed" = "$latest" ]; then
+    KIT_STATE=current; KIT_NOTE="review kit $installed is the latest release"
+  elif release_older "$installed" "$latest"; then
+    KIT_STATE=behind
+    KIT_NOTE="review kit $installed is behind the latest release $latest — sync with scripts/review-update.sh"
+  else
+    KIT_STATE=newer; KIT_NOTE="review kit $installed is newer than $url's latest release $latest"
+  fi
+  return 0
+}
+
 # Portable timeout: run_with_timeout SECS cmd args...
 # (macOS has no coreutils `timeout` by default.)
 run_with_timeout() {

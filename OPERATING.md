@@ -148,8 +148,10 @@ point of the design. Findings applied unverified are worse than no review.
   not just a note in the repo — routing only works if the hub receives it.
 - The hub is public: nothing routed there may carry client, repo, schema, or
   incident specifics.
-- Updates are pull-based. Nothing notifies a spoke that the hub improved;
-  run `review-update.sh` when you've pushed a lesson from another repo.
+- Updates are pull-based. A lesson reaches spokes once it ships in a release
+  tag; `review-update.sh` installs the latest release (`--local` for unreleased
+  hub work). `review.sh` warns when a spoke's kit is behind the latest release,
+  or when it cannot tell.
 
 ### Cost and depth dials
 

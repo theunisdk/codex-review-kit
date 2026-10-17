@@ -54,14 +54,21 @@ alongside the files that are its own and never synced:
 **New repo:** say `/review-onboard` in Claude Code — it bootstraps the files
 and, more importantly, does the adaptation properly: a rubric grounded in code
 it actually read, analyzer commands verified before wiring, concrete lens
-hazards, and a fire drill to prove the result. By hand, from a local hub
-clone — no download, and the default path:
+hazards, and a fire drill to prove the result. By hand, with a local hub
+clone supplying the updater:
 
 ```bash
-REVIEW_KIT_DIR=~/dev/private/codex-review-kit \
-  bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
+bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
 ./scripts/review-install.sh          # per-machine setup
 ```
+
+The clone only supplies the script. The updater fetches the hub's latest
+release tag (highest `vN.N.N`) and installs that, or the tag or full SHA in
+`$REVIEW_KIT_REF`. If it cannot list or fetch the release, it fails rather
+than install something else. To sync unreleased hub changes onto a spoke
+(testing hub work before a release), pass `--local`: it installs the clone's
+working tree (`$REVIEW_KIT_DIR`, else `~/dev/private/codex-review-kit`) and
+records it as unreleased.
 
 Without a clone, this fetches the updater at the hub's latest release tag —
 or the tag or full SHA in `$REVIEW_KIT_REF` — and refuses anything else,
@@ -72,7 +79,7 @@ the next line executes it.
 (
   KIT=https://github.com/theunisdk/codex-review-kit
   TAGS=$(git ls-remote --tags "$KIT") || { echo "stopped: cannot reach $KIT" >&2; exit 1; }
-  LATEST=$(printf '%s\n' "$TAGS" | sed -n 's|.*refs/tags/v\([0-9][0-9.]*\)$|\1|p' \
+  LATEST=$(printf '%s\n' "$TAGS" | sed -n 's|.*refs/tags/v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' \
     | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
   REF="${REVIEW_KIT_REF:-${LATEST:+v$LATEST}}"
   [ -n "$REF" ] || { echo "stopped: no release tag on $KIT — set REVIEW_KIT_REF" >&2; exit 1; }
@@ -111,11 +118,20 @@ Everything repo-specific is committed; the only per-machine artifact is
 `~/.codex/deep-review.config.toml`, which the installer creates if absent and
 never overwrites. `--check` verifies without changing anything.
 
-**Picking up kit improvements:** `./scripts/review-update.sh` in any spoke —
-it overwrites the synced half, prints the source and revision it installs,
-records them (ref and commit) in `.review/kit-version`,
-and leaves the repo-owned half alone. Fix a machinery bug or add a generic
-lesson once, in the hub; every repo inherits it on its next sync.
+**Picking up kit improvements:** `./scripts/review-update.sh` in any spoke
+installs the hub's latest release. It overwrites the synced half, prints the
+source and revision it installs, writes ref, commit and release to the
+generated `.review/kit-version`, and leaves the repo-owned half alone. Fix a
+machinery bug or add a generic lesson once, in the hub; every repo inherits it
+on its first sync after that fix ships in a release tag. `--local` installs a
+hub clone's working tree instead, recorded as `unreleased`.
+`--latest-release` prints the latest tag and installs nothing.
+
+`review.sh` checks this at startup. It warns when the installed release is
+behind the latest one, or when it cannot tell (hub unreachable, no release
+tags, a `kit-version` that names no release). It never blocks a review. The
+lookup is cached under the git common dir: a day after a successful check, an
+hour after a failed one.
 
 `make-plugin.sh` still exists for a Claude Code plugin build, but the runner
 reads prompts from the repo, not `${CLAUDE_PLUGIN_ROOT}` — the vendored spoke
@@ -240,7 +256,7 @@ isn't reproducible this way — which is fine, since it's still your final gate.
   prompts.local/       REPO-OWNED  per-lens hazard overlays, appended at run time
   adjudication.md      synced      verify → FIX/LOG/REJECT/ESCALATE → verdict
   learnings-shared.md  synced      kit-wide memory, edited only in the hub
-  kit-version          synced      which hub ref + commit this repo last pulled
+  kit-version          generated   what the last sync installed: ref, commit, release (or unreleased)
   schema.json          synced      enforced output shape via codex --output-schema
   prompts/             synced      the shared lens prompts — never edit in a repo
     _common.md         role, method, hard exclusions, calibration
