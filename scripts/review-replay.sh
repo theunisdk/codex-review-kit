@@ -29,7 +29,7 @@ HUB="$(cd "$(dirname "$0")/.." && pwd -P)"
 # shellcheck source=lib/common.sh
 . "$HUB/scripts/lib/common.sh"
 
-usage() { sed -n '2,27p' "$0" >&2; exit 64; }
+usage() { sed -n '2,25p' "$0" >&2; exit 64; }
 
 SPOKE=""; PRS=""; RECENT=""; LIMIT=5; KIT_REF=main; REPO=""; MODEL=""; BUDGET=5; REVIEW_ARGS=""
 SCAN=100; CLAUDE_TIMEOUT=1800; REVIEW_TIMEOUT=3600
@@ -43,7 +43,7 @@ while [ $# -gt 0 ]; do
     --model)         MODEL="${2:-}"; shift ;;
     --claude-budget) BUDGET="${2:-}"; shift ;;
     --no-analyzers)  REVIEW_ARGS="--no-analyzers" ;;
-    -h|--help)       usage ;;
+    -h|--help)       sed -n '2,25p' "$0"; exit 0 ;;
     -*)              echo "error: unknown flag: $1" >&2; usage ;;
     *)               if [ -z "$SPOKE" ]; then SPOKE="$1"
                      else
@@ -100,11 +100,15 @@ remove_worktree() { # prints why on failure
   return 1
 }
 CUR_PR=""
+# a trap can fire inside a call whose output is redirected; it reports on the script's own
+exec 3>&1 4>&2
 on_exit() {
   local rc=$?
-  stop_child; remove_worktree
-  [ -z "$CUR_PR" ] || echo "review-replay: failed — PR #$CUR_PR: interrupted (rc=$rc); nothing was recorded for it"
-  rm -rf "$RUN_TMP"
+  {
+    stop_child; remove_worktree
+    [ -z "$CUR_PR" ] || echo "review-replay: failed — PR #$CUR_PR: interrupted (rc=$rc); nothing was recorded for it"
+    rm -rf "$RUN_TMP"
+  } >&3 2>&4
 }
 trap on_exit EXIT
 trap 'exit 130' INT
@@ -137,8 +141,15 @@ if [ "${REVIEW_SKIP_AUTH_CHECK:-0}" != 1 ] && ! codex login status > /dev/null 2
   die "not authenticated to Codex — run 'codex login'"
 fi
 
+have_commit() { git -C "$SPOKE" cat-file -e "$1^{commit}" 2>/dev/null; }
+fetch_commits() { # fetch_commits <ref|sha>... — objects only: no ref and no FETCH_HEAD is written
+  git -C "$SPOKE" -c gc.auto=0 -c maintenance.auto=false fetch --quiet --no-write-fetch-head origin "$@" \
+    > "$RUN_TMP/fetch.err" 2>&1 || { G_ERR="git fetch origin $*: $(err_of "$RUN_TMP/fetch.err")"; return 1; }
+}
+
 DEFAULT_SHA="$(git -C "$SPOKE" ls-remote origin HEAD 2>/dev/null | awk '$2 == "HEAD" { print $1; exit }')"
 [ -n "$DEFAULT_SHA" ] || die "cannot read the default branch of the spoke's origin (git ls-remote origin HEAD)"
+have_commit "$DEFAULT_SHA" || fetch_commits "$DEFAULT_SHA" || die "cannot fetch the default branch tip: $G_ERR"
 
 info "spoke $SPOKE ($REPO) · kit $KIT_DESC ($KIT_SHORT) · records in $STORE"
 
@@ -189,11 +200,6 @@ gather() {
     | sort_by(.at) | .[0].sha // ""')" || { fail_at github "cannot read CodeRabbit's reviews"; return; }
 }
 
-have_commit() { git -C "$SPOKE" cat-file -e "$1^{commit}" 2>/dev/null; }
-fetch_commits() { # fetch_commits <ref|sha>... — objects only: no ref and no FETCH_HEAD is written
-  git -C "$SPOKE" -c gc.auto=0 -c maintenance.auto=false fetch --quiet --no-write-fetch-head origin "$@" \
-    > "$REC_TMP/fetch.err" 2>&1 || { G_ERR="git fetch origin $*: $(err_of "$REC_TMP/fetch.err")"; return 1; }
-}
 
 # repo-owned files: the PR commit's, else the default branch's; records each in OWNED
 REPO_OWNED=".review/rubric.md .review/learnings.md .review/config.sh .review/analyzers.local.sh .review/prompts.local"
@@ -218,7 +224,9 @@ overlay() {
   for p in $REPO_OWNED; do
     if [ "$from" = pr ] && [ -e "$wt/$p" ]; then
       src=pr
-    elif [ -n "$(git -C "$SPOKE" ls-tree "$DEFAULT_SHA" -- "$p")" ]; then
+    elif ! src="$(git -C "$SPOKE" ls-tree "$DEFAULT_SHA" -- "$p")"; then
+      fail_at kit "cannot list $p on the default branch (${DEFAULT_SHA:0:7})"; return
+    elif [ -n "$src" ]; then
       git -C "$SPOKE" archive "$DEFAULT_SHA" -- "$p" | tar -x -C "$wt" \
         || { fail_at kit "cannot copy $p from the default branch (${DEFAULT_SHA:0:7})"; return; }
       src="default@${DEFAULT_SHA:0:12}"
@@ -303,7 +311,7 @@ replay_pr() {
 
   # --- review: today's pipeline over the diff CodeRabbit first saw
   # shellcheck disable=SC2086
-  run_child "$REVIEW_TIMEOUT" in_dir "$wt" bash scripts/review.sh $REVIEW_ARGS "$base" > "$REC_TMP/review.log" 2>&1
+  run_child "$REVIEW_TIMEOUT" in_dir "$wt" bash scripts/review.sh --fail-on none $REVIEW_ARGS "$base" > "$REC_TMP/review.log" 2>&1
   rel=$?
   [ -f "$wt/.review/findings.json" ] && cp "$wt/.review/findings.json" "$wt/.review/findings.md" "$REC_TMP/" 2>/dev/null
   [ "$rel" = 0 ] || { fail_at review "review.sh exited $rel: $(grep -E 'error:' "$REC_TMP/review.log" | tail -n1)"; return; }

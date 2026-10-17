@@ -40,6 +40,35 @@ written, the run says so.
 Run the postmortem on **every** PR at first, including clean ones — "nothing
 missed" is a data point, and skipping it silently stops the learning loop.
 
+### Replays: today's kit on PRs already merged
+
+`scripts/review-replay.sh <spoke> <PR>…` (or `--recent N`, with `--limit`
+to bound the spend) runs from the hub. It scores PRs that never had a local
+verdict, so the scorecard does not have to wait for new PRs. Each PR is
+replayed on the commit CodeRabbit first reviewed: today's kit (`--kit-ref`,
+default the hub's `main`) over that commit's repo-owned files. Missing files
+come from the spoke's default branch. The record names the source of each.
+
+Read a replay differently from a live postmortem:
+
+- **It measures the current kit, not the past.** A miss means today's lenses
+  and learnings would still miss it. A catch says nothing about what the
+  review that ran then found.
+- **The adjudication applies nothing.** No fixes and no re-review: the
+  verdict is what `/review` would have decided before its step 4.
+- **The lenses may see later history.** The worktree shares the clone's
+  objects, so a lens that runs `git log --all` can see fix commits. Read the
+  catch rate as an upper bound.
+- **It skips what it cannot replay faithfully,** with a stated reason: a
+  pre-hub kit, a PR CodeRabbit never reviewed, and `--limit` reached. A
+  failed step reads `failed — <step>: <error>`, never a skip or `missed 0`.
+
+Each PR costs one full `review.sh` run (six Codex lenses at the configured
+effort) plus two headless `claude -p` calls, capped by `--claude-budget`.
+On an 11-file PR at `high` effort, the first replay took 6 minutes, about
+840k Codex tokens and $1.10 of Claude. The per-PR line and the closing
+`cost` line print both totals.
+
 ### Fire drills (the stronger, faster proof)
 
 Don't wait for real bugs — plant them. On a scratch branch, commit a
