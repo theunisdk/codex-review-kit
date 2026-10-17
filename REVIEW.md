@@ -256,8 +256,8 @@ hold in another repo goes to the hub as an issue labelled `lesson` on
 `theunisdk/codex-review-kit`, never as a commit in a local hub clone, and
 scrubbed of repo and client specifics since the hub is public. The hub folds
 lessons into `learnings-shared.md` or a base prompt in a release. That routing
-is what makes a bug found in one repo teach every other repo on its next
-`review-update.sh`.
+is what makes a bug found in one repo teach every other repo on its first
+`review-update.sh` after that release.
 
 Track the postmortem scorecard. If `missed` trends toward zero, the local pass
 is working and CodeRabbit is insurance. A plateau is a hypothesis until the

@@ -273,8 +273,9 @@ reports its own update of the record on a third line,
      the command, and report `hub lesson NOT filed`.
 
    Add the filed issue URLs to `lessons` and update the PR comment and local
-   copy the same way, then print the `lessons` line. The hub's maintainer folds lessons into a release, and
-   spokes get them on their next `scripts/review-update.sh`.
+   copy the same way, then print the `lessons` line. The hub's maintainer
+   folds lessons into a release, and a spoke gets them on its first
+   `scripts/review-update.sh` after that release.
 
 Track the scorecard over time. If `missed` trends toward zero on ordinary PRs,
 the local pass is doing its job and CodeRabbit is insurance. A plateau in
