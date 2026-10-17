@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Collect cheap static-analysis signal on the changed files and write it to
 # .review/raw/analyzers.txt. Every tool is OPTIONAL — a tool that is not
-# installed is skipped. The secrets and JS/TS sections are never empty: they
-# hold output, a clean line, a named skip, or FAILED. The point is not to gate
+# installed is skipped. The secrets, semgrep and JS/TS sections are never empty:
+# they hold output, a clean line, a named skip, or FAILED. The point is not to gate
 # on this output; it is to hand Codex the lint-level noise up front so it spends
 # its reasoning budget on semantic bugs a linter structurally cannot find.
 #
@@ -12,7 +12,8 @@
 # --- secrets: shared with the zero-change path in review.sh ----------------
 # Branch mode scans each commit in the range as well as the net diff: a secret
 # added then removed on the branch is absent from diff.patch but still pushed.
-# The net-diff scan stays because `git log -p` shows no content for merges.
+# -m: without it `git log -p` prints no patch for a merge, so a secret that only
+# merge resolutions add and remove is in no scanned patch.
 # rc 3 means leaks. Any other non-zero rc, an ERR/FTL line, or no commits
 # scanned when the range adds lines means the scan did not happen — a bad
 # --log-opts range logs ERR, then "no leaks found", and exits 0.
@@ -50,14 +51,14 @@ _gitleaks() { # _gitleaks <label> <min-commits|-> <gitleaks args...>
 
 _gitleaks_history() { # each commit in $MERGE_BASE..HEAD
   local numstat adds
-  if ! numstat="$(git log --no-merges --numstat --format= "$MERGE_BASE..HEAD" 2>&1)"; then
+  if ! numstat="$(git log -m --numstat --format= "$MERGE_BASE..HEAD" 2>&1)"; then
     printf -- '-- commit history %s\nSCAN FAILED (git log could not list the range) — secrets were NOT checked:\n%s\n' \
       "$MERGE_BASE..HEAD" "$(printf '%s\n' "$numstat" | head -5)" >> "$report"
     return 1
   fi
   adds="$(printf '%s\n' "$numstat" | awk '$1 ~ /^[0-9]+$/ && $1 > 0 { n = 1 } END { print n + 0 }')"
   _gitleaks "commit history $MERGE_BASE..HEAD" "$adds" \
-    detect --source . --log-opts="$MERGE_BASE..HEAD" < /dev/null
+    detect --source . --log-opts="-m $MERGE_BASE..HEAD" < /dev/null
 }
 
 # A branch whose commits net out to no diff: only the history scan has anything
@@ -70,6 +71,8 @@ scan_history_secrets() {
   _gitleaks_history
 }
 
+# Sets SECRETS_LEAKED and SECRETS_FAILED (0/1) for review.sh, and
+# SECRETS_SKIPPED when gitleaks is not installed.
 collect_analyzer_output() {
   local out="$1"
   local list="$out/changed-files.txt"
@@ -92,13 +95,18 @@ collect_analyzer_output() {
     done < "$list"
   }
 
-  if _have gitleaks; then
-    _section "gitleaks (secrets)"
+  SECRETS_LEAKED=0 SECRETS_FAILED=0 SECRETS_SKIPPED=0
+  _secrets_rc() { case "$1" in 0) ;; 3) SECRETS_LEAKED=1 ;; *) SECRETS_FAILED=1 ;; esac; }
+  _section "gitleaks (secrets)"
+  if ! _have gitleaks; then
+    SECRETS_SKIPPED=1
+    echo "analyzer skipped: gitleaks is not installed — secrets were NOT checked" >> "$report"
+  else
     if [ "${MODE:-}" = "branch" ] && [ -n "${MERGE_BASE:-}" ]; then
-      _gitleaks_history
+      _gitleaks_history; _secrets_rc $?
     fi
     if [ -s "$out/diff.patch" ]; then
-      _gitleaks "net diff" - detect --pipe < "$out/diff.patch"
+      _gitleaks "net diff" - detect --pipe < "$out/diff.patch"; _secrets_rc $?
     else
       echo "no diff to scan — secrets were NOT checked" >> "$report"
     fi
@@ -108,7 +116,10 @@ collect_analyzer_output() {
   # With --error, rc 0 is clean and rc 1 is findings; anything else, or output
   # that isn't semgrep's JSON, is a failed scan.
   local sg_list f sg_out sg_rc sg_hits sg_errs; sg_list="$(_files_matching '*')"
-  if [ -n "$sg_list" ] && _have semgrep; then
+  if [ -n "$sg_list" ] && ! _have semgrep; then
+    _section "semgrep --config=auto"
+    echo "analyzer skipped: semgrep is not installed" >> "$report"
+  elif [ -n "$sg_list" ]; then
     _section "semgrep --config=auto"
     local -a sg_files; sg_files=()
     while IFS= read -r f; do sg_files+=("$f"); done <<< "$sg_list"

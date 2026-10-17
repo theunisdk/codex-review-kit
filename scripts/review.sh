@@ -126,6 +126,26 @@ fi
 # backslash names, and a quoted name matches no file on disk.
 nul_to_lines() { local f; while IFS= read -r -d '' f; do printf '%s\n' "$f"; done; }
 
+# A gitleaks leak as a one-finding JSON array, or [] when there is none. The lenses
+# are told not to re-report analyzer output, so no lens reports it.
+secret_findings() { # secret_findings <leaked 0|1> <why_it_matters>
+  [ "$1" = 1 ] || { echo '[]'; return 0; }
+  local title fix
+  if [ "$MODE" = "branch" ]; then
+    title="Secret in branch commit history"
+    fix="Rotate the secret, then drop the commits that carry it (squash or rebase the branch)."
+  else
+    title="Secret in the change set"
+    fix="Rotate the secret, and remove it from the change before committing it."
+  fi
+  jq -n --arg title "$title" --arg why "$2" --arg fix "$fix" \
+    --arg evidence "$(awk '$0 == "### gitleaks (secrets)" { on = 1; next } /^### / { on = 0 } on' \
+      "$OUT/analyzers.txt" 2>/dev/null | head -40)" '
+    [{ id: "F1", file: ".review/raw/analyzers.txt", line_start: 1, line_end: 1,
+       severity: "critical", category: "security", lens: "gitleaks", agreement: 1, confidence: 1,
+       title: $title, why_it_matters: $why, evidence: $evidence, suggested_fix: $fix }]'
+}
+
 if [ "$MODE" = "spec" ]; then
   : > "$OUT/changed-files.txt"
   while IFS= read -r p; do
@@ -215,7 +235,7 @@ if [ "${CHANGED_COUNT:-0}" -eq 0 ]; then
   # Carries complete/lenses_failed like every other exit path. Adjudication is told to check
   # `complete` before anything else, so a payload without it forces the reader to guess — and
   # the guess that a clean run and a broken one look alike is exactly what those fields exist
-  # to prevent.
+  # to prevent. complete is false because nothing was reviewed: a wrong BASE lands here too.
   COMMITS=0
   if [ "$MODE" = "branch" ]; then
     COMMITS="$(git rev-list --count "$MERGE_BASE..HEAD")" || die "could not count commits in $MERGE_BASE..HEAD"
@@ -236,20 +256,17 @@ if [ "${CHANGED_COUNT:-0}" -eq 0 ]; then
       esac
     fi
   fi
-  jq -n --arg h "$HISTORY" --argjson n "$COMMITS" --arg range "${MERGE_BASE:-}..HEAD" \
-    --arg evidence "$(sed -n '/^-- commit history/,$p' "$OUT/analyzers.txt" 2>/dev/null | head -40)" '
-    { findings: (if $h != "leaks" then [] else [{
-        id: "F1", file: ".review/raw/analyzers.txt", line_start: 1, line_end: 1,
-        severity: "critical", category: "security", lens: "gitleaks", agreement: 1, confidence: 1,
-        title: "Secret in branch commit history",
-        why_it_matters: ("The net diff is empty, but commits in " + $range + " still carry it, and pushing them publishes it."),
-        evidence: $evidence,
-        suggested_fix: "Rotate the secret, then drop the commits that carry it (squash or rebase the branch)." }] end),
-      lenses_failed: [], complete: ($h != "failed") }
+  LEAKED=0; [ "$HISTORY" = "leaks" ] && LEAKED=1
+  SECRET_FINDINGS="$(secret_findings "$LEAKED" \
+    "The net diff is empty, but commits in ${MERGE_BASE:-}..HEAD still carry it, and pushing them publishes it.")" \
+    || die "could not build the gitleaks finding"
+  jq -n --arg h "$HISTORY" --argjson n "$COMMITS" --argjson secrets "$SECRET_FINDINGS" '
+    { findings: $secrets, lenses_failed: [], complete: false, changed_files: 0 }
     + (if $h == "" then {} else { history_scan: { commits: $n, result: $h } } end)
   ' > .review/findings.json || die "could not write findings.json"
   {
     printf '# Codex pre-PR review\n\nNo changes to review against %s.\n' "$RANGE_LABEL"
+    printf '\n> **Nothing was reviewed** — this is not a clean review. If changes were expected, check the base ref.\n'
     case "$HISTORY" in
       clean)  printf '\nIts %s commit(s) net out to no diff; their history was scanned for secrets and none were found.\n' "$COMMITS" ;;
       leaks)  printf '\n> **SECRET IN BRANCH HISTORY.** The net diff is empty, but gitleaks found leaks in its %s commit(s), and pushing them publishes them. See `%s/analyzers.txt`.\n' "$COMMITS" "$OUT" ;;
@@ -258,6 +275,7 @@ if [ "${CHANGED_COUNT:-0}" -eq 0 ]; then
     esac
   } > .review/findings.md
   REPORT_WRITTEN=1
+  warn "nothing was reviewed — the report is marked incomplete"
   case "$HISTORY" in
     clean)  info "its $COMMITS commit(s) were scanned for secrets: none found" ;;
     leaks)  warn "gitleaks found a secret in the branch history ($COMMITS commit(s)) — see $OUT/analyzers.txt"
@@ -275,10 +293,20 @@ else
 fi
 
 # --- cheap static signal (fed to Codex as priors, so it aims higher) -------
+SECRETS_LEAKED=0; SECRETS_FAILED=0; SECRETS_SKIPPED=0; SECRETS_NOTE=""
 if [ "$RUN_ANALYZERS" = "1" ]; then
   . "$REPO_ROOT/scripts/lib/analyzers.sh"
   collect_analyzer_output "$OUT" || warn "analyzer collection had errors (non-fatal)"
+  [ "$SECRETS_SKIPPED" = 0 ] || SECRETS_NOTE="gitleaks is not installed"
+elif [ "$MODE" != "spec" ]; then
+  SECRETS_NOTE="--no-analyzers"
 fi
+if [ "$MODE" = "branch" ]; then
+  SECRETS_WHY="gitleaks found it in $MERGE_BASE..HEAD, and pushing those commits publishes it, even where a later commit removed it."
+else
+  SECRETS_WHY="gitleaks found it in the uncommitted changes, and committing and pushing them publishes it."
+fi
+SECRET_FINDINGS="$(secret_findings "$SECRETS_LEAKED" "$SECRETS_WHY")" || die "could not build the gitleaks finding"
 
 # --- build the shared context block ----------------------------------------
 {
@@ -420,8 +448,10 @@ if [ "$ok_lenses" -eq 0 ]; then
   # PREVIOUS run's report — with its own complete:true — and the next reader adjudicates a
   # stale pass against the current branch without anything saying so.
   failed_lenses="$failed_lenses${missing_lenses:-}"
-  jq -n --arg failed "$(printf '%s' "${failed_lenses# }")" \
-    '{findings: [], lenses_failed: ($failed | if . == "" then [] else split(" ") end), complete: false}' \
+  jq -n --arg failed "$(printf '%s' "${failed_lenses# }")" --argjson secrets "$SECRET_FINDINGS" \
+    --argjson n "$CHANGED_COUNT" \
+    '{findings: $secrets, lenses_failed: ($failed | if . == "" then [] else split(" ") end), complete: false,
+      changed_files: $n}' \
     > .review/findings.json
   printf '# Codex pre-PR review\n\n> **INCOMPLETE — every lens failed.** No area of this diff was reviewed.\n> Check `%s/log-*.txt`.\n' \
     "$OUT" > .review/findings.md
@@ -455,10 +485,13 @@ failed_lenses="$failed_lenses${missing_lenses:-}"
 FAILED_LIST="$(printf '%s' "${failed_lenses# }")"
 UNREADABLE_COUNT=0
 [ -s "$OUT/unreadable.txt" ] && UNREADABLE_COUNT="$(grep -c . < "$OUT/unreadable.txt")"
-jq --arg failed "$FAILED_LIST" --arg unreadable "$(cat "$OUT/unreadable.txt" 2>/dev/null)" '
-  . + { lenses_failed: ($failed | if . == "" then [] else split(" ") end),
+jq --arg failed "$FAILED_LIST" --arg unreadable "$(cat "$OUT/unreadable.txt" 2>/dev/null)" \
+  --argjson secrets "$SECRET_FINDINGS" --argjson scan_failed "$SECRETS_FAILED" --argjson n "$CHANGED_COUNT" '
+  .findings = ($secrets + .findings | to_entries | map(.value + {id: ("F" + ((.key + 1)|tostring))}))
+  | . + { lenses_failed: ($failed | if . == "" then [] else split(" ") end),
         unreadable_paths: ($unreadable | split("\n") | map(select(. != ""))) }
-  | . + { complete: ((.lenses_failed | length) == 0 and (.unreadable_paths | length) == 0) }
+  | . + { complete: ((.lenses_failed | length) == 0 and (.unreadable_paths | length) == 0 and $scan_failed == 0),
+          changed_files: $n }
 ' .review/findings.json > .review/findings.json.tmp \
   && mv .review/findings.json.tmp .review/findings.json || die "could not finalise findings.json"
 
@@ -483,8 +516,17 @@ TOTAL="$(jq '.findings | length' .review/findings.json)"
     sed 's/^/> - `/;s/$/`/' "$OUT/unreadable.txt"
     echo
   fi
+  if [ "$SECRETS_FAILED" = 1 ]; then
+    echo "> **INCOMPLETE REVIEW — the gitleaks secret scan FAILED**, so secrets were NOT checked."
+    echo "> See \`$OUT/analyzers.txt\`."
+    echo
+  fi
+  if [ -n "$SECRETS_NOTE" ]; then
+    echo "> Secrets were NOT checked: $SECRETS_NOTE."
+    echo
+  fi
   if [ "$(jq '.findings | length' .review/findings.json)" -eq 0 ]; then
-    if [ -n "$FAILED_LIST" ] || [ "$UNREADABLE_COUNT" -gt 0 ]; then
+    if [ -n "$FAILED_LIST" ] || [ "$UNREADABLE_COUNT" -gt 0 ] || [ "$SECRETS_FAILED" = 1 ]; then
       echo "_No findings — but the run was incomplete, so this is not a clean result._"
     else
       echo "_No findings above the confidence threshold._"
@@ -512,6 +554,9 @@ echo
 info "$TOTAL finding(s) → .review/findings.json  ·  .review/findings.md"
 [ -z "$FAILED_LIST" ] || warn "INCOMPLETE: lens(es) failed; their areas are unreviewed —$failed_lenses"
 [ "$UNREADABLE_COUNT" -eq 0 ] || warn "INCOMPLETE: $UNREADABLE_COUNT changed path(s) could not be read — see $OUT/unreadable.txt"
+[ "$SECRETS_FAILED" = 0 ] || warn "INCOMPLETE: the gitleaks secret scan failed — see $OUT/analyzers.txt"
+[ "$SECRETS_LEAKED" = 0 ] || warn "gitleaks found a secret — see $OUT/analyzers.txt"
+[ -z "$SECRETS_NOTE" ] || warn "secrets were not checked: $SECRETS_NOTE"
 jq -r '
   (.findings | group_by(.severity) | map({(.[0].severity): length}) | add // {}) as $c
   | ["critical","high","medium","low"] | map(. + ": " + (($c[.] // 0)|tostring)) | join("   ")

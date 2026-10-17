@@ -31,6 +31,16 @@ which lenses did not finish.
 problem, a nested repository, a symlinked directory — so no lens saw them at
 all. That is not a partial pass: make the paths readable (or take them out of
 the change set) and re-run.
+`complete` is also false when the gitleaks secret scan failed (`findings.md`
+says so, and `.review/raw/analyzers.txt` holds `SCAN FAILED`), and when a
+branch's history was not scanned (`history_scan.result` is `failed` or
+`not_scanned`). A `gitleaks` finding is a secret the scan found: it is real
+whatever the lenses say.
+When `changed_files` is 0, nothing was reviewed — usually a wrong base ref, or
+fixes not yet committed. **Do not write `.review/verdict.md` from that run**:
+a verdict names HEAD, and the pre-push hook would accept it for code no lens
+saw. Find the right base and re-run, or tell the user the change set is empty;
+a `gitleaks` finding in it still needs acting on.
 Never report a run with `complete: false` as a clean review.
 
 ## 2 — Verify before you trust
@@ -95,8 +105,8 @@ If the fixes amount to substantial new code — new logic or a changed
 transaction, authz, or rollout boundary, not mechanical corrections — commit
 them, then run ONE scoped re-review over the fix commits before writing the
 verdict: `./scripts/review.sh <PRE_FIX> --lenses <relevant lenses>`. Not
-`--uncommitted`: once the fixes are committed it reviews nothing and still
-reports `complete: true`. Check the range too: "no changes to review" means
+`--uncommitted`: once the fixes are committed it reviews nothing
+(`changed_files: 0`). Check the range too: "no changes to review" means
 the fixes are not committed yet, and a failing
 `git merge-base --is-ancestor <PRE_FIX> HEAD` means an amend or rebase
 rewrote PRE_FIX, so the review covers the wrong range. Keep fixes in their
