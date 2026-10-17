@@ -1,16 +1,18 @@
 ---
 description: Record what CodeRabbit caught that our local Codex pass missed
-argument-hint: "[PR number or URL — default: this branch's PR] [--record-only]"
+argument-hint: "[PR number or URL — default: this branch's PR] [--record-only] [--replay <dir>]"
 allowed-tools: Bash, Read, Grep, Glob, Edit, Write
 ---
 
 Close the loop between the local review and the CodeRabbit gate. Run this after
 CodeRabbit has reviewed the PR: $ARGUMENTS
 
-The PR is `$ARGUMENTS` without `--record-only`; with no PR given, use this
-branch's PR. `--record-only` is for unattended callers: stop after step 5 and
-list the proposed edits in the report, without waiting for approval or filing
-anything.
+The PR is `$ARGUMENTS` without `--record-only` and `--replay <dir>`; with no
+PR given, use this branch's PR. `--record-only` is for unattended callers: stop
+after step 5 and list the proposed edits in the report, without waiting for
+approval or filing anything. `--replay <dir>` is only for
+`scripts/review-replay.sh`, and implies `--record-only`: follow **Replay mode**
+at the end, which posts nothing.
 
 Begin your report with one status line, so a caller can tell the outcomes apart:
 
@@ -284,3 +286,34 @@ caused by the wrong lens, insufficient tracing or the threshold mean the fixes
 are not landing, and they can be fixed here. Only misses classed as
 **structural** support the conclusion that part of CodeRabbit's value cannot be
 reproduced this way.
+
+## Replay mode
+
+`scripts/review-replay.sh`, in the hub, re-runs today's kit on the commit
+CodeRabbit first reviewed on an old PR, in a temporary worktree, and calls
+this command with `<n> --replay <dir>`. A replay scores today's kit, not the
+review that ran on the PR. It must not reach the PR, because a comment
+notifies everyone on it. The steps above apply, with these changes:
+
+- **Call no `gh`.** `<dir>` holds what step 1 fetches: `pr.json` (the
+  `gh pr view` fields, plus `headRefName` and `state`), `pull.json`
+  (`…/pulls/<n>`), `reviews.json`, `comments.json` and
+  `issue-comments.json` (every page, as one array), `statuses.json`
+  (`[{"sha": …, "statuses": […]}]` for every PR commit) and
+  `pr-commits.txt`. If a file is missing or does not parse, report
+  `failed — read: <file>`.
+- **Fetch nothing.** The caller fetched the PR's commits. A finding whose
+  commit is still missing is unscored with `compare_failed`.
+- **The verdict is this worktree's `.review/verdict.md`**, relation `same`.
+  Do not list other worktrees or the review history. They hold verdicts from
+  the kit that ran then, which a replay does not measure. If its header does
+  not name the comparison commit, report `failed — verdict: <why>`.
+- **Save nothing.** In step 5, print the record instead: the status line,
+  then `review-postmortem: record — replay: comment not posted; local copy written by the caller`,
+  then the body from its `<!-- review-postmortem:v1 -->` line to the end. The
+  caller adds the replay's facts to the JSON as `replay` (kit ref, base,
+  where each repo-owned file came from, cost), and writes the record to
+  `<git common dir>/review-replay/pr<n>-<kit>/postmortem.md`. Nothing else is
+  written: no PR comment, and no `review-history/postmortem-pr<n>.md`, which
+  `/review-tune` would read as a live postmortem.
+- **No step 6.** The proposals stay in `proposals`. Nothing is filed.

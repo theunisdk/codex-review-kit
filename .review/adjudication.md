@@ -151,3 +151,22 @@ certain about. Do not re-narrate the fixes — the verdict file has them.
 
 CodeRabbit still runs as the final gate on the PR. The goal is for it to find
 nothing, not to substitute for it.
+
+## Replay mode
+
+`scripts/review-replay.sh` replays today's kit on an old PR and adjudicates
+the run headlessly. It produces the verdict `/review` would have written on
+the commit CodeRabbit first reviewed. The procedure is the same, minus
+everything that changes something:
+
+- **Step 1** has run. The run is complete, and you do not run it again.
+- **Steps 2 and 3** are unchanged. Judge the code at the replayed commit. Do
+  not read later history, such as other branches, `git log --all` or the PR on
+  GitHub: the replay measures what this review would have found then. Record
+  a LOG as `LOG (not filed: replay)`, and file nothing.
+- **Step 4** is skipped. Apply no fix, commit nothing, and run no re-review. A
+  finding you would fix stays FIX.
+- **Step 5:** the header names the replayed commit. Print the verdict as your
+  final message instead of writing the file. Its Verification section says
+  `replay: no fixes applied, tests not run`.
+- **Step 6** is skipped.
