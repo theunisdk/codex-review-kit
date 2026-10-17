@@ -228,24 +228,44 @@ one rejection is a one-off.
 Verdicts are gitignored, so `review.sh` and the pre-push hook archive each one
 to `$(git rev-parse --git-common-dir)/review-history/`: shared by every
 worktree of the clone, kept after a worktree is removed, never committed.
+`/review-postmortem` reads it to find the verdict for the commit CodeRabbit
+reviewed, and writes its own records there. `/review-tune` reads the verdicts
+and those records.
 `/review-tune` also reads `.review/archive/`, the store it read before v1.2.2,
 and counts a verdict found in more than one store once.
 
-**Coverage up** (`/review-postmortem`): every CodeRabbit finding you missed gets
-diagnosed — wrong lens, insufficient tracing, filtered by threshold, or
-structurally out of reach — and turned into a prompt edit or a WATCH entry.
+**Coverage up** (`/review-postmortem <PR>`): CodeRabbit's findings are scored
+against the local verdict for the **first commit CodeRabbit reviewed**. It is
+matched by the SHA in the verdict header, never by whichever verdict is in
+`.review/verdict.md` now. A verdict for an earlier commit still scores the
+files those later commits did not touch. With no verdict for that commit or
+an ancestor, the PR is recorded as `no-local-verdict` and not scored, which is
+not the same as `missed 0`. Every missed finding is diagnosed by cause —
+wrong lens, insufficient tracing, filtered by threshold, or structurally out of
+reach — and turned into a prompt edit or a WATCH entry.
+
+The scorecard is kept twice. It is a PR comment marked
+`<!-- review-postmortem:v1 -->` with a JSON record, which a re-run updates
+in place. A copy goes to `review-history/postmortem-pr<n>.md`. Both list the
+author's disposition of every CodeRabbit finding, including the ones
+rejected in a thread reply, so `/review-tune` learns from those too.
 
 Both commands **route** each lesson before writing it: repo-specific lessons
-land in the repo's `learnings.md` or `prompts.local/`; anything that would hold
-in another repo goes to the hub (`learnings-shared.md` or a base prompt),
-scrubbed of repo and client specifics since the hub is public. That routing is
-what makes a bug found in one repo teach every other repo on its next
+land in the repo's `learnings.md` or `prompts.local/`. Anything that would
+hold in another repo goes to the hub as an issue labelled `lesson` on
+`theunisdk/codex-review-kit`, never as a commit in a local hub clone, and
+scrubbed of repo and client specifics since the hub is public. The hub folds
+lessons into `learnings-shared.md` or a base prompt in a release. That routing
+is what makes a bug found in one repo teach every other repo on its next
 `review-update.sh`.
 
-Track the postmortem scorecard. If `missed` trends toward zero, the local pass is
-working and CodeRabbit is insurance. If it plateaus, the honest read is that part
-of CodeRabbit's value (repo-wide indexing, cross-PR memory, its analyzer fleet)
-isn't reproducible this way — which is fine, since it's still your final gate.
+Track the postmortem scorecard. If `missed` trends toward zero, the local pass
+is working and CodeRabbit is insurance. A plateau is a hypothesis until the
+misses are classified by cause. Misses from the wrong lens, insufficient
+tracing or the threshold can be fixed here; a plateau of those means the fixes
+are not landing. Only misses classed structural point at value this pipeline
+cannot reproduce, such as repo-wide indexing, cross-PR memory or CodeRabbit's
+analyzer fleet. That is fine, since CodeRabbit is still your final gate.
 
 ## Layout
 

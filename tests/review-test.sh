@@ -2209,6 +2209,105 @@ test_review_tune_docs_name_legacy_archive() {
     sh -c 'grep -qF review-history "$1" && grep -qF "/review-tune\` also reads \`.review/archive/\`" "$1"' _ "$KIT/REVIEW.md"
 }
 
+# /review-postmortem scored against whatever .review/verdict.md held, so a later
+# review made findings it caught read as missed (#42). It must find the verdict
+# whose header names the first commit CodeRabbit reviewed, or an ancestor of it,
+# in the live files and the review history, and tell a failed read from none.
+postmortem_snippet() { # postmortem_snippet <sha> — the doc's verdict-locating block, with first=<sha>
+  awk '/^   ```bash$/ { f = 1; next } f && /^   ```$/ { exit } f { sub(/^   /, ""); print }' \
+    "$KIT/.claude/commands/review-postmortem.md" | sed "s|^first=.*|first=$1|"
+}
+
+test_postmortem_finds_the_verdict_for_the_reviewed_commit() {
+  local repo="$WORK/p1" wt="$WORK/p1-wt" out="$WORK/p1.out" hist snippet a b o rc
+  make_repo "$repo"
+  ( cd "$repo" && printf 'a\n' >> src.txt && git commit -qam a && printf 'b\n' >> src.txt && git commit -qam b )
+  a=$(git -C "$repo" rev-parse --short HEAD~1); b=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" worktree add -q -b other "$wt" main
+  ( cd "$wt" && printf 'o\n' > o.txt && git add o.txt && git commit -qm other )
+  o=$(git -C "$wt" rev-parse --short HEAD)
+  hist="$(history_dir "$repo")"
+  snippet="$(postmortem_snippet "$b")"
+  assert "p1: the postmortem carries a verdict-locating block" grep -qF 'git merge-base --is-ancestor' <<< "$snippet"
+
+  ( cd "$repo" && bash -c "$snippet" ) > "$out" 2>&1; rc=$?
+  assert "p1: no verdict and no history is an empty result, not a failure" \
+    sh -c '[ "$1" -eq 0 ] && [ ! -s "$2" ]' _ "$rc" "$out"
+
+  mkdir -p "$hist"
+  printf '# Review verdict — change — %s — 2026-01-01\n' "${b:0:7}" > "$repo/.review/verdict.md"
+  printf '# Review verdict — change — %s — 2026-01-01\n' "$a" > "$hist/code-2026-01-01-$a-1.md"
+  printf '# Review verdict — other — %s — 2026-01-01\n' "$o" > "$wt/.review/verdict.md"
+  printf '# Review verdict — gone — deadbeef — 2026-01-01\n' > "$hist/code-2026-01-01-deadbeef-2.md"
+  printf '# Spec verdict — change — %s — 2026-01-01\n' "${b:0:7}" > "$hist/spec-2026-01-01-${b:0:7}-3.md"
+  printf '<!-- review-postmortem:v1 -->\n# Review verdict — change — %s — 2026-01-01\n' "${b:0:7}" > "$hist/postmortem-pr1.md"
+  ( cd "$repo" && bash -c "$snippet" ) > "$out" 2>&1; rc=$?
+
+  assert "p1: the listing succeeds" test "$rc" -eq 0
+  assert "p1: the live verdict for the reviewed commit is 'same'" grep -qE "^same ${b:0:7} .*/p1/\.review/verdict\.md$" "$out"
+  assert "p1: an archived verdict for an earlier commit is 'ancestor'" grep -qE "^ancestor $a .*/code-2026-01-01-$a-1\.md$" "$out"
+  assert "p1: another worktree's verdict for an unrelated commit is 'other'" grep -qE "^other $o .*/p1-wt/\.review/verdict\.md$" "$out"
+  assert "p1: a commit this clone cannot place is 'unknown', not 'other'" grep -qE '^unknown deadbeef ' "$out"
+  assert_not "p1: spec verdicts and postmortem records are not candidates" grep -qE 'spec-2026|postmortem-pr1' "$out"
+  assert "p1: … so exactly four candidates" test "$(grep -c . "$out")" -eq 4
+
+  if [ "$(id -u)" != 0 ]; then
+    chmod 000 "$hist"
+    ( cd "$repo" && bash -c "$snippet" ) > "$out" 2>&1; rc=$?
+    chmod 755 "$hist"
+    assert "p1: an unreadable review history fails" test "$rc" -ne 0
+    assert "p1: … and says so instead of listing nothing" grep -qF 'is not readable' "$out"
+  else
+    skip_test "p1: unreadable review history (running as root)"
+  fi
+}
+
+test_postmortem_docs_record_and_route() {
+  local pm="$KIT/.claude/commands/review-postmortem.md" tune="$KIT/.claude/commands/review-tune.md"
+  assert "p2: compares against the first head CodeRabbit reviewed" grep -qF '**first head CodeRabbit reviewed**' "$pm"
+  assert "p2: … handles a verdict for an ancestor of it" grep -qF '**No `same`, but an `ancestor`**' "$pm"
+  assert "p2: … and leaves code changed since the verdict unscored" grep -qF 'git diff --quiet <verdict-sha> <finding-commit> -- <file>' "$pm"
+  assert "p2: no local verdict is its own status" grep -qF 'review-postmortem: no-local-verdict' "$pm"
+  assert "p2: … recorded with null counts, never zeros" grep -qF '`missed_by_cause` to `null`, never zeros' "$pm"
+  assert "p2: a failed read is not an empty one" grep -qF 'read is never reported as an empty result' "$pm"
+  assert "p2: the scorecard comment has a stable marker" grep -qF '<!-- review-postmortem:v1 -->' "$pm"
+  assert "p2: … and a machine-readable record" grep -qF '"schema": "review-postmortem/v1"' "$pm"
+  assert "p2: … updated in place on a re-run" grep -qF 'gh api -X PATCH repos/{owner}/{repo}/issues/comments/<id>' "$pm"
+  assert "p2: … never duplicated when the listing fails" grep -qF 'If listing fails, do not create a' "$pm"
+  assert "p2: … with a local copy in the review history" grep -qF '<git common dir>/review-history/postmortem-pr<n>.md' "$pm"
+  assert "p2: … recording findings the author rejected in a thread" grep -qF '`rejected` (a reply that' "$pm"
+  assert "p2: hub lessons are filed as issues" grep -qF 'gh issue create -R theunisdk/codex-review-kit --label lesson' "$pm"
+  assert "p2: … creating the label, or saying it filed without one" \
+    sh -c 'grep -qF "gh label create lesson" "$1" && grep -qF "file the issue without a label and say so" "$1"' _ "$pm"
+  assert "p2: … and a failed label check is not a missing label" grep -qF 'it is a failed check, not a missing label' "$pm"
+  assert_not "p2: no lesson is committed in a local hub clone" grep -qE 'Commit there|commit it in the hub' "$pm" "$tune"
+}
+
+test_review_tune_docs_read_postmortem_records() {
+  local tune="$KIT/.claude/commands/review-tune.md"
+  assert "p3: /review-tune reads postmortem records" grep -qF '`postmortem-pr<n>.md`' "$tune"
+  assert "p3: … and the PR comments other clones wrote" grep -qF 'comment marked `<!-- review-postmortem:v1 -->`' "$tune"
+  assert "p3: … with a state for comments it could not read" grep -qF 'report the PR comments as unread' "$tune"
+  assert "p3: … and CodeRabbit findings the author rejected" grep -qF 'finding whose `author` is `rejected`' "$tune"
+  assert "p3: … reading an unscored postmortem as unscored" grep -qF '`counts` are `null`, not zero' "$tune"
+  assert "p3: … and never suppressing a class CodeRabbit proved real" grep -qF 'classed `missed` or `rejected-wrongly`' "$tune"
+  assert "p3: hub lessons are issues, not hub commits" grep -qF 'never as a commit in a local hub clone' "$tune"
+  assert "p3: REVIEW.md says the postmortem reads and writes the review history" \
+    grep -qF '`/review-postmortem` reads it to find the verdict' "$KIT/REVIEW.md"
+}
+
+# A plateau in `missed` was read as proof of value the pipeline cannot reproduce,
+# before anyone had classified the misses by cause (#43).
+test_postmortem_plateau_is_a_hypothesis() {
+  local f
+  for f in OPERATING.md REVIEW.md .claude/commands/review-postmortem.md; do
+    assert "p4: $f frames a plateau as a hypothesis" grep -qF 'hypothesis' "$KIT/$f"
+  done
+  assert_not "p4: OPERATING.md no longer reads a plateau as proof" grep -qF 'that residue is the part' "$KIT/OPERATING.md"
+  assert_not "p4: … nor does REVIEW.md" grep -qF 'If it plateaus, the honest read' "$KIT/REVIEW.md"
+  assert "p4: OPERATING.md says the postmortem leaves a record" grep -qF 'chat output alone is not a record' "$KIT/OPERATING.md"
+}
+
 # A hook that never runs looks exactly like one that ran and found the verdict
 # current, so every review run says when this clone would not run it. A
 # warning only: the run's exit code and `complete` must not move.
@@ -2731,6 +2830,10 @@ run_tests \
   test_verdict_archive_failure_warns_without_failing \
   test_prepush_archives_the_verdict \
   test_review_tune_docs_name_legacy_archive \
+  test_postmortem_finds_the_verdict_for_the_reviewed_commit \
+  test_postmortem_docs_record_and_route \
+  test_review_tune_docs_read_postmortem_records \
+  test_postmortem_plateau_is_a_hypothesis \
   test_review_warns_when_hook_unwired \
   test_review_warns_when_hooks_path_points_elsewhere \
   test_review_quiet_when_git_hooks_chain \

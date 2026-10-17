@@ -16,7 +16,17 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
      are `code-<date>-<sha>-<cksum>.md`, spec verdicts
      `spec-<date>-<sha>-<cksum>.md`, headerless ones
      `<mode>-unparsed-<cksum>.md`. The name's mode comes from the header, so
-     it can be wrong for an old spec verdict (see below).
+     it can be wrong for an old spec verdict (see below). The same directory
+     holds `/review-postmortem` records, `postmortem-pr<n>.md`. They are not
+     verdicts: read them in the next store.
+   - The postmortem records. Each `postmortem-pr<n>.md` ends in a JSON block
+     (`"schema": "review-postmortem/v1"`) listing every CodeRabbit finding on
+     that PR, how it compared with the local verdict, and the author's
+     disposition. Records written in another clone exist only as the PR
+     comment marked `<!-- review-postmortem:v1 -->`. If `gh` works, also read
+     that comment on the last 30 PRs (`gh pr list --state all --limit 30 --json number`).
+     One PR's record counts once, and the later `date` wins. If `gh` fails,
+     report the PR comments as unread.
    - The legacy archive, `.review/archive/`, which kits before v1.2.2 read
      instead. It holds a repo's pre-upgrade history and follows no naming
      scheme: `find <worktree>/.review/archive -type f`.
@@ -45,6 +55,9 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
    `<mode>-unparsed` name or the live file it came from. Name each such file
    and the mode you assumed.
 
+   A postmortem with `"status": "no-local-verdict"` was not scored: its
+   `counts` are `null`, not zero. Its author dispositions still count.
+
    Count each verdict once, wherever it was found. Files with the same
    `cksum` are one verdict; a review-history name ends in its `cksum`. Two
    verdicts of one mode and commit (SHAs match when one is a prefix of the
@@ -60,6 +73,12 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
 
 2. Group the REJECT reasons into classes. You are looking for the same rejection
    made two or more times — one rejection is a one-off, two is a pattern.
+   A CodeRabbit finding whose `author` is `rejected` is a rejection too, with
+   its `author_reason`. When a lens raised the same finding (`local_id` set)
+   and we rejected it too, it confirms that local rejection but is not a
+   second occurrence. Otherwise it is CodeRabbit noise: a recurring class of
+   it is a candidate for an instruction in this repo's `.coderabbit.yaml`
+   `reviews.path_instructions`, not for `learnings.md`.
 
 3. For each recurring class, propose one line for the `## SUPPRESS` section of
    `.review/learnings.md`. Rules for a good suppression:
@@ -77,17 +96,20 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
      `.review/learnings.md`, as below.
    - **Generic or stack-level** (would hold in any repo, or any repo on this
      stack) → it belongs in the kit hub's `learnings-shared.md` instead.
-     The hub checkout is `$REVIEW_KIT_DIR`, or
-     `~/dev/private/codex-review-kit`; `.review/kit-version` names the
-     commit this repo last synced, not a path. The hub is PUBLIC: strip
-     anything that identifies a repo, client, schema, or incident. Propose
-     the hub edit alongside the local ones; after approval, commit it in the
-     hub so other repos pick it up on their next `scripts/review-update.sh`.
+     Propose it alongside the local edits. After approval, file it as an
+     issue on the hub, never as a commit in a local hub clone. Follow step 6
+     of `.claude/commands/review-postmortem.md`: check the hub's current file, reuse an open
+     `lesson` issue, create the `lesson` label or say you filed without it,
+     and report `hub lesson NOT filed` with the saved body if `gh` fails. The
+     hub is PUBLIC: strip anything that identifies a repo, client, schema, or
+     incident.
    - Never edit `.review/learnings-shared.md` in this repo directly — the
      next sync overwrites it.
 
 5. Show me the proposed diffs and wait for my approval before writing. Never
-   suppress a class that produced a genuine FIX at any point.
+   suppress a class that produced a genuine FIX at any point. That includes a
+   postmortem finding classed `missed` or `rejected-wrongly`, or one the
+   author `fixed` after CodeRabbit raised it.
 
 6. If `learnings.md` is over ~60 lines after the edit, consolidate overlapping
    entries — a bloated learnings file dilutes every lens prompt.

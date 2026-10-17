@@ -11,13 +11,31 @@ Two mechanisms, one you already own and one you run deliberately.
 ### The postmortem scorecard (the designed proof)
 
 After CodeRabbit reviews each PR, run `/review-postmortem <PR>`. It yields
-`caught N / missed M / rejected-wrongly R / noise X`. That is the metric:
+`caught N / missed M / rejected-wrongly R / noise X / unscored U`, with
+`missed` split by cause. That is the metric:
 
 - **`missed` trending toward zero** over a run of PRs → the local pass is
   doing CodeRabbit's job and CodeRabbit is insurance.
-- **`missed` plateauing** → that residue is the part of CodeRabbit's value
-  this pipeline cannot reproduce (repo-wide indexing, cross-PR memory, its
-  analyzer fleet). Knowing precisely what you're paying for is the point.
+- **`missed` plateauing** → a hypothesis, not a finding, until the
+  postmortem has classified the misses by cause. Wrong lens, insufficient
+  tracing and threshold misses are fixable here, so a plateau of those means
+  the fixes are not landing. Only structural misses point at value this
+  pipeline cannot reproduce. Candidates are repo-wide indexing, cross-PR
+  memory and CodeRabbit's analyzer fleet. Knowing precisely what you're paying
+  for is the point.
+
+The score is only as good as the comparison. The postmortem scores against
+the local verdict whose header names the first commit CodeRabbit reviewed, or
+an ancestor of it. It never uses whatever `.review/verdict.md` holds now.
+Findings on files changed after the local review are `unscored`. With no
+matching verdict the PR is `no-local-verdict`: recorded, with `null` counts,
+and never read as `missed 0`.
+
+Each run leaves a record: a PR comment marked `<!-- review-postmortem:v1 -->`,
+updated in place on a re-run, and a copy in
+`$(git rev-parse --git-common-dir)/review-history/postmortem-pr<n>.md`. The
+chat output alone is not a record. If the comment or the copy could not be
+written, the run says so.
 
 Run the postmortem on **every** PR at first, including clean ones — "nothing
 missed" is a data point, and skipping it silently stops the learning loop.
