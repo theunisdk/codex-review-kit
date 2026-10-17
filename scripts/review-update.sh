@@ -9,23 +9,34 @@
 #   synced (overwritten):  scripts/review*.sh, scripts/make-plugin.sh,
 #                          scripts/lib/*.sh, .review/prompts/, schema.json,
 #                          adjudication.md, learnings-shared.md, .gitignore,
-#                          .claude/commands+skill, .codex/skills, .githooks,
-#                          .claude-plugin/, REVIEW.md
+#                          .claude/commands/, .claude/skills/pre-pr-review/,
+#                          .codex/skills/, .githooks/, .claude-plugin/,
+#                          REVIEW.md, OPERATING.md
+#   generated (rewritten): .review/kit-version — what this run installed
 #   repo-owned (never):    .review/rubric.md, config.sh, learnings.md,
 #                          prompts.local/, analyzers.local.sh, and the root
 #                          .coderabbit.yaml (seeded only when the repo has no
 #                          CodeRabbit config in any supported spelling)
 #
-#   ./scripts/review-update.sh           # sync machinery from the hub
-#   ./scripts/review-update.sh --init    # also seed repo-owned files that are
-#                                        # missing, from the kit's templates/
+#   ./scripts/review-update.sh                   # install the latest release
+#   ./scripts/review-update.sh --init            # also seed repo-owned files that
+#                                                # are missing, from templates/
+#   ./scripts/review-update.sh --local           # install a local hub clone's
+#                                                # working tree — UNRELEASED
+#   ./scripts/review-update.sh --latest-release  # print the latest release tag
+#                                                # and exit; installs nothing
 #
-# Hub resolution order: $REVIEW_KIT_DIR, then the local clone at
-# ~/dev/private/codex-review-kit, then a pinned fetch from the public repo:
-# its latest release tag, or $REVIEW_KIT_REF (a tag or full commit SHA) —
-# never a branch, the default one included. Local sources are used as-is (offline
-# stays fine), with a warning when a local clone is behind its own origin.
+# By default the kit is fetched from the hub ($REVIEW_KIT_URL, else the public
+# repo) at its latest release tag (highest vN.N.N), or at $REVIEW_KIT_REF (a tag
+# or full commit SHA) — never a branch, and never a local clone's working tree,
+# so a stale or ahead clone cannot ship. If the release cannot be resolved or
+# fetched, the run fails; it never installs something else instead.
+# --local installs the working tree of $REVIEW_KIT_DIR, else
+# ~/dev/private/codex-review-kit, as-is, and records it as unreleased.
 # Every run prints the resolved source and the revision it installs.
+#
+# --latest-release exits 0 with the tag on stdout, 1 when the hub cannot be
+# listed, 2 when it lists no release tag. A usage error exits 64.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -38,8 +49,44 @@ main() {
 KIT_GIT_URL="${REVIEW_KIT_URL:-https://github.com/theunisdk/codex-review-kit}"
 KIT_REF="${REVIEW_KIT_REF:-}"
 
-INIT=0
-[ "${1:-}" = "--init" ] && INIT=1
+# Release tags (strictly vN.N.N) in `git ls-remote --tags` output on stdin,
+# highest last, numeric per component so v0.10.0 beats v0.9.0.
+release_tags() {
+  sed -n 's|.*refs/tags/\(v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' \
+    | sed 's/^v//' | sort -t. -k1,1n -k2,2n -k3,3n | sed 's/^/v/'
+}
+latest_tag() { release_tags | tail -n1; }
+
+# TAGS = the hub's tag listing; fails with a message when it cannot be listed.
+list_tags() {
+  TAGS="$(git ls-remote --tags "$KIT_GIT_URL")" || {
+    echo "error: cannot reach $KIT_GIT_URL — check the connection and the URL" >&2
+    return 1; }
+}
+
+# The highest release tag on commit $1, from $TAGS (an annotated tag counts by
+# its ^{} line). Empty when no release tag points there.
+release_at() {
+  printf '%s\n' "$TAGS" | awk -v want="$1" '
+    { n = $2; peeled = sub(/\^\{\}$/, "", n); if (peeled || !(n in c)) c[n] = $1 }
+    END { for (n in c) if (c[n] == want) print n }' | latest_tag
+}
+
+INIT=0; LOCAL=0
+for arg in "$@"; do
+  case "$arg" in
+    --init)  INIT=1 ;;
+    --local) LOCAL=1 ;;
+    --latest-release)
+      [ "$#" = 1 ] || { echo "error: --latest-release takes no other arguments" >&2; exit 64; }
+      list_tags || exit 1
+      LATEST="$(printf '%s\n' "$TAGS" | latest_tag)"
+      [ -n "$LATEST" ] || { echo "error: no release tag found on $KIT_GIT_URL" >&2; exit 2; }
+      echo "$LATEST"; exit 0 ;;
+    -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    *) echo "error: unknown argument '$arg' — see --help" >&2; exit 64 ;;
+  esac
+done
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   echo "error: run from inside the repo you want to update" >&2; exit 1; }
@@ -51,21 +98,25 @@ TMP_CLONE=""
 cleanup() { if [ -n "$TMP_CLONE" ]; then rm -rf "$TMP_CLONE"; fi; }
 trap cleanup EXIT
 
-# Highest release tag (vN.N…) in `git ls-remote --tags` output on stdin,
-# numeric per component so v0.10.0 beats v0.9.0. Empty when there is none.
-latest_tag() {
-  sed -n 's|.*refs/tags/v\([0-9][0-9.]*\)$|\1|p' \
-    | sort -t. -k1,1n -k2,2n -k3,3n | tail -n1 | sed 's/^/v/'
-}
-
-if [ -n "${REVIEW_KIT_DIR:-}" ] && [ -d "$REVIEW_KIT_DIR" ]; then
-  KIT="$REVIEW_KIT_DIR"; KIT_FROM="REVIEW_KIT_DIR"
-elif [ -d "$HOME/dev/private/codex-review-kit/scripts" ]; then
-  KIT="$HOME/dev/private/codex-review-kit"; KIT_FROM="local clone"
-else
-  TAGS="$(git ls-remote --tags "$KIT_GIT_URL")" || {
-    echo "error: cannot reach $KIT_GIT_URL — check the connection and the URL" >&2
+LOCAL_HUB="$HOME/dev/private/codex-review-kit"
+if [ "$LOCAL" = 1 ]; then
+  [ -z "$KIT_REF" ] || {
+    echo "error: REVIEW_KIT_REF pins a release fetch and --local installs a working tree — pick one" >&2
     exit 1; }
+  if [ -n "${REVIEW_KIT_DIR:-}" ]; then
+    [ -d "$REVIEW_KIT_DIR" ] || { echo "error: REVIEW_KIT_DIR '$REVIEW_KIT_DIR' is not a directory" >&2; exit 1; }
+    KIT="$REVIEW_KIT_DIR"; KIT_FROM="REVIEW_KIT_DIR, unreleased"
+  elif [ -d "$LOCAL_HUB/scripts" ]; then
+    KIT="$LOCAL_HUB"; KIT_FROM="local clone, unreleased"
+  else
+    echo "error: --local found no hub clone — set REVIEW_KIT_DIR, or clone it to $LOCAL_HUB" >&2
+    exit 1
+  fi
+else
+  [ -z "${REVIEW_KIT_DIR:-}" ] || {
+    echo "error: REVIEW_KIT_DIR is set without --local — pass --local to install that working tree (unreleased), or unset it to install the latest release" >&2
+    exit 1; }
+  list_tags || exit 1
   if [ -z "$KIT_REF" ]; then
     KIT_REF="$(printf '%s\n' "$TAGS" | latest_tag)"
     [ -n "$KIT_REF" ] || {
@@ -83,14 +134,20 @@ else
   [ -n "$FETCH_REF" ] || {
     echo "error: '$KIT_REF' is not a tag on $KIT_GIT_URL or a full commit SHA — REVIEW_KIT_REF takes one of those, never a branch" >&2
     exit 1; }
+  [ ! -d "$LOCAL_HUB/scripts" ] \
+    || echo "note: not using the hub clone at $LOCAL_HUB — --local installs its working tree" >&2
   TMP_CLONE="$(mktemp -d)"
-  echo "no local hub found — fetching $KIT_GIT_URL @ $KIT_REF" >&2
+  echo "fetching $KIT_GIT_URL @ $KIT_REF" >&2
   git -C "$TMP_CLONE" init -q
   git -C "$TMP_CLONE" fetch --quiet --depth 1 "$KIT_GIT_URL" "$FETCH_REF" || {
     echo "error: cannot fetch '$KIT_REF' from $KIT_GIT_URL — not on the hub, or the fetch failed" >&2
     exit 1; }
   git -C "$TMP_CLONE" checkout --quiet --detach FETCH_HEAD
-  KIT="$TMP_CLONE"; KIT_FROM="network"
+  KIT="$TMP_CLONE"; KIT_FROM="release"
+  RELEASE="$(release_at "$(git -C "$TMP_CLONE" rev-parse HEAD)")"
+  if [ -z "$RELEASE" ]; then
+    RELEASE=unreleased; KIT_FROM="pinned, unreleased"
+  fi
 fi
 [ -f "$KIT/scripts/review.sh" ] || {
   echo "error: '$KIT' does not look like the kit (no scripts/review.sh)" >&2; exit 1; }
@@ -99,10 +156,9 @@ if [ -n "$TMP_CLONE" ]; then
   KIT_SHOW="$KIT_GIT_URL"
   KIT_DESC="$KIT_REF"
 else
+  RELEASE=unreleased
   KIT_SHOW="$KIT"
   KIT_DESC="$(git -C "$KIT" describe --tags --always 2>/dev/null || echo unknown)"
-  [ -z "$KIT_REF" ] || echo "warn: REVIEW_KIT_REF only applies to network fetches — using $KIT as-is" >&2
-  # a stale local clone otherwise delivers stale files under a success message
   if git -C "$KIT" rev-parse --git-dir >/dev/null 2>&1; then
     FRESH=1
     git -C "$KIT" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=10 \
@@ -113,15 +169,14 @@ else
       BEHIND="$(git -C "$KIT" rev-list --count "HEAD..$UPSTREAM" 2>/dev/null)" || BEHIND=0
     fi
     if [ "${BEHIND:-0}" -gt 0 ]; then
-      echo "warn: hub at $KIT is $BEHIND commit(s) behind $UPSTREAM — syncing anyway; 'git -C $KIT pull' first for the latest kit" >&2
+      echo "warn: hub at $KIT is $BEHIND commit(s) behind $UPSTREAM — installing it anyway, as --local asks" >&2
     elif [ "$FRESH" = 0 ] || [ -z "$UPSTREAM" ]; then
       echo "note: could not verify hub at $KIT against its origin — it may be stale" >&2
     fi
   fi
 fi
-
 KIT_COMMIT="$(git -C "$KIT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-# The copy below installs the hub's WORKING TREE. Uncommitted edits there are
+# --local installs the hub's WORKING TREE. Uncommitted edits there are
 # real content going into this repo, and a bare HEAD in kit-version would name a
 # commit that cannot reproduce what was installed. Untracked files count: the
 # copies are globs and whole directories, so a new prompt or skill ships too —
@@ -178,11 +233,12 @@ if [ "$INIT" = 1 ]; then
 fi
 
 # --- record what we synced to ----------------------------------------------
-printf 'kit: %s %s\nref: %s\nsource: %s\nsynced: %s\n' \
-  "$KIT_GIT_URL" "$KIT_COMMIT" "$KIT_DESC" "$KIT_SHOW" "$(date +%Y-%m-%d)" \
+# release: is the vN.N.N tag on the installed commit, or `unreleased`.
+printf 'kit: %s %s\nref: %s\nrelease: %s\nsource: %s\nsynced: %s\n' \
+  "$KIT_GIT_URL" "$KIT_COMMIT" "$KIT_DESC" "$RELEASE" "$KIT_SHOW" "$(date +%Y-%m-%d)" \
   > .review/kit-version
 
-echo "synced from kit @ $KIT_DESC ($KIT_COMMIT) → run scripts/review-install.sh if this is a new machine"
+echo "synced from kit @ $KIT_DESC ($KIT_COMMIT, $RELEASE) → run scripts/review-install.sh if this is a new machine"
 
 }
 main "$@"; exit $?

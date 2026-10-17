@@ -93,6 +93,12 @@ if ! hook_wiring; then
   [ -z "$HOOK_FIX" ] || HOOK_WARNING="$HOOK_WARNING Fix: \`$HOOK_FIX\`"
 fi
 
+kit_staleness
+case "$KIT_STATE" in
+  behind|unknown) warn "$KIT_NOTE" ;;
+  *)              info "$KIT_NOTE" ;;
+esac
+
 # The previous verdicts, before this run's adjudication overwrites them.
 archive_verdicts
 

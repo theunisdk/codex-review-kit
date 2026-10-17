@@ -11,11 +11,16 @@ rule is worse than none.**
 
 ## 0 — Bootstrap the files
 
-If the kit isn't present yet, prefer a local hub clone — `$REVIEW_KIT_DIR` or
-`~/dev/private/codex-review-kit`. That path downloads nothing:
+If the kit isn't present yet and a local hub clone exists at
+`~/dev/private/codex-review-kit`, run its updater. The clone only supplies the
+script: it still fetches and installs the hub's latest release tag, and fails
+if it cannot. Pass `--local` only to install the clone's working tree instead
+(unreleased hub changes, recorded as `unreleased`). Pull the clone first: an
+updater from before v1.3.0 installs the clone's working tree whatever you pass.
 
 ```bash
-bash "${REVIEW_KIT_DIR:-$HOME/dev/private/codex-review-kit}/scripts/review-update.sh" --init
+git -C ~/dev/private/codex-review-kit pull --ff-only \
+  && bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
 ./scripts/review-install.sh     # per-machine setup (profile, hooks, pointers)
 ```
 
@@ -35,7 +40,7 @@ one by default.
 (
   KIT=https://github.com/theunisdk/codex-review-kit
   TAGS=$(git ls-remote --tags "$KIT") || { echo "stopped: cannot reach $KIT" >&2; exit 1; }
-  LATEST=$(printf '%s\n' "$TAGS" | sed -n 's|.*refs/tags/v\([0-9][0-9.]*\)$|\1|p' \
+  LATEST=$(printf '%s\n' "$TAGS" | sed -n 's|.*refs/tags/v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' \
     | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
   REF="${REVIEW_KIT_REF:-${LATEST:+v$LATEST}}"
   [ -n "$REF" ] || { echo "stopped: no release tag on $KIT — set REVIEW_KIT_REF" >&2; exit 1; }
