@@ -1,11 +1,16 @@
 ---
 description: Record what CodeRabbit caught that our local Codex pass missed
-argument-hint: "[PR number or URL — default: this branch's PR]"
+argument-hint: "[PR number or URL — default: this branch's PR] [--record-only]"
 allowed-tools: Bash, Read, Grep, Glob, Edit, Write
 ---
 
 Close the loop between the local review and the CodeRabbit gate. Run this after
 CodeRabbit has reviewed the PR: $ARGUMENTS
+
+The PR is `$ARGUMENTS` without `--record-only`; with no PR given, use this
+branch's PR. `--record-only` is for unattended callers: stop after step 5 and
+list the proposed edits in the report, without waiting for approval or filing
+anything.
 
 Begin your report with one status line, so a caller can tell the outcomes apart:
 
@@ -16,18 +21,24 @@ Begin your report with one status line, so a caller can tell the outcomes apart:
   no `.review/` here, no PR for this branch, CodeRabbit has not reviewed it,
   or CodeRabbit skipped it.
 - `review-postmortem: failed — <step>: <error>` when a command failed. A failed
-  read is never reported as an empty result.
+  read is never reported as an empty result. Nothing is recorded.
+
+After `scored` or `no-local-verdict`, the second line says whether the record
+was saved:
+`review-postmortem: record — comment <posted|updated|NOT posted: <error>>; local copy <written|NOT written: <error>>`.
+Both lines are final at the end of step 5. Step 6 never changes them.
 
 1. **Pull CodeRabbit's review.** If `.review/` is missing, report
    `skipped — no review kit in this repo`. Resolve the PR with
-   `gh pr view $ARGUMENTS --json number,url,author,headRefOid,commits`. With no
-   argument this uses the current branch's PR; if `gh` says the branch has no
-   pull request, report `skipped — no PR for this branch`. Then fetch, each
-   with `--paginate`:
-   `gh api repos/{owner}/{repo}/pulls/<n>/reviews`, `…/pulls/<n>/comments` (inline
-   threads, with `in_reply_to_id` and `original_commit_id`) and
-   `…/issues/<n>/comments`. If any call fails, stop with `failed`. Do not guess,
-   and do not score from pasted comments: they carry no commit.
+   `gh pr view <PR> --json number,url,author,baseRefName,headRefOid,commits`.
+   If `gh` says the branch has no pull request, report
+   `skipped — no PR for this branch`. Then fetch, each with `--paginate`:
+   `gh api repos/{owner}/{repo}/pulls/<n>/reviews`, `…/pulls/<n>/comments`
+   (inline threads, with `in_reply_to_id` and `original_commit_id`),
+   `…/issues/<n>/comments`, and `gh api repos/{owner}/{repo}/commits/<sha>/statuses`
+   for every commit of the PR. If any of these calls fails, stop with
+   `failed`. Do not guess, and do not score from pasted comments: they carry
+   no commit.
 
    CodeRabbit posts as `coderabbitai[bot]`. A review object with an empty body is
    its reply to a thread, not a review. A finding is an inline comment, or a
@@ -36,64 +47,93 @@ Begin your report with one status line, so a caller can tell the outcomes apart:
    `original_commit_id`, or the review's `commit_id`. A finding raised again on
    a later head counts once, at its first commit.
 
-   If CodeRabbit has no non-empty review and no findings, check the PR's commits
-   for a CodeRabbit commit status: `gh api repos/{owner}/{repo}/commits/<sha>/statuses`.
-   `Review completed` means it reviewed that commit and found nothing.
-   `Review rate limited` and `pending` are not reviews. With no review anywhere,
-   report `skipped — CodeRabbit has not reviewed PR #<n>`. If its summary comment
-   says the review was skipped or paused, report `skipped — CodeRabbit skipped PR #<n>`.
+   A CodeRabbit status reading `Review completed` means it reviewed that
+   commit; a clean pass may leave only that status. `Review rate limited` and
+   `pending` are not reviews. With no non-empty review and no completed
+   status, report `skipped — CodeRabbit has not reviewed PR #<n>`. If its
+   summary comment says the review was skipped or paused, report
+   `skipped — CodeRabbit skipped PR #<n>`.
 
 2. **Find the local verdict for the commit CodeRabbit first reviewed.** The
-   comparison commit is the **first head CodeRabbit reviewed**: the earliest
-   of its non-empty reviews' `commit_id` and its `Review completed` statuses.
-   Later heads hold fixes made in answer to CodeRabbit, and a verdict written
-   after its first review may have read it. `.review/verdict.md` holds
-   whatever was reviewed last, so never use it without checking its header.
+   comparison commit is the **first head CodeRabbit reviewed**: of its
+   non-empty reviews and its `Review completed` statuses, the one with the
+   earliest `submitted_at` or `created_at`. Later heads hold fixes made in
+   answer to CodeRabbit, and a verdict written after its first review may have
+   read it. `.review/verdict.md` holds whatever was reviewed last, so never use
+   it without matching its header.
 
    A verdict's header names the commit it judged:
    `# Review verdict — <branch> — <short-sha> — <date>`. SHAs match when one
-   is a prefix of the other. First run `git fetch origin "pull/<n>/head"` so
-   the PR's commits are in this clone. If the fetch fails, say so: commits it
-   would have brought show up as `unknown` below. Then list every candidate with its
-   relation to the comparison commit, from the live `.review/verdict.md` of
-   each worktree and the clone's review history. The live file may not be
-   archived yet, so read both:
+   is a prefix of the other. First run
+   `git fetch origin "pull/<n>/head" "<baseRefName>"`, so the PR's commits and
+   its base are in this clone. If the fetch fails, stop with `failed — fetch`.
+   Then list every candidate with its relation to the comparison commit, from
+   the live `.review/verdict.md` of each worktree and the clone's review
+   history. The live file may not be archived yet, so read both:
 
    ```bash
    first=<full SHA of the first head CodeRabbit reviewed>
-   common="$(git rev-parse --path-format=absolute --git-common-dir)" || { echo "failed: git common dir"; exit 1; }
-   hist="$common/review-history"
-   [ ! -e "$hist" ] || [ -r "$hist" ] || { echo "failed: $hist is not readable"; exit 1; }
+   base=origin/<baseRefName>
+   first="$(git rev-parse --verify -q "$first^{commit}")" || { echo "failed: the compared commit is not in this clone"; exit 1; }
+   base="$(git rev-parse --verify -q "$base^{commit}")" || { echo "failed: the PR's base is not in this clone"; exit 1; }
+   common="$(git rev-parse --git-common-dir)" && common="$(cd "$common" && pwd -P)" || { echo "failed: git common dir"; exit 1; }
+   hist="$common/review-history" archived=""
+   if [ -e "$hist" ]; then
+     [ -r "$hist" ] && [ -x "$hist" ] || { echo "failed: $hist is not readable"; exit 1; }
+     archived="$(find "$hist" -maxdepth 1 -name 'code-*.md')" || { echo "failed: cannot list $hist"; exit 1; }
+   fi
    wts="$(git worktree list --porcelain)" || { echo "failed: git worktree list"; exit 1; }
    { printf '%s\n' "$wts" | sed -n 's|^worktree \(.*\)|\1/.review/verdict.md|p'
-     [ -d "$hist" ] && find "$hist" -maxdepth 1 -name 'code-*.md'
+     [ -z "$archived" ] || printf '%s\n' "$archived"
    } | while IFS= read -r f; do
-     [ -f "$f" ] || continue
-     awk -F ' — ' '$1 == "# Review verdict" && NF == 4 && $3 ~ /^[0-9a-f]+$/ && length($3) >= 4 && length($3) <= 64 { print $3 }' "$f" |
-     while IFS= read -r sha; do
+     if [ ! -e "$f" ]; then
+       case "$f" in */.review/verdict.md) [ -d "${f%/.review/verdict.md}" ] || echo "unread ${f%/.review/verdict.md}: worktree directory is missing" ;; esac
+       continue
+     fi
+     heads="$(awk -F ' — ' '
+       function flush() { if (sha != "" && !spec) print sha, line; sha = ""; spec = 0 }
+       /^# (Review|Spec) verdict — / { flush() }
+       $1 == "# Review verdict" && NF == 4 && $3 ~ /^[0-9a-f]+$/ && length($3) >= 4 && length($3) <= 64 { sha = $3; line = FNR }
+       /^Lenses:/ && /spec-/ { spec = 1 }
+       END { flush() }' "$f")" || { echo "failed: cannot read $f"; exit 1; }
+     [ -n "$heads" ] || continue
+     printf '%s\n' "$heads" | while read -r sha line; do
        case "$first" in
          "$sha"*) rel=same ;;
          *) git merge-base --is-ancestor "$sha" "$first" 2>/dev/null; rc=$?
-            case "$rc" in 0) rel=ancestor ;; 1) rel=other ;; *) rel=unknown ;; esac ;;
+            case "$rc" in
+              0) if git merge-base --is-ancestor "$sha" "$base" 2>/dev/null; then rel=other; else rel=ancestor; fi ;;
+              1) rel=other ;;
+              *) rel=unknown ;;
+            esac ;;
        esac
-       printf '%s %s %s\n' "$rel" "$sha" "$f"
+       printf '%s %s %s %s\n' "$rel" "$sha" "$line" "$f"
      done
    done
    ```
+
+   Each line is `<relation> <sha> <line> <file>`: the verdict starts at that
+   line of that file, which may hold several. A verdict whose `Lenses:` line
+   names a `spec-*` lens is a spec review under an old header, so it is not
+   listed. A line starting `failed:`, or a non-zero exit, means a store could
+   not be read: report `failed`, not `no-local-verdict`. A line starting
+   `unread` names a worktree whose verdict could not be checked: name it in
+   the report and in the record's `reason`.
 
    Pick the verdict by this rule, and name the files you used:
    - **`same`** — the verdict judged the comparison commit. Use every `same`
      verdict, since one commit may have been adjudicated twice. A finding is
      caught if any of them has it.
-   - **No `same`, but an `ancestor`** — the verdict judged an earlier commit,
-     and the commits after it reached CodeRabbit unreviewed. Use the nearest
-     one: the smallest `git rev-list --count <sha>..<first>`. Say how many
-     commits it does not cover.
+   - **No `same`, but an `ancestor`** — the verdict judged an earlier commit
+     on this PR's branch, and the commits after it reached CodeRabbit
+     unreviewed. Use the nearest one: the smallest
+     `git rev-list --count <sha>..<first>`. That count is `uncovered_commits`.
    - **Neither** — record `no-local-verdict` and do not score. `other` means a
-     later or unrelated commit, such as a review run after CodeRabbit's.
-     `unknown` means a commit this clone cannot place; name each one. A
-     missing review-history directory is no history in this clone, not a
-     failure.
+     commit that is not on this PR's branch before the compared commit: a
+     review run after CodeRabbit's, another branch's, or one already on the
+     base. `unknown` means a commit this clone cannot place, so it is not on
+     the PR's fetched history. A missing review-history directory is no
+     history in this clone, not a failure.
 
    Score a finding only if its file is unchanged between the verdict's commit
    and the finding's commit: `git diff --quiet <verdict-sha> <finding-commit> -- <file>`.
@@ -119,19 +159,23 @@ Begin your report with one status line, so a caller can tell the outcomes apart:
    rejections.
 
 4. **Diagnose why each Missed finding was missed.** Give each one a cause:
-   - **Wrong lens** → propose a specific "hunt specifically for" addition.
-     A hazard specific to this repo goes in `.review/prompts.local/<lens>.md`
-     (repo-owned overlay). One that would hold in any repo, or any repo on this
-     stack, is a hub lesson for `.review/prompts/<lens>.md` (step 6). Never edit
-     `.review/prompts/` in this repo: the next sync overwrites it.
-   - **Insufficient tracing** (right lens) → propose a `## WATCH` line, dated,
-     naming the defect class concretely. It goes in `.review/learnings.md` if
-     repo-specific, or is a hub lesson for `learnings-shared.md` if it generalises.
-   - **Threshold** → check whether it was below `CONFIDENCE_MIN` in
-     `.review/raw/out-*.json`; if so, tell me the threshold is too aggressive.
-   - **Structural limit** (needs a repo-wide index, cross-PR history, or a tool
-     we do not run) → say so plainly. That is CodeRabbit earning its cost, and
-     the right answer is to keep paying for it, not to bolt on more prompt.
+   - **Wrong lens** (`wrong_lens`) → propose a specific "hunt specifically
+     for" addition. A hazard specific to this repo goes in
+     `.review/prompts.local/<lens>.md` (repo-owned overlay). One that would
+     hold in any repo, or any repo on this stack, is a hub lesson for
+     `.review/prompts/<lens>.md` (step 6). Never edit `.review/prompts/` in
+     this repo: the next sync overwrites it.
+   - **Insufficient tracing** (`tracing`, right lens) → propose a `## WATCH`
+     line, dated, naming the defect class concretely. It goes in
+     `.review/learnings.md` if repo-specific, or is a hub lesson for
+     `learnings-shared.md` if it generalises.
+   - **Threshold** (`threshold`) → check whether it was below
+     `CONFIDENCE_MIN` in `.review/raw/out-*.json`; if so, tell me the
+     threshold is too aggressive.
+   - **Structural limit** (`structural`: needs a repo-wide index, cross-PR
+     history, or a tool we do not run) → say so plainly. That is CodeRabbit
+     earning its cost, and the right answer is to keep paying for it, not to
+     bolt on more prompt.
 
 5. **Record the scorecard**, before proposing edits, so the record exists even
    if no edit is approved. Write one body and use it twice:
@@ -140,7 +184,7 @@ Begin your report with one status line, so a caller can tell the outcomes apart:
    <!-- review-postmortem:v1 -->
    ## Review postmortem — PR #<n>
 
-   **<status>** · compared commit `<first, short>` · local verdict `<sha>` (<same|ancestor, K commits uncovered>)
+   **scored** · compared commit `<first, short>` · local verdict `<sha>` (same | ancestor, K commits uncovered)
    caught N / missed M (wrong lens a / tracing b / threshold c / structural d) / rejected-wrongly R / noise X / unscored U
 
    | CodeRabbit finding | File | Class | Cause | Local ID | Author |
@@ -149,55 +193,64 @@ Begin your report with one status line, so a caller can tell the outcomes apart:
    <details><summary>Machine-readable record</summary>
 
    ```json
-   {"schema": "review-postmortem/v1", "pr": 0, "date": "YYYY-MM-DD",
+   {"schema": "review-postmortem/v1", "pr": 0, "date": "<UTC ISO 8601 timestamp>",
     "status": "scored | no-local-verdict", "reason": null,
-    "compared_commit": "<full sha>", "verdict": {"sha": "<short>", "relation": "same | ancestor", "files": []},
+    "compared_commit": "<full sha>",
+    "verdict": {"shas": [], "relation": "same | ancestor", "uncovered_commits": 0, "files": []},
     "counts": {"caught": 0, "missed": 0, "rejected_wrongly": 0, "noise": 0, "unscored": 0},
     "missed_by_cause": {"wrong_lens": 0, "tracing": 0, "threshold": 0, "structural": 0},
     "findings": [{"url": "", "commit": "", "file": "", "summary": "",
                   "class": "caught | missed | rejected-wrongly | noise | unscored",
-                  "cause": null, "local_id": null,
+                  "cause": "wrong_lens | tracing | threshold | structural | null", "local_id": null,
                   "author": "fixed | logged | rejected | open", "author_reason": null}],
     "lessons": []}
    ```
    </details>
    ````
 
-   For `no-local-verdict`, set `reason`, and set `verdict`, `counts` and
+   For `no-local-verdict`, the second line is
+   ``**no-local-verdict** · compared commit `<first, short>` · <reason>``, with no
+   counts line. Set `reason`, and set `verdict`, `counts` and
    `missed_by_cause` to `null`, never zeros. Every finding is `unscored`, and
    its author disposition is still recorded.
 
-   - **PR comment.** Find this repo's existing record. List the marker comments
-     authored by `gh api user -q .login` with
-     `gh api --paginate repos/{owner}/{repo}/issues/<n>/comments --jq '.[] | select(.body | contains("<!-- review-postmortem:v1 -->")) | "\(.id) \(.user.login)"'`.
-     If there is one, update it: `gh api -X PATCH repos/{owner}/{repo}/issues/comments/<id> -F body=@<file>`.
-     If there are several, update the newest. With none, create one:
-     `gh pr comment <n> --body-file <file>`. If listing fails, do not create a
-     comment, because it could duplicate one. Report `scorecard NOT posted`
-     with the error.
+   - **PR comment.** Find this repo's existing record: get your login with
+     `gh api user -q .login`, then list the marker comments with
+     `gh api --paginate repos/{owner}/{repo}/issues/<n>/comments --jq '.[] | select(.body | contains("<!-- review-postmortem:v1 -->")) | "\(.created_at) \(.id) \(.user.login)"'`.
+     If one of yours is listed, update it:
+     `gh api -X PATCH repos/{owner}/{repo}/issues/comments/<id> -F body=@<file>`.
+     If several are, update the one with the latest `created_at`. With none,
+     create one: `gh pr comment <n> --body-file <file>`. If either lookup
+     fails, do not create a comment, because it could duplicate one: the
+     comment is `NOT posted`, with the error.
    - **Local copy** for `/review-tune`: write the same body to
      `<git common dir>/review-history/postmortem-pr<n>.md` through a temporary
      file and `mv`, so a re-run replaces it. Create the directory if needed. If
-     it cannot be written, report `local copy NOT written` with the error.
+     it cannot be written, the local copy is `NOT written`, with the error.
 
-   Report both outcomes. One failing never cancels the other.
+   Report both outcomes on the record line. One failing never cancels the
+   other. With `--record-only`, list the proposed edits from step 4 and stop.
 
 6. **Propose the edits and wait for my approval.** Every proposal is routed: a
    repo-specific lesson is an edit to this repo, as above. A generic or
    stack-level lesson is a **hub lesson**: an issue on the kit hub, never a
    commit in a local hub clone. The hub is PUBLIC, so strip anything that
-   identifies a repo, client, schema or incident. After approval:
+   identifies a repo, client, schema or incident. After approval, for each
+   hub lesson:
    - Check the hub's current file so you do not propose a line it already has:
      `gh api -H 'Accept: application/vnd.github.raw' repos/theunisdk/codex-review-kit/contents/<path>`.
      Search for an existing issue with
      `gh issue list -R theunisdk/codex-review-kit --label lesson --state open --search "<words>"`;
-     if one proposes the same line, comment on it instead.
+     if one proposes the same line, comment on it instead. If either check
+     fails, do not file: a duplicate is worse than a delay. Save the body and
+     report `hub lesson NOT filed` with the error.
    - Check the label with
      `gh label list -R theunisdk/codex-review-kit --search lesson --json name -q '.[].name'`.
      If the list has no `lesson`, run
      `gh label create lesson -R theunisdk/codex-review-kit --description "Review lesson routed from a spoke"`.
      If that fails, file the issue without a label and say so. If the list
-     call fails, say so too: it is a failed check, not a missing label.
+     call fails, it is a failed check, not a missing label: say so, and file
+     without a label.
    - File it: `gh issue create -R theunisdk/codex-review-kit --label lesson --title "lesson(<lens or learnings-shared>): <defect class>" --body-file <file>`.
      The body names the hub file and the proposed lines, the defect class, and
      the cause. If filing fails, save the body to a file, print its path and

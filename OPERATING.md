@@ -26,9 +26,9 @@ After CodeRabbit reviews each PR, run `/review-postmortem <PR>`. It yields
 
 The score is only as good as the comparison. The postmortem scores against
 the local verdict whose header names the first commit CodeRabbit reviewed, or
-an ancestor of it. It never uses whatever `.review/verdict.md` holds now.
-Findings on files changed after the local review are `unscored`. With no
-matching verdict the PR is `no-local-verdict`: recorded, with `null` counts,
+an ancestor of it on the PR's branch. `.review/verdict.md` counts only when
+its header names that commit. Findings on files changed after the local
+review are `unscored`. With no matching verdict the PR is `no-local-verdict`: recorded, with `null` counts,
 and never read as `missed 0`.
 
 Each run leaves a record: a PR comment marked `<!-- review-postmortem:v1 -->`,

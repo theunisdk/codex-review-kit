@@ -236,10 +236,10 @@ and counts a verdict found in more than one store once.
 
 **Coverage up** (`/review-postmortem <PR>`): CodeRabbit's findings are scored
 against the local verdict for the **first commit CodeRabbit reviewed**. It is
-matched by the SHA in the verdict header, never by whichever verdict is in
-`.review/verdict.md` now. A verdict for an earlier commit still scores the
-files those later commits did not touch. With no verdict for that commit or
-an ancestor, the PR is recorded as `no-local-verdict` and not scored, which is
+matched by the SHA in the verdict header; `.review/verdict.md` is used only
+when its header names that commit. A verdict for an earlier commit on the
+PR's branch still scores the files the later commits did not touch. With no
+verdict for that commit or such an ancestor, the PR is recorded as `no-local-verdict` and not scored, which is
 not the same as `missed 0`. Every missed finding is diagnosed by cause —
 wrong lens, insufficient tracing, filtered by threshold, or structurally out of
 reach — and turned into a prompt edit or a WATCH entry.
