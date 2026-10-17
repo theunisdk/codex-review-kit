@@ -97,10 +97,10 @@ reports its own update of the record on a third line,
        case "$f" in */.review/verdict.md) [ -d "${f%/.review/verdict.md}" ] || echo "unread ${f%/.review/verdict.md}: worktree directory is missing" ;; esac
        continue
      fi
-     heads="$(awk -F ' — ' '
+     heads="$(awk -F ' — ' -v title=1 -v rev=3 '
        function flush() { if (sha != "" && !spec) print sha, line; sha = ""; spec = 0 }
        /^# (Review|Spec) verdict — / { flush() }
-       $1 == "# Review verdict" && NF == 4 && $3 ~ /^[0-9a-f]+$/ && length($3) >= 4 && length($3) <= 64 { sha = $3; line = FNR }
+       $title == "# Review verdict" && NF == 4 && $rev ~ /^[0-9a-f]+$/ && length($rev) >= 4 && length($rev) <= 64 { sha = $rev; line = FNR }
        /^Lenses:/ && /spec-/ { spec = 1 }
        END { flush() }' "$f")" || { echo "failed: cannot read $f"; exit 1; }
      [ -n "$heads" ] || continue
