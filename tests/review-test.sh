@@ -1910,6 +1910,15 @@ test_make_plugin_interrupted_swap_keeps_previous_build() {
       test "$(ls -A "$WORK/m3-out")" = plugin
     rm -rf "$WORK"/m3-out/.make-plugin-stage.*
   done
+
+  # A cross-filesystem install killed after its copy leaves the entry on both sides.
+  printf '#!/bin/sh\ncase "$1" in */new/skills) cp -R "$1" "$2"; kill -TERM "$PPID"; exit 1 ;; esac\nexec %s "$@"\n' \
+    "$(command -v mv)" > "$WORK/m3-bin/mv"
+  ( cd "$hub" && PATH="$WORK/m3-bin:$PATH" bash scripts/make-plugin.sh "$WORK/m3-out/fresh" ) > "$out" 2>&1
+  rc=$?
+  assert "m3: first build killed mid-install fails" test "$rc" -ne 0
+  assert "m3: first build killed mid-install leaves no generated entries" \
+    test "$(ls -A "$WORK/m3-out/fresh")" = .make-plugin-generated
 }
 
 # A destination that denies listing looks empty to `ls -A`, and empty is the one
