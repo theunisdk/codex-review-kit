@@ -66,21 +66,25 @@ DEST="$dest_abs"
 STAGE="$(mktemp -d "${DEST%/*}/.make-plugin-stage.XXXXXX")"
 GENERATED="README.md PLUGIN-NOTES.md .claude-plugin commands skills scripts review"
 SWAPPING=0
-BACKED_UP=""
+MOVING=""
 KEEP_STAGE=0
-# A swap cut short puts the previous build back rather than deleting it.
+# A swap cut short puts the previous build back rather than deleting it. What
+# to restore is read from the stage itself: a signal can land between any move
+# and any bookkeeping.
 cleanup() {
+  trap '' HUP INT TERM
   if [ "$SWAPPING" = 1 ]; then
     for e in $GENERATED; do
-      case " $BACKED_UP " in
-        *" $e "*)
-          if ! { rm -rf "${DEST:?}/$e" && mv "$STAGE/old/$e" "$DEST/"; }; then
-            echo "error: could not restore the previous build — it is in $STAGE/old" >&2
-            return
-          fi ;;
-        *)
-          if [ ! -e "$OUT/$e" ] && [ ! -L "$OUT/$e" ]; then rm -rf "${DEST:?}/$e"; fi ;;
-      esac
+      if [ -e "$STAGE/old/$e" ] || [ -L "$STAGE/old/$e" ]; then
+        if [ -e "$DEST/$e" ] || [ -L "$DEST/$e" ]; then
+          # Both sides of a backup move that did not finish: neither is known whole.
+          if [ "$e" = "$MOVING" ]; then KEEP_STAGE=1; continue; fi
+          rm -rf "${DEST:?}/$e" || { restore_failed; return; }
+        fi
+        mv "$STAGE/old/$e" "$DEST/" || { restore_failed; return; }
+      elif [ ! -e "$OUT/$e" ] && [ ! -L "$OUT/$e" ]; then
+        rm -rf "${DEST:?}/$e"
+      fi
     done
   fi
   if [ "$KEEP_STAGE" = 1 ]; then
@@ -88,6 +92,9 @@ cleanup() {
     return
   fi
   rm -rf "$STAGE"
+}
+restore_failed() {
+  echo "error: could not restore the previous build — it is in $STAGE/old" >&2
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -145,11 +152,9 @@ MARK
 SWAPPING=1
 for e in $GENERATED; do
   if [ -e "$DEST/$e" ] || [ -L "$DEST/$e" ]; then
-    if ! mv "$DEST/$e" "$STAGE/old/"; then
-      if [ -e "$STAGE/old/$e" ] || [ -L "$STAGE/old/$e" ]; then KEEP_STAGE=1; fi
-      exit 1
-    fi
-    BACKED_UP="$BACKED_UP $e"
+    MOVING="$e"
+    mv "$DEST/$e" "$STAGE/old/" || exit 1
+    MOVING=""
   fi
 done
 for e in .claude-plugin commands skills scripts review PLUGIN-NOTES.md README.md; do
