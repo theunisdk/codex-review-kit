@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Collect cheap static-analysis signal on the changed files and write it to
 # .review/raw/analyzers.txt. Every tool is OPTIONAL — a tool that is not
-# installed is skipped. The secrets and JS/TS sections are never empty: they
-# hold output, a clean line, a named skip, or FAILED. The point is not to gate
+# installed is skipped. The secrets, semgrep and JS/TS sections are never empty:
+# they hold output, a clean line, a named skip, or FAILED. The point is not to gate
 # on this output; it is to hand Codex the lint-level noise up front so it spends
 # its reasoning budget on semantic bugs a linter structurally cannot find.
 #
@@ -12,14 +12,19 @@
 # --- secrets: shared with the zero-change path in review.sh ----------------
 # Branch mode scans each commit in the range as well as the net diff: a secret
 # added then removed on the branch is absent from diff.patch but still pushed.
-# The net-diff scan stays because `git log -p` shows no content for merges.
+# --remerge-diff: without it `git log -p` prints no patch for a merge, so a secret
+# that only merge resolutions add and remove is in no scanned patch. Git < 2.36,
+# or a range holding an octopus merge (remerge skips those), falls back to -m,
+# which also rescans what each merge brought in from its base.
 # rc 3 means leaks. Any other non-zero rc, an ERR/FTL line, or no commits
 # scanned when the range adds lines means the scan did not happen — a bad
 # --log-opts range logs ERR, then "no leaks found", and exits 0.
-# Writes to $report. Returns 0 clean, 3 leaks, 1 scan failed.
+# Writes to $report. Returns 0 clean, 3 leaks, 1 scan failed. A failed scan can
+# still have found leaks, so rc 3 also sets GITLEAKS_LEAKED.
 _gitleaks() { # _gitleaks <label> <min-commits|-> <gitleaks args...>
   local label="$1" min="$2" gl_out gl_rc why="" n; shift 2
   gl_out="$(gitleaks "$@" --no-banner --no-color --redact -v --exit-code 3 2>&1)"; gl_rc=$?
+  [ "$gl_rc" != 3 ] || GITLEAKS_LEAKED=1
   gl_out="$(printf '%s\n' "$gl_out" | sed "s/$(printf '\033')\[[0-9;]*m//g")"
   case "$gl_rc" in 0|3) ;; *) why="rc=$gl_rc" ;; esac
   if grep -qE '^[^ ]+ (ERR|FTL) ' <<< "$gl_out"; then
@@ -49,15 +54,18 @@ _gitleaks() { # _gitleaks <label> <min-commits|-> <gitleaks args...>
 }
 
 _gitleaks_history() { # each commit in $MERGE_BASE..HEAD
-  local numstat adds
-  if ! numstat="$(git log --no-merges --numstat --format= "$MERGE_BASE..HEAD" 2>&1)"; then
+  local numstat adds head merges=--remerge-diff
+  head="$(git rev-parse -q --verify HEAD 2>/dev/null)"
+  [ -n "$head" ] && [ "$(git log -1 --format=%H --remerge-diff --no-patch HEAD 2>/dev/null)" = "$head" ] \
+    && [ "$(git rev-list --count --min-parents=3 "$MERGE_BASE..HEAD" 2>/dev/null)" = 0 ] || merges=-m
+  if ! numstat="$(git log "$merges" --numstat --format= "$MERGE_BASE..HEAD" 2>&1)"; then
     printf -- '-- commit history %s\nSCAN FAILED (git log could not list the range) — secrets were NOT checked:\n%s\n' \
       "$MERGE_BASE..HEAD" "$(printf '%s\n' "$numstat" | head -5)" >> "$report"
     return 1
   fi
   adds="$(printf '%s\n' "$numstat" | awk '$1 ~ /^[0-9]+$/ && $1 > 0 { n = 1 } END { print n + 0 }')"
   _gitleaks "commit history $MERGE_BASE..HEAD" "$adds" \
-    detect --source . --log-opts="$MERGE_BASE..HEAD" < /dev/null
+    detect --source . --log-opts="$merges $MERGE_BASE..HEAD" < /dev/null
 }
 
 # A branch whose commits net out to no diff: only the history scan has anything
@@ -65,11 +73,14 @@ _gitleaks_history() { # each commit in $MERGE_BASE..HEAD
 # not installed.
 scan_history_secrets() {
   local report="$1/analyzers.txt"
+  GITLEAKS_LEAKED=0
   command -v gitleaks >/dev/null 2>&1 || return 4
   printf '\n### %s\n' "gitleaks (secrets)" > "$report"
   _gitleaks_history
 }
 
+# Sets SECRETS_LEAKED and SECRETS_FAILED (0/1) for review.sh, and SECRETS_NOTE
+# when secrets were not checked.
 collect_analyzer_output() {
   local out="$1"
   local list="$out/changed-files.txt"
@@ -92,23 +103,33 @@ collect_analyzer_output() {
     done < "$list"
   }
 
-  if _have gitleaks; then
-    _section "gitleaks (secrets)"
+  SECRETS_FAILED=0 GITLEAKS_LEAKED=0
+  _secrets_rc() { case "$1" in 0|3) ;; *) SECRETS_FAILED=1 ;; esac; }
+  _section "gitleaks (secrets)"
+  if ! _have gitleaks; then
+    SECRETS_NOTE="gitleaks is not installed"
+    echo "analyzer skipped: gitleaks is not installed — secrets were NOT checked" >> "$report"
+  else
     if [ "${MODE:-}" = "branch" ] && [ -n "${MERGE_BASE:-}" ]; then
-      _gitleaks_history
+      _gitleaks_history; _secrets_rc $?
     fi
     if [ -s "$out/diff.patch" ]; then
-      _gitleaks "net diff" - detect --pipe < "$out/diff.patch"
+      _gitleaks "net diff" - detect --pipe < "$out/diff.patch"; _secrets_rc $?
     else
+      SECRETS_NOTE="no diff to scan"
       echo "no diff to scan — secrets were NOT checked" >> "$report"
     fi
   fi
+  SECRETS_LEAKED="$GITLEAKS_LEAKED"
 
   # --- semgrep (multi-language, high signal) ------------------------------
   # With --error, rc 0 is clean and rc 1 is findings; anything else, or output
   # that isn't semgrep's JSON, is a failed scan.
   local sg_list f sg_out sg_rc sg_hits sg_errs; sg_list="$(_files_matching '*')"
-  if [ -n "$sg_list" ] && _have semgrep; then
+  if [ -n "$sg_list" ] && ! _have semgrep; then
+    _section "semgrep --config=auto"
+    echo "analyzer skipped: semgrep is not installed" >> "$report"
+  elif [ -n "$sg_list" ]; then
     _section "semgrep --config=auto"
     local -a sg_files; sg_files=()
     while IFS= read -r f; do sg_files+=("$f"); done <<< "$sg_list"
