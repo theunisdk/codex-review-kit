@@ -1,0 +1,39 @@
+# Opens a PR when the review kit ships a release newer than .review/kit-version.
+# Seeded by `scripts/review-update.sh --init`, and this repo's own file after
+# that: a sync never rewrites it. The logic is in scripts/review-sync.sh, which
+# the sync does keep current. A sync PR always waits for a human; nothing here
+# merges, approves, or enables auto-merge.
+#
+# PRs opened with the default token start no workflows, so CI does not run on
+# them until someone pushes to the branch. A REVIEW_KIT_SYNC_TOKEN secret (a
+# fine-grained token with contents and pull-requests write) avoids that.
+name: review-kit-sync
+
+on:
+  schedule:
+    # weekly; minute, hour and weekday derived from the repo name, so one
+    # release does not open every spoke's PR in the same minute
+    - cron: "@CRON@"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: review-kit-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          token: ${{ secrets.REVIEW_KIT_SYNC_TOKEN || github.token }}
+      - name: sync the review kit to its latest release
+        env:
+          GH_TOKEN: ${{ secrets.REVIEW_KIT_SYNC_TOKEN || github.token }}
+        run: bash scripts/review-sync.sh

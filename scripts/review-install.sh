@@ -261,6 +261,14 @@ fi
 hdr "Ignore rules"
 if [ -f .review/.gitignore ]; then ok ".review/.gitignore present"; else no ".review/.gitignore missing"; fi
 
+# --- 10. kit sync ----------------------------------------------------------
+hdr "Kit release sync"
+if [ -f .github/workflows/review-kit-sync.yml ]; then
+  ok "review-kit-sync workflow present — opens a PR for each new kit release"
+else
+  skip "no .github/workflows/review-kit-sync.yml — new kit releases arrive only by hand; seed it with scripts/review-update.sh --init, or opt out with KIT_SYNC_ACTION=0 in .review/config.sh"
+fi
+
 # --- done ------------------------------------------------------------------
 hdr "Result"
 if [ "$fail" -eq 1 ]; then
@@ -277,7 +285,8 @@ cat <<'EOF'
        wires it to .review/rubric.md. Do not add a second one: YAML in either
        spelling overrides .coderabbit.config.ts outright.
     5. Commit .review/, scripts/, .claude/, .codex/, .githooks/,
-       .claude-plugin/, AGENTS.md, CLAUDE.md, and that config file.
+       .claude-plugin/, AGENTS.md, CLAUDE.md, that config file, and
+       .github/workflows/review-kit-sync.yml if --init seeded it.
 
   Then, on a branch with changes:
     ./scripts/review.sh            — raw run, writes .review/findings.md

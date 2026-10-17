@@ -186,6 +186,7 @@ Commit `.review/`, `scripts/`, `.claude/`, `.codex/`, `.githooks/`,
 `.claude-plugin/`, `REVIEW.md`, `OPERATING.md`, the AGENTS.md/CLAUDE.md
 pointer blocks, and whichever CodeRabbit config step 6 found — do not `git add
 .coderabbit.yaml` blind, it is fatal in a repo where `--init` correctly created
-no such file. Run artifacts are already gitignored. Report to the user:
-the house rules you wrote (with their evidence), what you could NOT ground,
+no such file. Add `.github/workflows/review-kit-sync.yml` only if `--init`
+seeded it (`KIT_SYNC_ACTION=0` skips it). Run artifacts are already
+gitignored. Report to the user: the house rules you wrote (with their evidence), what you could NOT ground,
 and the fire-drill results.

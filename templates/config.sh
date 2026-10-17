@@ -31,3 +31,8 @@
 
 # Set to 0 to skip linters/semgrep before the Codex passes.
 # RUN_ANALYZERS="1"
+
+# Set to 0 and `review-update.sh --init` stops seeding
+# .github/workflows/review-kit-sync.yml, the weekly job that opens a PR for each
+# new kit release. Delete that file too if it was seeded already.
+# KIT_SYNC_ACTION="1"

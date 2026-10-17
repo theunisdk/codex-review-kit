@@ -16,7 +16,9 @@
 #   repo-owned (never):    .review/rubric.md, config.sh, learnings.md,
 #                          prompts.local/, analyzers.local.sh, and the root
 #                          .coderabbit.yaml (seeded only when the repo has no
-#                          CodeRabbit config in any supported spelling)
+#                          CodeRabbit config in any supported spelling), and
+#                          .github/workflows/review-kit-sync.yml (seeded unless
+#                          .review/config.sh sets KIT_SYNC_ACTION=0)
 #
 #   ./scripts/review-update.sh                   # install the latest release
 #   ./scripts/review-update.sh --init            # also seed repo-owned files that
@@ -195,7 +197,8 @@ mkdir -p scripts/lib .review/prompts .claude/commands .claude/skills \
          .codex/skills .githooks .claude-plugin
 
 cp "$KIT"/scripts/review.sh "$KIT"/scripts/review-install.sh \
-   "$KIT"/scripts/review-update.sh "$KIT"/scripts/make-plugin.sh scripts/
+   "$KIT"/scripts/review-update.sh "$KIT"/scripts/review-sync.sh \
+   "$KIT"/scripts/make-plugin.sh scripts/
 cp "$KIT"/scripts/lib/*.sh scripts/lib/
 cp "$KIT"/.review/prompts/*.md .review/prompts/
 cp "$KIT"/.review/schema.json "$KIT"/.review/adjudication.md \
@@ -208,7 +211,7 @@ cp "$KIT"/.githooks/pre-push .githooks/
 cp "$KIT"/.claude-plugin/*.json .claude-plugin/
 cp "$KIT"/REVIEW.md "$KIT"/OPERATING.md .
 chmod +x scripts/review.sh scripts/review-install.sh scripts/review-update.sh \
-         scripts/make-plugin.sh .githooks/pre-push
+         scripts/review-sync.sh scripts/make-plugin.sh .githooks/pre-push
 
 # --- seed repo-owned files on --init ---------------------------------------
 if [ "$INIT" = 1 ]; then
@@ -230,6 +233,27 @@ if [ "$INIT" = 1 ]; then
     [ -f "$f" ] && { seed_gate=0; break; }
   done
   [ "$seed_gate" = 1 ] && cp "$KIT/templates/coderabbit.yaml" .coderabbit.yaml
+
+  # The weekly job that opens a PR for each new release. The schedule is spread
+  # by repo name, so one release does not open every spoke's PR at once.
+  wf=.github/workflows/review-kit-sync.yml
+  sync_opt="$( (set +eu; . ./.review/config.sh >/dev/null 2>&1; printf '%s' "${KIT_SYNC_ACTION:-1}") )"
+  slug="$(git remote get-url origin 2>/dev/null \
+    | sed -E 's#/+$##; s#\.git$##; s#^.*[:/]([^/:]+/[^/:]+)$#\1#')" || slug=""
+  [ -n "$slug" ] || slug="$(basename "$REPO_ROOT")"
+  n="$(printf '%s' "$slug" | cksum | cut -d' ' -f1)"
+  cron="$((n % 60)) $((n / 60 % 24)) * * $((n / 1440 % 7))"
+  if [ "$sync_opt" = 0 ]; then
+    echo "note: $wf not seeded — .review/config.sh sets KIT_SYNC_ACTION=0" >&2
+  elif [ -z "$sync_opt" ]; then
+    echo "warn: $wf not seeded — .review/config.sh could not be read to check KIT_SYNC_ACTION" >&2
+  elif [ ! -e "$wf" ]; then
+    mkdir -p .github/workflows
+    sed "s|@CRON@|$cron|" "$KIT/templates/review-kit-sync.yml" > "$wf"
+    echo "seeded $wf (weekly, cron '$cron') — opt out with KIT_SYNC_ACTION=0 in .review/config.sh" >&2
+  elif ! sed "s|@CRON@|$cron|" "$KIT/templates/review-kit-sync.yml" | cmp -s - "$wf"; then
+    echo "note: kept $wf — it differs from the kit's template (templates/review-kit-sync.yml); delete it and re-run --init to take the template" >&2
+  fi
 fi
 
 # --- record what we synced to ----------------------------------------------

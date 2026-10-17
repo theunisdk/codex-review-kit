@@ -7,7 +7,9 @@ Claude Code, gated by CodeRabbit on the PR.
 This repository is the **hub**. Consuming repos are spokes: they vendor the
 shared machinery via `scripts/review-update.sh` and keep their own rubric,
 learnings, and stack wiring. Lessons learned in one repo route back here and
-reach every other repo on its next sync.
+reach every other repo on its next sync. Each new release reaches a spoke as a
+weekly sync PR, opened by the workflow `--init` seeds; a human merges it (see
+[REVIEW.md](REVIEW.md#install)).
 
 - **[REVIEW.md](REVIEW.md)** — what the kit is, how it works, how to install it
 - **[OPERATING.md](OPERATING.md)** — proving the pipeline works, and its quiet failure modes

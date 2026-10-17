@@ -50,6 +50,7 @@ alongside the files that are its own and never synced:
 | `learnings-shared.md` (generic + stack lessons) | hub → synced read-only | same |
 | `rubric.md`, `config.sh`, `learnings.md`, `prompts.local/`, `analyzers.local.sh` | spoke only | never |
 | `.coderabbit.yaml` (the PR gate) | spoke only, seeded once by `--init` | never |
+| `.github/workflows/review-kit-sync.yml` (the weekly release check) | spoke only, seeded once by `--init` | never |
 
 **New repo:** say `/review-onboard` in Claude Code — it bootstraps the files
 and, more importantly, does the adaptation properly: a rubric grounded in code
@@ -108,8 +109,10 @@ Then, either way:
 #   .review/analyzers.local.sh  .review/prompts.local/
 # --init seeds .coderabbit.yaml only when the repo had no CodeRabbit config,
 # so stage whichever one it actually has rather than assuming that name.
+# The sync workflow is absent when KIT_SYNC_ACTION=0 kept --init from seeding it.
 git add .review scripts .claude .codex .githooks .claude-plugin REVIEW.md OPERATING.md AGENTS.md CLAUDE.md
-for f in .coderabbit.yaml .coderabbit.yml .coderabbit.config.ts; do
+for f in .coderabbit.yaml .coderabbit.yml .coderabbit.config.ts \
+         .github/workflows/review-kit-sync.yml; do
   if [ -f "$f" ]; then git add "$f"; fi
 done
 git commit -m "chore: add codex pre-PR review pipeline"
@@ -129,11 +132,44 @@ on its first sync after that fix ships in a release tag. `--local` installs a
 hub clone's working tree instead, recorded as `unreleased`.
 `--latest-release` prints the latest tag and installs nothing.
 
-`review.sh` checks this at startup. It warns when the installed release is
+`--init` also seeds `.github/workflows/review-kit-sync.yml`, which runs
+`scripts/review-sync.sh` weekly (minute, hour and weekday derived from the repo
+name) and on demand. When the spoke is behind, it runs the updater pinned to the
+latest release on the branch `review-kit-sync` and opens one PR, "sync review
+kit to vX.Y.Z". A newer release retitles and force-pushes that PR; if the PR
+carries commits the sync did not make, the job refuses and fails. A sync PR
+closed unmerged declines that release until the next one. Nothing merges,
+approves or enables auto-merge: a human reviews every sync. The PR body names
+synced files whose local edits the sync overwrote, lifts each skipped release's
+`## Upgrading` section to the top, and carries the full release notes.
+
+Every failure fails the job: hub unreachable, no release tag, a failed or empty
+sync, a refused push, a `gh` error. Actions must be allowed to open PRs:
+Settings > Actions > General > Workflow permissions > "Allow GitHub Actions to
+create and approve pull requests" (in an organization, the org-level setting
+first). A PR opened with the default token starts no workflows, so CI waits for
+someone to push to the branch; a `REVIEW_KIT_SYNC_TOKEN` secret (a fine-grained
+token with contents and pull-requests write) avoids that. GitHub disables
+scheduled workflows in a public repo after 60 days without activity. The
+workflow is repo-owned once seeded: syncs never touch it and `--init` keeps an
+edited copy. To opt out, set `KIT_SYNC_ACTION=0` in `.review/config.sh` and
+delete the file if it was already seeded.
+
+With or without the workflow, `review.sh` checks the installed release at
+startup. It warns when the installed release is
 behind the latest one, or when it cannot tell (hub unreachable, no release
 tags, a `kit-version` that names no release). It never blocks a review. The
 lookup is cached under the git common dir: a day after a successful check, an
 hour after a failed one.
+
+**Releasing the hub:** a release is a `vN.N.N` tag plus GitHub release notes,
+and the notes must carry a `## Upgrading` section (any heading that starts
+`## Upgrading`, e.g. `## Upgrading from v1.1.2 or earlier`). It says "No special
+steps." or names every contract change that repo-owned files or consumers must
+follow: a new or changed key in `findings.json`, a renamed `config.sh`
+variable, a change to the rubric or learnings format. The sync PR lifts that
+section to the top for every release it skips over, and flags a release
+without one as unreadable for contract changes.
 
 `make-plugin.sh` still exists for a Claude Code plugin build, but the runner
 reads prompts from the repo, not `${CLAUDE_PLUGIN_ROOT}` — the vendored spoke
@@ -293,6 +329,7 @@ analyzer fleet. That is fine, since CodeRabbit is still your final gate.
 scripts/               all synced
   review.sh            the runner
   review-update.sh     pull the shared half from the hub
+  review-sync.sh       open a sync PR when a newer release exists (run by the workflow)
   review-install.sh    idempotent per-machine setup
   lib/common.sh        portable helpers (macOS bash 3.2 safe)
   lib/analyzers.sh     generic analyzer collection; defers to analyzers.local.sh
@@ -301,6 +338,8 @@ scripts/               all synced
 .claude-plugin/        synced: plugin manifests
 .githooks/pre-push     synced: warns on a stale verdict by default; blocks when REVIEW_STRICT=1
 .coderabbit.yaml       REPO-OWNED  the PR gate; points CodeRabbit at rubric.md
+.github/workflows/review-kit-sync.yml
+                       REPO-OWNED  weekly release check, seeded by --init
 templates/             hub only: seeds for the repo-owned files (--init)
 ```
 
