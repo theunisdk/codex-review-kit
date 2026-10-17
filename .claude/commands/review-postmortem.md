@@ -69,8 +69,9 @@ reports its own update of the record on a third line,
    is a prefix of the other. First run `git fetch origin "pull/<n>/head"`, so
    the PR's commits are in this clone. If the compared commit is still
    missing, because it was force-pushed away, run `git fetch origin <first>`.
-   If a fetch fails, stop with `failed — fetch`. Write the PR's commit SHAs
-   from step 1 to a file, one per line. Then list every candidate with its relation to the comparison commit, from
+   If a fetch fails, stop with `failed — fetch`. Write the PR's full commit
+   SHAs to a file: `gh pr view <n> --json commits -q '.commits[].oid' > <file>`.
+   Then list every candidate with its relation to the comparison commit, from
    the live `.review/verdict.md` of each worktree and the clone's review
    history. The live file may not be archived yet, so read both:
 
@@ -104,9 +105,10 @@ reports its own update of the record on a third line,
      printf '%s\n' "$heads" | while read -r sha line; do
        case "$first" in
          "$sha"*) rel=same ;;
-         *) if ! grep -q "^$sha" "$pr_commits"; then rel=other
+         *) full="$(git rev-parse --verify -q "$sha^{commit}")"
+            if [ -z "$full" ] || ! grep -qFx "$full" "$pr_commits"; then rel=other
             else
-              git merge-base --is-ancestor "$sha" "$first"; rc=$?
+              git merge-base --is-ancestor "$full" "$first"; rc=$?
               case "$rc" in 0) rel=ancestor ;; 1) rel=other ;; *) echo "failed: git merge-base --is-ancestor $sha $first"; exit 1 ;; esac
             fi ;;
        esac
@@ -133,11 +135,13 @@ reports its own update of the record on a third line,
      on this PR's branch, and the commits after it reached CodeRabbit
      unreviewed. Use the nearest one: the one with the fewest PR commits
      after it, `git rev-list <sha>..<first> | grep -cFx -f <PR commit file>`.
-     That count is `uncovered_commits`.
+     That count is `uncovered_commits`; grep exits 1 when it is 0. If
+     `<first>` is not in the PR commit file because a force-push dropped it,
+     set `uncovered_commits` to `null` and say why.
    - **Neither** — record `no-local-verdict` and do not score. `other` means a
      commit that is not one of this PR's commits before the compared commit:
-     a review run after CodeRabbit's, another branch's, or one that reached
-     the PR through its base. A missing review-history directory is no
+     a review run after CodeRabbit's, another branch's, one that reached the
+     PR through its base, or one a rebase dropped from the PR. A missing review-history directory is no
      history in this clone, not a failure.
 
    Score a finding only if its file is unchanged between the verdict's commit
@@ -207,7 +211,7 @@ reports its own update of the record on a third line,
     "findings": [{"url": "", "commit": "", "file": "", "summary": "",
                   "class": "caught | missed | rejected-wrongly | noise | unscored",
                   "cause": "wrong_lens | tracing | threshold | structural | null", "local_id": null,
-                  "unscored_reason": "changed | compare_failed: <error> | null",
+                  "unscored_reason": "changed | compare_failed: <error> | no_local_verdict | null",
                   "author": "fixed | logged | rejected | open", "author_reason": null}],
     "proposals": [{"route": "repo | hub", "file": "", "lines": "", "cause": ""}],
     "lessons": []}
@@ -218,8 +222,9 @@ reports its own update of the record on a third line,
    For `no-local-verdict`, the second line is
    ``**no-local-verdict** · compared commit `<first, short>` · <reason>``, with no
    counts line. Set `reason`, and set `verdict`, `counts` and
-   `missed_by_cause` to `null`, never zeros. Every finding is `unscored`, and
-   its author disposition is still recorded.
+   `missed_by_cause` to `null`, never zeros. Every finding is `unscored`, with
+   `unscored_reason` `no_local_verdict`, and its author disposition is still
+   recorded.
 
    - **PR comment.** Find this repo's existing record: get your login with
      `gh api user -q .login`, then list the marker comments with

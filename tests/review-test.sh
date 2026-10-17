@@ -2316,7 +2316,7 @@ test_postmortem_docs_record_and_route() {
   assert "p2: … never duplicated when a lookup fails" grep -qF 'do not create a comment, because it could duplicate one' "$pm"
   assert "p2: … and so is the step-6 update of it" grep -qF 'review-postmortem: lessons — comment <updated|NOT updated' "$pm"
   assert "p2: proposals are kept in the record" grep -qF '"proposals": [{"route": "repo | hub"' "$pm"
-  assert "p2: an unscored finding says whether git could compare" grep -qF '"unscored_reason": "changed | compare_failed: <error> | null"' "$pm"
+  assert "p2: an unscored finding says whether git could compare" grep -qF '"unscored_reason": "changed | compare_failed: <error> | no_local_verdict | null"' "$pm"
   assert "p2: the record's outcome is part of the status contract" grep -qF 'review-postmortem: record — comment <posted|updated|NOT posted' "$pm"
   assert "p2: an unattended caller never waits for approval" grep -qF '`--record-only` is for unattended callers' "$pm"
   assert "p2: a failed fetch is a failure, not a missing verdict" grep -qF 'If a fetch fails, stop with `failed — fetch`' "$pm"
