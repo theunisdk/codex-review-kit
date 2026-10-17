@@ -22,4 +22,4 @@ Convention: start each fragment with
 followed by a short, concrete bullet list. Name files, functions, and the
 failure mode; don't restate the generic lens. If a hazard would apply to any
 repo on your stack, it belongs in the kit's `learnings-shared.md` or base
-prompts instead — send it upstream.
+prompts instead — send it upstream as a `lesson` issue on the hub.
