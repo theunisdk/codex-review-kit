@@ -170,7 +170,7 @@ release_older() {
 # hour when it did not — and capped at about KIT_CHECK_TIMEOUT seconds. Never fails.
 KIT_CHECK_TIMEOUT=5
 kit_staleness() {
-  local f=.review/kit-version tab url installed ref cache now stamp cstate curl cval
+  local f=.review/kit-version tab url installed ref cache now stamp cstate curl cval cinst
   local ttl latest="" why="" out rc dir aged="" ssh_cmd
   KIT_STATE=unknown; KIT_NOTE=""; tab="$(printf '\t')"
   if [ ! -f "$f" ]; then
@@ -193,7 +193,7 @@ kit_staleness() {
 
   dir="$(git rev-parse --git-common-dir 2>/dev/null)"; cache="${dir:+$dir/review-kit-latest}"
   now="$(date +%s)"
-  if [ -n "$cache" ] && [ -f "$cache" ] && IFS="$tab" read -r stamp cstate curl cval 2>/dev/null < "$cache"; then
+  if [ -n "$cache" ] && [ -f "$cache" ] && IFS="$tab" read -r stamp cstate curl cval cinst 2>/dev/null < "$cache"; then
     case "$stamp" in ''|*[!0-9]*|?????????????*) stamp=0 ;; esac
     ttl=86400; [ "$cstate" = ok ] || ttl=3600
     if [ "$curl" = "$url" ] && [ "$now" -ge "$stamp" ] && [ $((now - stamp)) -lt "$ttl" ]; then
@@ -201,7 +201,7 @@ kit_staleness() {
       if [ "$cstate" = ok ]; then
         latest="$(printf '%s\n' "$cval" | grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+')" || latest=""
         # a sync since the cached answer, to a release newer than it, proves it stale
-        [ -z "$latest" ] || ! release_older "$latest" "$installed" || [ ! "$f" -nt "$cache" ] || latest=""
+        [ -z "$latest" ] || ! release_older "$latest" "$installed" || [ "$cinst" = "$installed" ] || latest=""
         [ -n "$latest" ] || aged=""
       elif [ "$cstate" = fail ] && [ -n "$cval" ]; then
         why="$cval$aged"
@@ -233,7 +233,7 @@ kit_staleness() {
       else
         cstate=ok; cval="$latest"
       fi
-      [ -z "$cache" ] || { printf '%s\t%s\t%s\t%s\n' "$now" "$cstate" "$url" "$cval" > "$cache.tmp.$$" \
+      [ -z "$cache" ] || { printf '%s\t%s\t%s\t%s\t%s\n' "$now" "$cstate" "$url" "$cval" "$installed" > "$cache.tmp.$$" \
         && mv -f "$cache.tmp.$$" "$cache"; } 2>/dev/null || rm -f "$cache.tmp.$$" 2>/dev/null
     fi
   fi
