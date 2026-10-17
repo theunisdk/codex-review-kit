@@ -69,7 +69,9 @@ reports its own update of the record on a third line,
    is a prefix of the other. First run `git fetch origin "pull/<n>/head"`, so
    the PR's commits are in this clone. If the compared commit is still
    missing, because it was force-pushed away, run `git fetch origin <first>`.
-   If a fetch fails, stop with `failed — fetch`. Write the PR's full commit
+   If `git rev-parse --is-shallow-repository` prints `true`, run
+   `git fetch --unshallow`: a missing ancestor would read as `other`. If a
+   fetch fails, stop with `failed — fetch`. Write the PR's full commit
    SHAs to a file: `gh pr view <n> --json commits -q '.commits[].oid' > <file>`.
    Then list every candidate with its relation to the comparison commit, from
    the live `.review/verdict.md` of each worktree and the clone's review
