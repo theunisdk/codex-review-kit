@@ -58,8 +58,8 @@ hazards, and a fire drill to prove the result. By hand, with a local hub
 clone supplying the updater:
 
 ```bash
-git -C ~/dev/private/codex-review-kit pull --ff-only
-bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
+git -C ~/dev/private/codex-review-kit pull --ff-only \
+  && bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
 ./scripts/review-install.sh          # per-machine setup
 ```
 

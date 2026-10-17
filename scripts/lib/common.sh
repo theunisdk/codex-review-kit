@@ -171,7 +171,7 @@ release_older() {
 KIT_CHECK_TIMEOUT=5
 kit_staleness() {
   local f=.review/kit-version tab url installed ref cache now stamp cstate curl cval
-  local ttl latest="" why="" out rc dir aged=""
+  local ttl latest="" why="" out rc dir aged="" ssh_cmd
   KIT_STATE=unknown; KIT_NOTE=""; tab="$(printf '\t')"
   if [ ! -f "$f" ]; then
     KIT_STATE=unsynced; KIT_NOTE="review kit version unknown: no $f (not synced by scripts/review-update.sh)"
@@ -200,8 +200,8 @@ kit_staleness() {
       aged=" (checked $(( (now - stamp) / 3600 ))h ago)"
       if [ "$cstate" = ok ]; then
         latest="$(printf '%s\n' "$cval" | grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+')" || latest=""
-        # a release newer than the cached answer proves the answer stale
-        [ -z "$latest" ] || ! release_older "$latest" "$installed" || latest=""
+        # a sync since the cached answer, to a release newer than it, proves it stale
+        [ -z "$latest" ] || ! release_older "$latest" "$installed" || [ ! "$f" -nt "$cache" ] || latest=""
         [ -n "$latest" ] || aged=""
       elif [ "$cstate" = fail ] && [ -n "$cval" ]; then
         why="$cval$aged"
@@ -215,14 +215,16 @@ kit_staleness() {
     elif ! out="$(mktemp 2>/dev/null)"; then
       why="no temp file for the lookup"
     else
-      run_with_timeout "$KIT_CHECK_TIMEOUT" env -u GIT_ASKPASS -u SSH_ASKPASS GIT_TERMINAL_PROMPT=0 \
-        GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh} -o BatchMode=yes" REVIEW_KIT_URL="$url" \
+      ssh_cmd="${GIT_SSH_COMMAND:-$(git config core.sshCommand 2>/dev/null)}"
+      run_with_timeout "$KIT_CHECK_TIMEOUT" env GIT_ASKPASS=true GIT_TERMINAL_PROMPT=0 \
+        GIT_SSH_COMMAND="${ssh_cmd:-${GIT_SSH:-ssh}} -o BatchMode=yes" REVIEW_KIT_URL="$url" \
         bash scripts/review-update.sh --latest-release > "$out" 2>/dev/null; rc=$?
       latest="$(head -n1 "$out" 2>/dev/null | grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+')" || latest=""
       rm -f "$out"
       if [ "$rc" != 0 ] || [ -z "$latest" ]; then
         latest=""
         case "$rc" in
+          0)       why="the lookup on $url printed no release tag" ;;
           2)       why="$url lists no release tag" ;;
           137|143) why="$url did not answer within ${KIT_CHECK_TIMEOUT}s" ;;
           *)       why="could not reach $url" ;;
@@ -244,7 +246,7 @@ kit_staleness() {
     KIT_STATE=behind
     KIT_NOTE="review kit $installed is behind the latest release $latest$aged — sync with scripts/review-update.sh"
   else
-    KIT_STATE=newer; KIT_NOTE="review kit $installed is newer than $url's latest release $latest"
+    KIT_STATE=newer; KIT_NOTE="review kit $installed is newer than $url's latest release $latest$aged"
   fi
   return 0
 }

@@ -2458,6 +2458,38 @@ test_review_kit_lookup_is_cached() {
   sed -i.bak "s|^kit: [^ ]*|kit: file://$other|" "$repo/.review/kit-version" && rm -f "$repo/.review/kit-version.bak"
   run_review "$repo" "$stub" --lenses correctness
   assert     "k4: the cache is keyed by hub URL" grep -qF 'v0.12.0 is newer than file://'"$other""'s latest release v0.10.0" "$LOG"
+  ( cd "$other" && git tag v0.11.0 )
+  run_review "$repo" "$stub" --lenses correctness
+  assert     "k4: newer than the hub: answered from cache, not looked up every run" \
+    grep -qF "latest release v0.10.0 (checked 0h ago)" "$LOG"
+}
+
+# The cache never makes a lookup fail or speak: an absurd stamp is a miss, an
+# unwritable cache dir stays quiet, and no git dir at all just skips caching.
+test_review_kit_cache_edge_cases() {
+  local hub="$WORK/k6-hub" repo="$WORK/k6" stub="$WORK/k6-stub" cache err="$WORK/k6.err" nogit="$WORK/k6-nogit"
+  kit_hub "$hub"
+  kit_repo "$repo" "$stub" "file://$hub" "release: v0.9.0"
+  cache="$(cd "$repo" && cd "$(git rev-parse --git-common-dir)" && pwd)/review-kit-latest"
+
+  printf '%s\tok\tfile://%s\tv9.9.9\n' 99999999999999999999 "$hub" > "$cache"
+  ( cd "$repo" && . scripts/lib/common.sh && kit_staleness && echo "$KIT_NOTE" ) > "$WORK/k6.out" 2>"$err"
+  assert "k6: a 20-digit stamp is a miss, not an answer" grep -qF 'behind the latest release v0.10.0' "$WORK/k6.out"
+  assert "k6: … and prints no shell error" test ! -s "$err"
+
+  rm -f "$cache"; chmod a-w "$(dirname "$cache")"
+  ( cd "$repo" && . scripts/lib/common.sh && kit_staleness && echo "$KIT_NOTE" ) > "$WORK/k6.out" 2>"$err"
+  chmod u+w "$(dirname "$cache")"
+  assert "k6: an unwritable cache dir still answers" grep -qF 'behind the latest release v0.10.0' "$WORK/k6.out"
+  assert "k6: … quietly" test ! -s "$err"
+
+  mkdir -p "$nogit/scripts/lib" "$nogit/.review"
+  cp "$repo/scripts/review-update.sh" "$nogit/scripts/"; cp "$repo/scripts/lib/common.sh" "$nogit/scripts/lib/"
+  cp "$repo/.review/kit-version" "$nogit/.review/"
+  ( cd "$nogit" && GIT_CEILING_DIRECTORIES="$WORK" && export GIT_CEILING_DIRECTORIES \
+      && . scripts/lib/common.sh && kit_staleness && echo "$KIT_NOTE" ) > "$WORK/k6.out" 2>"$err"
+  assert "k6: no git dir: still answers" grep -qF 'behind the latest release v0.10.0' "$WORK/k6.out"
+  assert "k6: no git dir: quietly" test ! -s "$err"
 }
 
 # A hub that hangs costs a few seconds, then reads as unknown.
@@ -2706,6 +2738,7 @@ run_tests \
   test_review_kit_staleness_unknown \
   test_review_kit_check_skips_an_old_updater \
   test_review_kit_lookup_is_cached \
+  test_review_kit_cache_edge_cases \
   test_review_kit_lookup_times_out \
   test_make_plugin_interrupted_swap_keeps_previous_build \
   test_make_plugin_refuses_an_unlistable_destination \

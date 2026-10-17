@@ -19,8 +19,8 @@ if it cannot. Pass `--local` only to install the clone's working tree instead
 updater from before v1.3.0 installs the clone's working tree whatever you pass.
 
 ```bash
-git -C ~/dev/private/codex-review-kit pull --ff-only
-bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
+git -C ~/dev/private/codex-review-kit pull --ff-only \
+  && bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
 ./scripts/review-install.sh     # per-machine setup (profile, hooks, pointers)
 ```
 
