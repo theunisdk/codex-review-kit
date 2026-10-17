@@ -143,6 +143,17 @@ In Claude Code:
 | `/review-tune` | Folds recurring rejections into `learnings.md` to cut noise |
 | `/review-postmortem <PR>` | Records what CodeRabbit caught that we missed |
 
+`.review/findings.json` holds the merged `findings` and says how far to trust them:
+
+| Key | Meaning |
+|---|---|
+| `complete` | `false` when anything went unreviewed: a lens failed, a path was unreadable, the secret scan failed, or there was nothing to review |
+| `lenses_failed` | lenses that did not finish; their areas are unreviewed |
+| `unreadable_paths` | changed paths no lens could read |
+| `changed_files` | how many paths were reviewed; `0` means nothing was, and no verdict may be written from it |
+| `secrets_scan` | `clean`, `leaks` (a critical `gitleaks` finding carries it), `failed` (forces `complete: false`), or `not_scanned` (gitleaks not installed, `--no-analyzers`, or nothing to scan) |
+| `history_scan` | zero-change runs on a branch with commits only: `{commits, result}` for the history scan |
+
 Both the skill and the command delegate to `.review/adjudication.md`, so the
 behaviour is identical however the review started. Edit that file to change what
 adjudication means; don't edit the callers.

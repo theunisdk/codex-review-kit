@@ -31,11 +31,13 @@ which lenses did not finish.
 problem, a nested repository, a symlinked directory — so no lens saw them at
 all. That is not a partial pass: make the paths readable (or take them out of
 the change set) and re-run.
-`complete` is also false when the gitleaks secret scan failed (`findings.md`
-says so, and `.review/raw/analyzers.txt` holds `SCAN FAILED`), and when a
-branch's history was not scanned (`history_scan.result` is `failed` or
-`not_scanned`). A `gitleaks` finding is a secret the scan found: it is real
-whatever the lenses say.
+`secrets_scan` is what the gitleaks secret scan found: `clean`; `leaks`, carried
+by a critical `gitleaks` finding (the lenses never report it themselves);
+`failed`, which makes `complete` false and may still carry a `gitleaks`
+finding; or `not_scanned` — gitleaks is not installed, `--no-analyzers`, or
+nothing to scan. `not_scanned` leaves `complete` true when the lenses reviewed
+the diff, but a secret added and later removed on the branch went unchecked:
+say so in the verdict and to the user.
 When `changed_files` is 0, nothing was reviewed — usually a wrong base ref, or
 fixes not yet committed. **Do not write `.review/verdict.md` from that run**:
 a verdict names HEAD, and the pre-push hook would accept it for code no lens
@@ -127,7 +129,7 @@ a code review, and the hook must not read it as one.
 # Review verdict — <branch> — <short-sha> — <date>
 
 <n> findings · <f> fixed · <l> logged · <r> rejected · <e> escalated
-Lenses: <list> · Effort: <effort>
+Lenses: <list> · Effort: <effort> · Secrets: <secrets_scan>
 
 | ID | Sev | Agree | File:line | Finding | Disposition | Reason |
 |----|-----|-------|-----------|---------|-------------|--------|
