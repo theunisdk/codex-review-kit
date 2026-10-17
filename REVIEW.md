@@ -199,6 +199,8 @@ one rejection is a one-off.
 Verdicts are gitignored, so `review.sh` and the pre-push hook archive each one
 to `$(git rev-parse --git-common-dir)/review-history/`: shared by every
 worktree of the clone, kept after a worktree is removed, never committed.
+`/review-tune` also reads `.review/archive/`, the store it read before v1.2.2,
+and counts a verdict found in more than one store once.
 
 **Coverage up** (`/review-postmortem`): every CodeRabbit finding you missed gets
 diagnosed — wrong lens, insufficient tracing, filtered by threshold, or

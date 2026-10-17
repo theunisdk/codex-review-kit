@@ -6,19 +6,55 @@ allowed-tools: Bash, Read, Grep, Glob, Edit, Write
 Reduce false-positive noise in the Codex review by learning from what we rejected.
 
 1. Gather rejection history. You need the verdict BODIES — commit subjects say
-   nothing about what was rejected. Verdicts are gitignored, so git history has
-   none. `scripts/review.sh` and the pre-push hook archive them into the
-   clone's review history, shared by every worktree:
-   `ls "$(git rev-parse --git-common-dir)/review-history"`. Code verdicts are
-   `code-<date>-<sha>-<cksum>.md`, spec verdicts `spec-<date>-<sha>-<cksum>.md`;
-   each distinct verdict is kept once. Read every one, plus `.review/verdict.md`
-   and `.review/spec-verdict.md` if present (identical to an archived copy
-   unless written since the last run or push). Two files with the same mode
-   and SHA that judge the same findings are one review adjudicated twice:
-   count a rejection repeated across them once. Different reviews of one
-   commit, such as two specs, count separately. If the directory is missing
-   or empty, say so: that is no history, not a clean one. Read each one's
-   Rejected section. Keep spec rejections in their own classes:
+   nothing about what was rejected. Read every verdict in the stores below.
+   Report what each held: a file count, empty, missing, or unread with the
+   error. An unread store means the history is unknown, not empty.
+   - The clone's review history, shared by every worktree. Run
+     `git rev-parse --path-format=absolute --git-common-dir` on its own first;
+     if it fails, stop and say so. Then list `<that dir>/review-history`.
+     `scripts/review.sh` and the pre-push hook archive into it. Code verdicts
+     are `code-<date>-<sha>-<cksum>.md`, spec verdicts
+     `spec-<date>-<sha>-<cksum>.md`, headerless ones
+     `<mode>-unparsed-<cksum>.md`. The name's mode comes from the header, so
+     it can be wrong for an old spec verdict (see below).
+   - The legacy archive, `.review/archive/`, which kits before v1.2.2 read
+     instead. It holds a repo's pre-upgrade history and follows no naming
+     scheme: `find <worktree>/.review/archive -type f`.
+   - The legacy archive's committed history, reported on its own. The kit
+     does not gitignore the archive, so a repo may have committed it, then
+     deleted or overwritten files.
+     `git log --all --name-status --format=%H -- ':/.review/archive/'` lists
+     each version: read it with `git show <sha>:<path>`, or
+     `git show <sha>^:<path>` when the status is `D`. If
+     `git rev-parse --is-shallow-repository` prints `true`, report this
+     history as partly unread.
+   - The live verdicts, `<worktree>/.review/verdict.md` and
+     `<worktree>/.review/spec-verdict.md` (identical to an archived copy
+     unless written since the last run or push).
+
+   The legacy archive and the live verdicts are per worktree. Check them in
+   every `worktree` entry of `git worktree list --porcelain`, skipping a
+   `bare` one. Report a worktree whose directory is gone or that is marked
+   `prunable` as unread.
+
+   A verdict starts at a `# Review verdict — <branch> — <sha> — <date>` or
+   `# Spec verdict — …` line; a file may hold several. Before v1.2.0, spec
+   verdicts also used `# Review verdict`. So a `# Spec verdict` header, or
+   any `spec-*` lens on its `Lenses:` line, makes it a spec verdict. A file
+   with no header takes its mode from its `Lenses:` line, else from its
+   `<mode>-unparsed` name or the live file it came from. Name each such file
+   and the mode you assumed.
+
+   Count each verdict once, wherever it was found. Files with the same
+   `cksum` are one verdict; a review-history name ends in its `cksum`. Two
+   verdicts of one mode and commit (SHAs match when one is a prefix of the
+   other) that judge the same findings are one review adjudicated twice, and
+   so are two with the same findings table when either is headerless: count
+   a rejection repeated across them once. Different reviews of one commit,
+   such as two specs, count separately. If every store was read and is
+   missing or empty, say so: that is no history in this clone, not a clean
+   one. Another clone's review history is not visible from here. Read each
+   verdict's Rejected section. Keep spec rejections in their own classes:
    `learnings.md` reaches the code lenses too, so a suppression drawn from
    spec rejections must say it applies to spec review only.
 
