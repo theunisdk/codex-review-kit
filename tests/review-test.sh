@@ -1751,6 +1751,21 @@ test_prepush_archives_the_verdict() {
     sh -c 'test -f "$1"/code-2026-01-04-"$2"-*.md' _ "$(history_dir "$repo")" "$short"
 }
 
+# Repos upgraded from v1.2.1 keep their pre-upgrade history in .review/archive/,
+# so /review-tune must keep reading it beside the review history (#38).
+test_review_tune_docs_name_legacy_archive() {
+  local tune="$KIT/.claude/commands/review-tune.md"
+  assert "v5: /review-tune reads the review history" \
+    sh -c 'grep -qF "git rev-parse --path-format=absolute --git-common-dir" "$1" && grep -qF "<that dir>/review-history" "$1"' _ "$tune"
+  assert "v5: … and the legacy .review/archive/" grep -qF 'find <worktree>/.review/archive -type f' "$tune"
+  assert "v5: … with its committed history" grep -qF "git log --all --name-status --format=%H -- ':/.review/archive/'" "$tune"
+  assert "v5: … in every worktree" grep -qF '`git worktree list --porcelain`' "$tune"
+  assert "v5: … counting a verdict in several stores once" grep -qF 'Count each verdict once' "$tune"
+  assert "v5: … with a state for a store it could not read" grep -qF 'history is unknown, not empty' "$tune"
+  assert "v5: REVIEW.md names both stores" \
+    sh -c 'grep -qF review-history "$1" && grep -qF "/review-tune\` also reads \`.review/archive/\`" "$1"' _ "$KIT/REVIEW.md"
+}
+
 # A hook that never runs looks exactly like one that ran and found the verdict
 # current, so every review run says when this clone would not run it. A
 # warning only: the run's exit code and `complete` must not move.
@@ -2052,6 +2067,7 @@ run_tests \
   test_verdict_archive_is_shared_across_worktrees \
   test_verdict_archive_failure_warns_without_failing \
   test_prepush_archives_the_verdict \
+  test_review_tune_docs_name_legacy_archive \
   test_review_warns_when_hook_unwired \
   test_review_warns_when_hooks_path_points_elsewhere \
   test_review_quiet_when_git_hooks_chain \
