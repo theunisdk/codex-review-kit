@@ -2213,25 +2213,26 @@ test_review_tune_docs_name_legacy_archive() {
 # review made findings it caught read as missed (#42). It must find the verdict
 # whose header names the first commit CodeRabbit reviewed, or an ancestor of it,
 # in the live files and the review history, and tell a failed read from none.
-postmortem_snippet() { # postmortem_snippet <first> <base> — the doc's verdict-locating block, filled in
+postmortem_snippet() { # postmortem_snippet <first> <pr-commit-file> — the doc's verdict-locating block, filled in
   awk '/^   ```bash$/ { f = 1; next } f && /^   ```$/ { exit } f { sub(/^   /, ""); print }' \
-    "$KIT/.claude/commands/review-postmortem.md" | sed "1s|^first=.*|first=$1|; 2s|^base=.*|base=$2|"
+    "$KIT/.claude/commands/review-postmortem.md" | sed "1s|^first=.*|first=$1|; 2s|^pr_commits=.*|pr_commits=$2|"
 }
 
 test_postmortem_finds_the_verdict_for_the_reviewed_commit() {
-  local repo="$WORK/p1" wt="$WORK/p1-wt" out="$WORK/p1.out" hist snippet a b o p rc
+  local repo="$WORK/p1" wt="$WORK/p1-wt" out="$WORK/p1.out" prs="$WORK/p1.commits" hist snippet a b o p rc
   make_repo "$repo"
   ( cd "$repo" && git checkout -qb prev main && printf 'p\n' > p.txt && git add p.txt && git commit -qm prev \
       && git checkout -q main && git merge -q --no-ff prev -m 'merge prev' \
       && git checkout -q change && git merge -q main -m 'sync main' \
       && printf 'a\n' >> src.txt && git commit -qam a && printf 'b\n' >> src.txt && git commit -qam b )
   p=$(git -C "$repo" rev-parse --short prev)
+  git -C "$repo" rev-list main..change > "$prs"
   a=$(git -C "$repo" rev-parse --short HEAD~1); b=$(git -C "$repo" rev-parse HEAD)
   git -C "$repo" worktree add -q -b other "$wt" main
   ( cd "$wt" && printf 'o\n' > o.txt && git add o.txt && git commit -qm other )
   o=$(git -C "$wt" rev-parse --short HEAD)
   hist="$(history_dir "$repo")"
-  snippet="$(postmortem_snippet "$b" main)"
+  snippet="$(postmortem_snippet "$b" "$prs")"
   assert "p1: the postmortem carries a verdict-locating block" grep -qF 'git merge-base --is-ancestor' <<< "$snippet"
 
   ( cd "$repo" && bash -c "$snippet" ) > "$out" 2>&1; rc=$?
@@ -2256,13 +2257,17 @@ test_postmortem_finds_the_verdict_for_the_reviewed_commit() {
   assert "p1: an archived verdict for an earlier commit is 'ancestor'" grep -qE "^ancestor $a 1 .*/code-2026-01-01-$a-1\.md$" "$out"
   assert "p1: … and so is a second verdict in one file, at its own line" grep -qE "^ancestor $a 5 .*/code-2026-01-01-deadbeef-2\.md$" "$out"
   assert "p1: another worktree's verdict for an unrelated commit is 'other'" grep -qE "^other $o 1 .*/p1-wt/\.review/verdict\.md$" "$out"
-  assert "p1: a commit this clone cannot place is 'unknown', not 'other'" grep -qE '^unknown deadbeef 1 ' "$out"
+  assert "p1: a commit this clone cannot place is 'other'" grep -qE '^other deadbeef 1 ' "$out"
   assert "p1: another PR's verdict that reached the base is 'other', not 'ancestor'" grep -qE "^other $p 1 " "$out"
+  git -C "$repo" checkout -q main && git -C "$repo" merge -q --no-ff change -m 'merge change'
+  git -C "$repo" checkout -q change
+  ( cd "$repo" && bash -c "$snippet" ) > "$WORK/p1.merged" 2>&1
+  assert "p1: … but this PR's own verdict stays 'ancestor' once the PR is merged" grep -qE "^ancestor $a 1 " "$WORK/p1.merged"
   assert_not "p1: spec verdicts, old-header spec verdicts and postmortem records are not candidates" \
     grep -qE 'spec-2026|postmortem-pr1|code-2026-01-01-oldspec' "$out"
   assert "p1: … so exactly six candidates" test "$(grep -c . "$out")" -eq 6
 
-  ( cd "$repo" && bash -c "$(postmortem_snippet 0123456789abcdef0123456789abcdef01234567 main)" ) > "$out" 2>&1; rc=$?
+  ( cd "$repo" && bash -c "$(postmortem_snippet 0123456789abcdef0123456789abcdef01234567 "$prs")" ) > "$out" 2>&1; rc=$?
   assert "p1: a compared commit this clone lacks fails the listing" \
     sh -c '[ "$1" -ne 0 ] && grep -qF "failed: the compared commit is not in this clone" "$2"' _ "$rc" "$out"
 
@@ -2287,6 +2292,11 @@ test_postmortem_finds_the_verdict_for_the_reviewed_commit() {
     chmod 644 "$repo/.review/verdict.md"
     assert "p1: an unreadable verdict fails instead of reading as no verdict" \
       sh -c '[ "$1" -ne 0 ] && grep -qF "failed: cannot read" "$2"' _ "$rc" "$out"
+    chmod 000 "$repo/.review"
+    ( cd "$repo" && bash -c "$snippet" ) > "$out" 2>&1; rc=$?
+    chmod 755 "$repo/.review"
+    assert "p1: … and so does a .review/ that cannot be entered" \
+      sh -c '[ "$1" -ne 0 ] && grep -qF "/.review is not readable" "$2"' _ "$rc" "$out"
   else
     skip_test "p1: unreadable review history (running as root)"
   fi
@@ -2304,16 +2314,19 @@ test_postmortem_docs_record_and_route() {
   assert "p2: … and a machine-readable record" grep -qF '"schema": "review-postmortem/v1"' "$pm"
   assert "p2: … updated in place on a re-run" grep -qF 'gh api -X PATCH repos/{owner}/{repo}/issues/comments/<id>' "$pm"
   assert "p2: … never duplicated when a lookup fails" grep -qF 'do not create a comment, because it could duplicate one' "$pm"
+  assert "p2: … and so is the step-6 update of it" grep -qF 'review-postmortem: lessons — comment <updated|NOT updated' "$pm"
+  assert "p2: proposals are kept in the record" grep -qF '"proposals": [{"route": "repo | hub"' "$pm"
+  assert "p2: an unscored finding says whether git could compare" grep -qF '"unscored_reason": "changed | compare_failed: <error> | null"' "$pm"
   assert "p2: the record's outcome is part of the status contract" grep -qF 'review-postmortem: record — comment <posted|updated|NOT posted' "$pm"
   assert "p2: an unattended caller never waits for approval" grep -qF '`--record-only` is for unattended callers' "$pm"
-  assert "p2: a failed fetch is a failure, not a missing verdict" grep -qF 'If the fetch fails, stop with `failed — fetch`' "$pm"
+  assert "p2: a failed fetch is a failure, not a missing verdict" grep -qF 'If a fetch fails, stop with `failed — fetch`' "$pm"
   assert "p2: a failed hub check files nothing" grep -qF 'If either check' "$pm"
   assert "p2: … with a local copy in the review history" grep -qF '<git common dir>/review-history/postmortem-pr<n>.md' "$pm"
   assert "p2: … recording findings the author rejected in a thread" grep -qF '`rejected` (a reply that' "$pm"
   assert "p2: hub lessons are filed as issues" grep -qF 'gh issue create -R theunisdk/codex-review-kit --label lesson' "$pm"
   assert "p2: … creating the label, or saying it filed without one" \
     sh -c 'grep -qF "gh label create lesson" "$1" && grep -qF "file the issue without a label and say so" "$1"' _ "$pm"
-  assert "p2: … and a failed label check is not a missing label" grep -qF 'it is a failed check, not a missing label' "$pm"
+  assert "p2: … and a failed label check is not a missing label" grep -qF 'that is a failed label lookup, not a missing label' "$pm"
   assert_not "p2: no lesson is committed in a local hub clone" grep -qE 'Commit there|commit it in the hub' "$pm" "$tune"
 }
 

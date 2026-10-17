@@ -26,7 +26,9 @@ Begin your report with one status line, so a caller can tell the outcomes apart:
 After `scored` or `no-local-verdict`, the second line says whether the record
 was saved:
 `review-postmortem: record — comment <posted|updated|NOT posted: <error>>; local copy <written|NOT written: <error>>`.
-Both lines are final at the end of step 5. Step 6 never changes them.
+Both lines are final at the end of step 5. Step 6 never changes them; it
+reports its own update of the record on a third line,
+`review-postmortem: lessons — comment <updated|NOT updated: <error>>; local copy <written|NOT written: <error>>`.
 
 1. **Pull CodeRabbit's review.** If `.review/` is missing, report
    `skipped — no review kit in this repo`. Resolve the PR with
@@ -64,18 +66,19 @@ Both lines are final at the end of step 5. Step 6 never changes them.
 
    A verdict's header names the commit it judged:
    `# Review verdict — <branch> — <short-sha> — <date>`. SHAs match when one
-   is a prefix of the other. First run
-   `git fetch origin "pull/<n>/head" "<baseRefName>"`, so the PR's commits and
-   its base are in this clone. If the fetch fails, stop with `failed — fetch`.
-   Then list every candidate with its relation to the comparison commit, from
+   is a prefix of the other. First run `git fetch origin "pull/<n>/head"`, so
+   the PR's commits are in this clone. If the compared commit is still
+   missing, because it was force-pushed away, run `git fetch origin <first>`.
+   If a fetch fails, stop with `failed — fetch`. Write the PR's commit SHAs
+   from step 1 to a file, one per line. Then list every candidate with its relation to the comparison commit, from
    the live `.review/verdict.md` of each worktree and the clone's review
    history. The live file may not be archived yet, so read both:
 
    ```bash
    first=<full SHA of the first head CodeRabbit reviewed>
-   base=origin/<baseRefName>
+   pr_commits=<file listing the PR's commit SHAs, one per line>
    first="$(git rev-parse --verify -q "$first^{commit}")" || { echo "failed: the compared commit is not in this clone"; exit 1; }
-   base="$(git rev-parse --verify -q "$base^{commit}")" || { echo "failed: the PR's base is not in this clone"; exit 1; }
+   [ -r "$pr_commits" ] && [ -s "$pr_commits" ] || { echo "failed: no PR commit list at $pr_commits"; exit 1; }
    common="$(git rev-parse --git-common-dir)" && common="$(cd "$common" && pwd -P)" || { echo "failed: git common dir"; exit 1; }
    hist="$common/review-history" archived=""
    if [ -e "$hist" ]; then
@@ -87,6 +90,7 @@ Both lines are final at the end of step 5. Step 6 never changes them.
      [ -z "$archived" ] || printf '%s\n' "$archived"
    } | while IFS= read -r f; do
      if [ ! -e "$f" ]; then
+       if [ -d "${f%/verdict.md}" ] && [ ! -x "${f%/verdict.md}" ]; then echo "failed: ${f%/verdict.md} is not readable"; exit 1; fi
        case "$f" in */.review/verdict.md) [ -d "${f%/.review/verdict.md}" ] || echo "unread ${f%/.review/verdict.md}: worktree directory is missing" ;; esac
        continue
      fi
@@ -100,15 +104,14 @@ Both lines are final at the end of step 5. Step 6 never changes them.
      printf '%s\n' "$heads" | while read -r sha line; do
        case "$first" in
          "$sha"*) rel=same ;;
-         *) git merge-base --is-ancestor "$sha" "$first" 2>/dev/null; rc=$?
-            case "$rc" in
-              0) if git merge-base --is-ancestor "$sha" "$base" 2>/dev/null; then rel=other; else rel=ancestor; fi ;;
-              1) rel=other ;;
-              *) rel=unknown ;;
-            esac ;;
+         *) if ! grep -q "^$sha" "$pr_commits"; then rel=other
+            else
+              git merge-base --is-ancestor "$sha" "$first"; rc=$?
+              case "$rc" in 0) rel=ancestor ;; 1) rel=other ;; *) echo "failed: git merge-base --is-ancestor $sha $first"; exit 1 ;; esac
+            fi ;;
        esac
        printf '%s %s %s %s\n' "$rel" "$sha" "$line" "$f"
-     done
+     done || exit 1
    done
    ```
 
@@ -118,7 +121,9 @@ Both lines are final at the end of step 5. Step 6 never changes them.
    listed. A line starting `failed:`, or a non-zero exit, means a store could
    not be read: report `failed`, not `no-local-verdict`. A line starting
    `unread` names a worktree whose verdict could not be checked: name it in
-   the report and in the record's `reason`.
+   the report and in the record's `reason`. The legacy `.review/archive/` of
+   kits before v1.2.2 is not searched; if a worktree has one, say so in
+   `reason`.
 
    Pick the verdict by this rule, and name the files you used:
    - **`same`** — the verdict judged the comparison commit. Use every `same`
@@ -126,20 +131,20 @@ Both lines are final at the end of step 5. Step 6 never changes them.
      caught if any of them has it.
    - **No `same`, but an `ancestor`** — the verdict judged an earlier commit
      on this PR's branch, and the commits after it reached CodeRabbit
-     unreviewed. Use the nearest one: the smallest
-     `git rev-list --count <sha>..<first>`. That count is `uncovered_commits`.
+     unreviewed. Use the nearest one: the one with the fewest PR commits
+     after it, `git rev-list <sha>..<first> | grep -cFx -f <PR commit file>`.
+     That count is `uncovered_commits`.
    - **Neither** — record `no-local-verdict` and do not score. `other` means a
-     commit that is not on this PR's branch before the compared commit: a
-     review run after CodeRabbit's, another branch's, or one already on the
-     base. `unknown` means a commit this clone cannot place, so it is not on
-     the PR's fetched history. A missing review-history directory is no
+     commit that is not one of this PR's commits before the compared commit:
+     a review run after CodeRabbit's, another branch's, or one that reached
+     the PR through its base. A missing review-history directory is no
      history in this clone, not a failure.
 
    Score a finding only if its file is unchanged between the verdict's commit
    and the finding's commit: `git diff --quiet <verdict-sha> <finding-commit> -- <file>`.
    Exit 1 means the code changed after the local review, so mark the finding
-   **unscored**. Other exits mean git could not compare, so mark it unscored
-   and say why. One rule covers an ancestor verdict and findings raised on
+   **unscored** with `unscored_reason` `changed`. Other exits mean git could
+   not compare: mark it unscored with `compare_failed: <error>`. One rule covers an ancestor verdict and findings raised on
    later heads.
 
 3. **Classify each scored finding** against the verdict's findings table and
@@ -202,7 +207,9 @@ Both lines are final at the end of step 5. Step 6 never changes them.
     "findings": [{"url": "", "commit": "", "file": "", "summary": "",
                   "class": "caught | missed | rejected-wrongly | noise | unscored",
                   "cause": "wrong_lens | tracing | threshold | structural | null", "local_id": null,
+                  "unscored_reason": "changed | compare_failed: <error> | null",
                   "author": "fixed | logged | rejected | open", "author_reason": null}],
+    "proposals": [{"route": "repo | hub", "file": "", "lines": "", "cause": ""}],
     "lessons": []}
    ```
    </details>
@@ -229,7 +236,9 @@ Both lines are final at the end of step 5. Step 6 never changes them.
      it cannot be written, the local copy is `NOT written`, with the error.
 
    Report both outcomes on the record line. One failing never cancels the
-   other. With `--record-only`, list the proposed edits from step 4 and stop.
+   other. Every proposed edit from step 4 is in `proposals`, so a
+   `--record-only` run keeps them too. With `--record-only`, list them and
+   stop.
 
 6. **Propose the edits and wait for my approval.** Every proposal is routed: a
    repo-specific lesson is an edit to this repo, as above. A generic or
@@ -249,15 +258,15 @@ Both lines are final at the end of step 5. Step 6 never changes them.
      If the list has no `lesson`, run
      `gh label create lesson -R theunisdk/codex-review-kit --description "Review lesson routed from a spoke"`.
      If that fails, file the issue without a label and say so. If the list
-     call fails, it is a failed check, not a missing label: say so, and file
-     without a label.
+     call fails, that is a failed label lookup, not a missing label: say so,
+     and file without a label.
    - File it: `gh issue create -R theunisdk/codex-review-kit --label lesson --title "lesson(<lens or learnings-shared>): <defect class>" --body-file <file>`.
      The body names the hub file and the proposed lines, the defect class, and
      the cause. If filing fails, save the body to a file, print its path and
      the command, and report `hub lesson NOT filed`.
 
    Add the filed issue URLs to `lessons` and update the PR comment and local
-   copy the same way. The hub's maintainer folds lessons into a release, and
+   copy the same way, then print the `lessons` line. The hub's maintainer folds lessons into a release, and
    spokes get them on their next `scripts/review-update.sh`.
 
 Track the scorecard over time. If `missed` trends toward zero on ordinary PRs,
