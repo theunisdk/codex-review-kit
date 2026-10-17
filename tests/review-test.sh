@@ -638,6 +638,7 @@ test_gitleaks_failure_on_a_nonempty_diff_is_incomplete() {
     assert "g12: a run that dies after the scan keeps the leak" \
       jq -e '.complete == false and .changed_files == 1 and .secrets_scan == "failed"
              and ([.findings[] | select(.lens == "gitleaks")] | length == 1)' "$json"
+    assert "g12: … and findings.md names it" grep -qF 'gitleaks found a secret' "$AREPO/.review/findings.md"
   fi
   chmod 644 "$AREPO/.review/rubric.md"
 
@@ -647,6 +648,12 @@ test_gitleaks_failure_on_a_nonempty_diff_is_incomplete() {
   printf '1\n' > "$ASTUB/gitleaks-pipe.rc"
   run_review_analyzers "$AREPO" "$ASTUB" --uncommitted
   assert "g12: a failed net-diff scan is complete:false too" jq -e '.complete == false' "$AREPO/.review/findings.json"
+
+  rm -f "$ASTUB/correctness.json"
+  run_review_analyzers "$AREPO" "$ASTUB" --uncommitted
+  assert "g12: with every lens failed, the failed scan is still named" \
+    sh -c 'jq -e ".secrets_scan == \"failed\" and .complete == false" "$1" && grep -qF "secret scan FAILED" "$2"' \
+    _ "$AREPO/.review/findings.json" "$AREPO/.review/findings.md"
 }
 
 test_gitleaks_uncommitted_scans_diff_only() {
@@ -802,6 +809,22 @@ test_gitleaks_scans_merge_resolutions() {
   PATH="$WORK/g13-bin:$PATH" run_review_analyzers "$AREPO" "$ASTUB" main
   assert "g13: without --remerge-diff the scan uses -m" grep -qF -- '--log-opts=-m ' "$ASTUB/gitleaks.calls"
   assert "g13: … and still finds the secret" jq -e '.history_scan.result == "leaks"' "$json"
+
+  # --remerge-diff skips octopus merges, so a range holding one uses -m.
+  analyzer_repo g13c
+  (
+    cd "$AREPO" || exit 1
+    printf 'x\n' > b.txt && git add b.txt && git commit -qm 'branch change'
+    git checkout -qb t1 main && printf '1\n' > one.txt && git add one.txt && git commit -qm one
+    git checkout -qb t2 main && printf '2\n' > two.txt && git add two.txt && git commit -qm two
+    git checkout -q change && git merge -q --no-commit t1 t2 >/dev/null
+    printf 'api_key = "%s"\n' "not-a-real-key-0123456789" > creds.txt
+    git add creds.txt && git commit -qm octopus && git rm -q creds.txt && git commit -qm 'drop creds'
+  )
+  printf 'not-a-real-key\n' > "$ASTUB/gitleaks-history.git"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  assert "g13: an octopus merge in the range uses -m" grep -qF -- '--log-opts=-m ' "$ASTUB/gitleaks.calls"
+  assert "g13: … and the secret it carried is found" jq -e '.secrets_scan == "leaks"' "$AREPO/.review/findings.json"
 
   # A secret main already carries is not branch history.
   analyzer_repo g13b

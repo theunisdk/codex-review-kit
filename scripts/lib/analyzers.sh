@@ -13,8 +13,9 @@
 # Branch mode scans each commit in the range as well as the net diff: a secret
 # added then removed on the branch is absent from diff.patch but still pushed.
 # --remerge-diff: without it `git log -p` prints no patch for a merge, so a secret
-# that only merge resolutions add and remove is in no scanned patch. Git < 2.36
-# falls back to -m, which also rescans what each merge brought in from its base.
+# that only merge resolutions add and remove is in no scanned patch. Git < 2.36,
+# or a range holding an octopus merge (remerge skips those), falls back to -m,
+# which also rescans what each merge brought in from its base.
 # rc 3 means leaks. Any other non-zero rc, an ERR/FTL line, or no commits
 # scanned when the range adds lines means the scan did not happen — a bad
 # --log-opts range logs ERR, then "no leaks found", and exits 0.
@@ -56,7 +57,7 @@ _gitleaks_history() { # each commit in $MERGE_BASE..HEAD
   local numstat adds head merges=--remerge-diff
   head="$(git rev-parse -q --verify HEAD 2>/dev/null)"
   [ -n "$head" ] && [ "$(git log -1 --format=%H --remerge-diff --no-patch HEAD 2>/dev/null)" = "$head" ] \
-    || merges=-m
+    && [ "$(git rev-list --count --min-parents=3 "$MERGE_BASE..HEAD" 2>/dev/null)" = 0 ] || merges=-m
   if ! numstat="$(git log "$merges" --numstat --format= "$MERGE_BASE..HEAD" 2>&1)"; then
     printf -- '-- commit history %s\nSCAN FAILED (git log could not list the range) — secrets were NOT checked:\n%s\n' \
       "$MERGE_BASE..HEAD" "$(printf '%s\n' "$numstat" | head -5)" >> "$report"

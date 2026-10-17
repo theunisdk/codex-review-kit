@@ -147,7 +147,7 @@ In Claude Code:
 
 | Key | Meaning |
 |---|---|
-| `complete` | `false` when anything went unreviewed: a lens failed, a path was unreadable, the secret scan failed, or there was nothing to review |
+| `complete` | `false` when a lens failed, a path was unreadable, the secret scan failed, or there was nothing to review. A skipped secret scan leaves it `true`: check `secrets_scan` too |
 | `lenses_failed` | lenses that did not finish; their areas are unreviewed |
 | `unreadable_paths` | changed paths no lens could read |
 | `changed_files` | how many paths were reviewed; `0` means nothing was, and no verdict may be written from it |
