@@ -66,21 +66,28 @@ DEST="$dest_abs"
 STAGE="$(mktemp -d "${DEST%/*}/.make-plugin-stage.XXXXXX")"
 GENERATED="README.md PLUGIN-NOTES.md .claude-plugin commands skills scripts review"
 SWAPPING=0
-BACKED_UP=""
+NO_PREVIOUS=""
+MOVING=""
 KEEP_STAGE=0
-# A swap cut short puts the previous build back rather than deleting it.
+# A swap cut short puts the previous build back rather than deleting it. What
+# to restore is read from the stage itself: a signal can land between any move
+# and any bookkeeping.
 cleanup() {
+  trap '' HUP INT TERM
   if [ "$SWAPPING" = 1 ]; then
     for e in $GENERATED; do
-      case " $BACKED_UP " in
-        *" $e "*)
-          if ! { rm -rf "${DEST:?}/$e" && mv "$STAGE/old/$e" "$DEST/"; }; then
-            echo "error: could not restore the previous build — it is in $STAGE/old" >&2
-            return
-          fi ;;
-        *)
-          if [ ! -e "$OUT/$e" ] && [ ! -L "$OUT/$e" ]; then rm -rf "${DEST:?}/$e"; fi ;;
-      esac
+      if [ -e "$STAGE/old/$e" ] || [ -L "$STAGE/old/$e" ]; then
+        if [ -e "$DEST/$e" ] || [ -L "$DEST/$e" ]; then
+          # Both sides of a backup move that did not finish: neither is known whole.
+          if [ "$e" = "$MOVING" ]; then KEEP_STAGE=1; continue; fi
+          rm -rf "${DEST:?}/$e" || { restore_failed; return; }
+        fi
+        mv "$STAGE/old/$e" "$DEST/" || { restore_failed; return; }
+      else
+        case " $NO_PREVIOUS " in
+          *" $e "*) rm -rf "${DEST:?}/$e" || { restore_failed; return; } ;;
+        esac
+      fi
     done
   fi
   if [ "$KEEP_STAGE" = 1 ]; then
@@ -88,6 +95,9 @@ cleanup() {
     return
   fi
   rm -rf "$STAGE"
+}
+restore_failed() {
+  echo "error: could not restore the previous build — it is in $STAGE/old" >&2
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -138,6 +148,11 @@ This file marks the directory as safe for the generator to wipe and rebuild.
 Delete it to stop the generator from touching this directory.
 MARK
 
+# Whatever an interrupted swap leaves at these paths can only be the new build's.
+for e in $GENERATED; do
+  if [ ! -e "$DEST/$e" ] && [ ! -L "$DEST/$e" ]; then NO_PREVIOUS="$NO_PREVIOUS $e"; fi
+done
+
 # Generated content is replaced wholesale, not overlaid: a command or skill
 # deleted from the kit would otherwise survive in a reused output directory and
 # ship in the plugin forever.
@@ -145,11 +160,9 @@ MARK
 SWAPPING=1
 for e in $GENERATED; do
   if [ -e "$DEST/$e" ] || [ -L "$DEST/$e" ]; then
-    if ! mv "$DEST/$e" "$STAGE/old/"; then
-      if [ -e "$STAGE/old/$e" ] || [ -L "$STAGE/old/$e" ]; then KEEP_STAGE=1; fi
-      exit 1
-    fi
-    BACKED_UP="$BACKED_UP $e"
+    MOVING="$e"
+    mv "$DEST/$e" "$STAGE/old/" || exit 1
+    MOVING=""
   fi
 done
 for e in .claude-plugin commands skills scripts review PLUGIN-NOTES.md README.md; do

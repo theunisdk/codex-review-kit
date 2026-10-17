@@ -1897,6 +1897,45 @@ test_review_quiet_when_git_hooks_chain() {
   assert_hook_quiet "h7 (chained from .git/hooks)" "$repo"
 }
 
+# A signal can land between any two steps of the swap, or during the rollback.
+# The mv stub signals the script right after the move whose "src>dst" matches
+# $M3_TRIP (or $M3_TRIP2), so each window is hit every time, not by timing.
+test_make_plugin_interrupted_swap_keeps_previous_build() {
+  local hub="$WORK/m3-hub" dest="$WORK/m3-out/plugin" out="$WORK/m3.log" rc=0 trip
+  make_hub "$hub"
+  mkdir -p "$WORK/m3-out" "$WORK/m3-bin"
+  printf '#!/bin/sh\n%s "$@" || exit\ncase "$1>$2" in $M3_TRIP|${M3_TRIP2:-$M3_TRIP}) kill -TERM "$PPID" ;; esac\n' \
+    "$(command -v mv)" > "$WORK/m3-bin/mv"
+  chmod +x "$WORK/m3-bin/mv"
+
+  for trip in '*/plugin/skills>*/old/' '*/new/skills>*' '*/new/skills>*|*/old/skills>*'; do
+    rm -rf "$dest"
+    ( cd "$hub" && bash scripts/make-plugin.sh "$dest" ) > "$out" 2>&1
+    assert "m3 [$trip]: first build succeeds" test "$?" -eq 0
+    printf 'v1\n' > "$dest/skills/pre-pr-review/old-only"
+    ( cd "$hub" && PATH="$WORK/m3-bin:$PATH" M3_TRIP="${trip%%|*}" M3_TRIP2="${trip#*|}" \
+        bash scripts/make-plugin.sh "$dest" ) > "$out" 2>&1
+    rc=$?
+    assert "m3 [$trip]: interrupted rebuild fails" test "$rc" -ne 0
+    assert "m3 [$trip]: previous skills survive" test -f "$dest/skills/pre-pr-review/old-only"
+    assert "m3 [$trip]: previous runner survives" test -f "$dest/scripts/review.sh"
+    assert "m3 [$trip]: previous review assets survive" test -f "$dest/review/schema.json"
+    assert "m3 [$trip]: README.md is restored" test -f "$dest/README.md"
+    assert "m3 [$trip]: restored build leaves no staging behind" \
+      test "$(ls -A "$WORK/m3-out")" = plugin
+    rm -rf "$WORK"/m3-out/.make-plugin-stage.*
+  done
+
+  # A cross-filesystem install killed after its copy leaves the entry on both sides.
+  printf '#!/bin/sh\ncase "$1" in */new/skills) cp -R "$1" "$2"; kill -TERM "$PPID"; exit 1 ;; esac\nexec %s "$@"\n' \
+    "$(command -v mv)" > "$WORK/m3-bin/mv"
+  ( cd "$hub" && PATH="$WORK/m3-bin:$PATH" bash scripts/make-plugin.sh "$WORK/m3-out/fresh" ) > "$out" 2>&1
+  rc=$?
+  assert "m3: first build killed mid-install fails" test "$rc" -ne 0
+  assert "m3: first build killed mid-install leaves no generated entries" \
+    test "$(ls -A "$WORK/m3-out/fresh")" = .make-plugin-generated
+}
+
 # A destination that denies listing looks empty to `ls -A`, and empty is the one
 # state this guard lets through — into the rm -rf of commands/skills/scripts.
 test_make_plugin_refuses_an_unlistable_destination() {
@@ -2071,6 +2110,7 @@ run_tests \
   test_review_warns_when_hook_unwired \
   test_review_warns_when_hooks_path_points_elsewhere \
   test_review_quiet_when_git_hooks_chain \
+  test_make_plugin_interrupted_swap_keeps_previous_build \
   test_make_plugin_refuses_an_unlistable_destination \
   test_make_plugin_failed_rebuild_keeps_previous_build
 
