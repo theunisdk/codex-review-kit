@@ -268,7 +268,7 @@ reports its own update of the record on a third line,
      call fails, that is a failed label lookup, not a missing label: say so,
      and file without a label.
    - File it: `gh issue create -R theunisdk/codex-review-kit --label lesson --title "lesson(<lens or learnings-shared>): <defect class>" --body-file <file>`.
-     The body names the hub file and the proposed lines, the defect class, and
+     Without the label, run the same command with no `--label lesson`. The body names the hub file and the proposed lines, the defect class, and
      the cause. If filing fails, save the body to a file, print its path and
      the command, and report `hub lesson NOT filed`.
 

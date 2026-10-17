@@ -2327,6 +2327,7 @@ test_postmortem_docs_record_and_route() {
   assert "p2: hub lessons are filed as issues" grep -qF 'gh issue create -R theunisdk/codex-review-kit --label lesson' "$pm"
   assert "p2: … creating the label, or saying it filed without one" \
     sh -c 'grep -qF "gh label create lesson" "$1" && grep -qF "file the issue without a label and say so" "$1"' _ "$pm"
+  assert "p2: … and the fallback drops the label from the command" grep -qF 'run the same command with no `--label lesson`' "$pm"
   assert "p2: … and a failed label check is not a missing label" grep -qF 'that is a failed label lookup, not a missing label' "$pm"
   assert_not "p2: no lesson is committed in a local hub clone" grep -qE 'Commit there|commit it in the hub' "$pm" "$tune"
 }
