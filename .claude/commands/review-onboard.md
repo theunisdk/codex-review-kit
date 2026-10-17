@@ -15,9 +15,11 @@ If the kit isn't present yet and a local hub clone exists at
 `~/dev/private/codex-review-kit`, run its updater. The clone only supplies the
 script: it still fetches and installs the hub's latest release tag, and fails
 if it cannot. Pass `--local` only to install the clone's working tree instead
-(unreleased hub changes, recorded as `unreleased`):
+(unreleased hub changes, recorded as `unreleased`). Pull the clone first: an
+updater from before v1.3.0 installs the clone's working tree whatever you pass.
 
 ```bash
+git -C ~/dev/private/codex-review-kit pull --ff-only
 bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
 ./scripts/review-install.sh     # per-machine setup (profile, hooks, pointers)
 ```

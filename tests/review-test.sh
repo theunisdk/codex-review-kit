@@ -1611,6 +1611,13 @@ test_update_latest_release_lookup() {
   assert "u19: unreachable exits 1" test "$rc" -eq 1
   assert "u19: unreachable prints nothing" test ! -s "$out"
   assert "u19: unreachable says so" grep -q 'cannot reach' "$out.err"
+
+  ( cd "$WORK" && env -i HOME="$WORK/nohome" PATH="$PATH" REVIEW_KIT_URL="file://$hub" \
+      bash "$KIT/scripts/review-update.sh" --latest-release --init ) > "$out" 2>"$out.err"; rc=$?
+  assert "u19: extra arguments are a usage error (64), not unreachable" test "$rc" -eq 64
+  ( cd "$WORK" && env -i HOME="$WORK/nohome" PATH="$PATH" \
+      bash "$KIT/scripts/review-update.sh" --bogus ) > "$out" 2>"$out.err"; rc=$?
+  assert "u19: an unknown argument is a usage error (64)" test "$rc" -eq 64
 }
 
 # --init seeds repo-owned files that are missing. Nothing seeds without it,
@@ -2386,7 +2393,12 @@ test_review_kit_staleness_unknown() {
   assert_not "k2: unreachable: never claims latest" grep -qF 'latest release' "$LOG"
   assert     "k2: unreachable: report still complete" jq -e '.complete == true' "$repo/.review/findings.json"
   run_review "$repo" "$stub" --lenses correctness
-  assert     "k2: the failed lookup is cached" grep -qF '(cached)' "$LOG"
+  assert     "k2: the failed lookup is cached" grep -qF 'could not reach file://'"$WORK"'/k2-nowhere (checked 0h ago)' "$LOG"
+  local cache; cache="$(cd "$repo" && cd "$(git rev-parse --git-common-dir)" && pwd)/review-kit-latest"
+  awk 'BEGIN{FS=OFS="\t"} {$1 = $1 - 4000; print}' "$cache" > "$cache.new" && mv "$cache.new" "$cache"
+  kit_hub "$WORK/k2-nowhere"
+  run_review "$repo" "$stub" --lenses correctness
+  assert     "k2: a failure is cached for an hour, not a day" grep -qF 'behind the latest release v0.10.0' "$LOG"
 
   rm -rf "$repo"; kit_repo "$repo" "$stub" "file://$bare" "release: v0.9.0"
   run_review "$repo" "$stub" --lenses correctness
@@ -2435,6 +2447,17 @@ test_review_kit_lookup_is_cached() {
   awk 'BEGIN{FS=OFS="\t"} {$1 = $1 - 90000; print}' "$cache" > "$cache.new" && mv "$cache.new" "$cache"
   run_review "$repo" "$stub" --lenses correctness
   assert "k4: expired cache: looks again" grep -qF 'v0.10.0 is behind the latest release v0.11.0' "$LOG"
+
+  ( cd "$hub" && git tag v0.12.0 )
+  sed -i.bak 's/^release: .*/release: v0.12.0/' "$repo/.review/kit-version" && rm -f "$repo/.review/kit-version.bak"
+  run_review "$repo" "$stub" --lenses correctness
+  assert     "k4: a sync past the cached answer looks again" grep -qF 'v0.12.0 is the latest release' "$LOG"
+  assert_not "k4: … and is not called newer" grep -qF 'newer than' "$LOG"
+
+  local other="$WORK/k4-other"; kit_hub "$other"
+  sed -i.bak "s|^kit: [^ ]*|kit: file://$other|" "$repo/.review/kit-version" && rm -f "$repo/.review/kit-version.bak"
+  run_review "$repo" "$stub" --lenses correctness
+  assert     "k4: the cache is keyed by hub URL" grep -qF 'v0.12.0 is newer than file://'"$other""'s latest release v0.10.0" "$LOG"
 }
 
 # A hub that hangs costs a few seconds, then reads as unknown.

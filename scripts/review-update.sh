@@ -36,7 +36,7 @@
 # Every run prints the resolved source and the revision it installs.
 #
 # --latest-release exits 0 with the tag on stdout, 1 when the hub cannot be
-# listed, 2 when it lists no release tag.
+# listed, 2 when it lists no release tag. A usage error exits 64.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -78,13 +78,13 @@ for arg in "$@"; do
     --init)  INIT=1 ;;
     --local) LOCAL=1 ;;
     --latest-release)
-      [ "$#" = 1 ] || { echo "error: --latest-release takes no other arguments" >&2; exit 1; }
+      [ "$#" = 1 ] || { echo "error: --latest-release takes no other arguments" >&2; exit 64; }
       list_tags || exit 1
       LATEST="$(printf '%s\n' "$TAGS" | latest_tag)"
       [ -n "$LATEST" ] || { echo "error: no release tag found on $KIT_GIT_URL" >&2; exit 2; }
       echo "$LATEST"; exit 0 ;;
     -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 0 ;;
-    *) echo "error: unknown argument '$arg' — see --help" >&2; exit 1 ;;
+    *) echo "error: unknown argument '$arg' — see --help" >&2; exit 64 ;;
   esac
 done
 

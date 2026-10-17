@@ -167,11 +167,11 @@ release_older() {
 # `scripts/review-update.sh --latest-release` resolves it. Run from the repo root.
 # Sets KIT_STATE (current|behind|newer|unreleased|unsynced|unknown) and KIT_NOTE.
 # The lookup is cached under the git common dir — a day when the hub answered, an
-# hour when it did not — and capped at KIT_CHECK_TIMEOUT seconds. Never fails.
+# hour when it did not — and capped at about KIT_CHECK_TIMEOUT seconds. Never fails.
 KIT_CHECK_TIMEOUT=5
 kit_staleness() {
   local f=.review/kit-version tab url installed ref cache now stamp cstate curl cval
-  local ttl latest="" why="" out rc
+  local ttl latest="" why="" out rc dir aged=""
   KIT_STATE=unknown; KIT_NOTE=""; tab="$(printf '\t')"
   if [ ! -f "$f" ]; then
     KIT_STATE=unsynced; KIT_NOTE="review kit version unknown: no $f (not synced by scripts/review-update.sh)"
@@ -191,13 +191,21 @@ kit_staleness() {
     return 0
   fi
 
-  cache="$(git rev-parse --git-common-dir 2>/dev/null)/review-kit-latest"
+  dir="$(git rev-parse --git-common-dir 2>/dev/null)"; cache="${dir:+$dir/review-kit-latest}"
   now="$(date +%s)"
-  if [ -f "$cache" ] && IFS="$tab" read -r stamp cstate curl cval < "$cache" 2>/dev/null; then
-    case "$stamp" in ''|*[!0-9]*) stamp=0 ;; esac
+  if [ -n "$cache" ] && [ -f "$cache" ] && IFS="$tab" read -r stamp cstate curl cval 2>/dev/null < "$cache"; then
+    case "$stamp" in ''|*[!0-9]*|?????????????*) stamp=0 ;; esac
     ttl=86400; [ "$cstate" = ok ] || ttl=3600
     if [ "$curl" = "$url" ] && [ "$now" -ge "$stamp" ] && [ $((now - stamp)) -lt "$ttl" ]; then
-      if [ "$cstate" = ok ]; then latest="$cval"; else why="$cval (cached)"; fi
+      aged=" (checked $(( (now - stamp) / 3600 ))h ago)"
+      if [ "$cstate" = ok ]; then
+        latest="$(printf '%s\n' "$cval" | grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+')" || latest=""
+        # a release newer than the cached answer proves the answer stale
+        [ -z "$latest" ] || ! release_older "$latest" "$installed" || latest=""
+        [ -n "$latest" ] || aged=""
+      elif [ "$cstate" = fail ] && [ -n "$cval" ]; then
+        why="$cval$aged"
+      fi
     fi
   fi
   if [ -z "$latest" ] && [ -z "$why" ]; then
@@ -207,9 +215,10 @@ kit_staleness() {
     elif ! out="$(mktemp 2>/dev/null)"; then
       why="no temp file for the lookup"
     else
-      run_with_timeout "$KIT_CHECK_TIMEOUT" env GIT_TERMINAL_PROMPT=0 REVIEW_KIT_URL="$url" \
+      run_with_timeout "$KIT_CHECK_TIMEOUT" env -u GIT_ASKPASS -u SSH_ASKPASS GIT_TERMINAL_PROMPT=0 \
+        GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh} -o BatchMode=yes" REVIEW_KIT_URL="$url" \
         bash scripts/review-update.sh --latest-release > "$out" 2>/dev/null; rc=$?
-      latest="$(head -n1 "$out" 2>/dev/null | grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+')"
+      latest="$(head -n1 "$out" 2>/dev/null | grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+')" || latest=""
       rm -f "$out"
       if [ "$rc" != 0 ] || [ -z "$latest" ]; then
         latest=""
@@ -218,21 +227,22 @@ kit_staleness() {
           137|143) why="$url did not answer within ${KIT_CHECK_TIMEOUT}s" ;;
           *)       why="could not reach $url" ;;
         esac
-        printf '%s\t%s\t%s\t%s\n' "$now" fail "$url" "$why" > "$cache.tmp.$$" 2>/dev/null
+        cstate=fail; cval="$why"
       else
-        printf '%s\t%s\t%s\t%s\n' "$now" ok "$url" "$latest" > "$cache.tmp.$$" 2>/dev/null
+        cstate=ok; cval="$latest"
       fi
-      mv -f "$cache.tmp.$$" "$cache" 2>/dev/null || rm -f "$cache.tmp.$$" 2>/dev/null
+      [ -z "$cache" ] || { printf '%s\t%s\t%s\t%s\n' "$now" "$cstate" "$url" "$cval" > "$cache.tmp.$$" \
+        && mv -f "$cache.tmp.$$" "$cache"; } 2>/dev/null || rm -f "$cache.tmp.$$" 2>/dev/null
     fi
   fi
 
   if [ -z "$latest" ]; then
     KIT_NOTE="review kit $installed — staleness unknown: $why"
   elif [ "$installed" = "$latest" ]; then
-    KIT_STATE=current; KIT_NOTE="review kit $installed is the latest release"
+    KIT_STATE=current; KIT_NOTE="review kit $installed is the latest release$aged"
   elif release_older "$installed" "$latest"; then
     KIT_STATE=behind
-    KIT_NOTE="review kit $installed is behind the latest release $latest — sync with scripts/review-update.sh"
+    KIT_NOTE="review kit $installed is behind the latest release $latest$aged — sync with scripts/review-update.sh"
   else
     KIT_STATE=newer; KIT_NOTE="review kit $installed is newer than $url's latest release $latest"
   fi

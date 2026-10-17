@@ -58,11 +58,13 @@ hazards, and a fire drill to prove the result. By hand, with a local hub
 clone supplying the updater:
 
 ```bash
+git -C ~/dev/private/codex-review-kit pull --ff-only
 bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
 ./scripts/review-install.sh          # per-machine setup
 ```
 
-The clone only supplies the script. The updater fetches the hub's latest
+The clone only supplies the script, so pull it first: an updater from before
+v1.3.0 installs the clone's working tree whatever you pass. The updater fetches the hub's latest
 release tag (highest `vN.N.N`) and installs that, or the tag or full SHA in
 `$REVIEW_KIT_REF`. If it cannot list or fetch the release, it fails rather
 than install something else. To sync unreleased hub changes onto a spoke

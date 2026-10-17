@@ -20,6 +20,8 @@ it bootstraps the files and does the adaptation properly. By hand:
 ```bash
 # The clone supplies the updater; it installs the hub's latest release tag.
 # Add --local to install the clone's working tree instead (unreleased).
+# Pull first: an updater from before v1.3.0 installs the working tree regardless.
+git -C ~/dev/private/codex-review-kit pull --ff-only
 bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
 ./scripts/review-install.sh
 ```
