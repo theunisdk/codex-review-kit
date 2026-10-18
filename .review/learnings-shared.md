@@ -40,7 +40,7 @@ before this file dilutes the prompts it feeds.
 - 2026-10-18: an error path reported "nothing written" after a remote write
   threw, but a rejected or timed-out call can still have committed. Flag any
   message or rollback that assumes a thrown remote call had no effect, unless
-  the code reads back or the write is conditional or idempotent.
+  the code first settles the outcome (a read-back, or a confirmed retry).
 - 2026-10-18: a "changed since shown?" guard compared a parsed summary, so two
   different unparseable values compared equal and a reset could overwrite the
   wrong one. A guard deciding whether data changed must compare the raw bytes
