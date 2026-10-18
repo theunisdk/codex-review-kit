@@ -307,8 +307,10 @@ runs `review.sh`, adjudicates headlessly, and scores the verdict with
 code, not the review that ran then. A live postmortem says what this PR's
 review missed; a replay says what the current kit would still miss. It
 posts nothing, files nothing and pushes nothing. Its record goes to
-`<git common dir>/review-replay/pr<n>-<kit>/`, never to `review-history/`,
-so `/review-tune` and later postmortems do not read it as history. See
+`<git common dir>/review-replay/pr<n>-<kit>/`, with each lens's raw output,
+and each run's scorecard to `review-replay/runs/<time>-<kit>/`. Neither goes
+to `review-history/`, so `/review-tune` and later postmortems do not read it
+as history. See
 OPERATING.md for what it costs and how to read it.
 
 Both commands **route** each lesson before writing it: repo-specific lessons

@@ -8,13 +8,15 @@
 # review.sh over the PR's base..that commit, adjudicates the findings with a
 # headless `claude -p`, and scores the verdict with `review-postmortem.md
 # --replay`. The record stays in the spoke clone, under
-# <git common dir>/review-replay/. Nothing is posted, filed or pushed.
+# <git common dir>/review-replay/, each run's scorecard under runs/. Nothing is
+# posted, filed or pushed.
 #
 #   scripts/review-replay.sh <spoke> <PR>...        # these PRs, in order
 #   scripts/review-replay.sh <spoke> --recent 7     # the 7 most recent merged
 #                                                   # PRs CodeRabbit reviewed
 #     --limit N           take at most N PRs (default 5); the rest are skipped
-#     --kit-ref REF       hub commit to overlay (default: the hub's main)
+#     --kit-ref REF       hub commit to overlay (default: the hub's main); a
+#                         branch behind its remote is refused
 #     --repo OWNER/NAME   GitHub repo (default: from the spoke's origin URL)
 #     --model M           claude model for adjudication and the postmortem
 #     --claude-budget USD per claude call (default 5)
@@ -29,7 +31,7 @@ HUB="$(cd "$(dirname "$0")/.." && pwd -P)"
 # shellcheck source=lib/common.sh
 . "$HUB/scripts/lib/common.sh"
 
-usage() { sed -n '2,25p' "$0" >&2; exit 64; }
+usage() { sed -n '2,27p' "$0" >&2; exit 64; }
 
 SPOKE=""; PRS=""; RECENT=""; LIMIT=5; KIT_REF=main; REPO=""; MODEL=""; BUDGET=5; REVIEW_ARGS=""
 SCAN=100; CLAUDE_TIMEOUT=1800; REVIEW_TIMEOUT=3600; NET_TIMEOUT=300
@@ -43,7 +45,7 @@ while [ $# -gt 0 ]; do
     --model)         MODEL="${2:-}"; shift ;;
     --claude-budget) BUDGET="${2:-}"; shift ;;
     --no-analyzers)  REVIEW_ARGS="--no-analyzers" ;;
-    -h|--help)       sed -n '2,25p' "$0"; exit 0 ;;
+    -h|--help)       sed -n '2,27p' "$0"; exit 0 ;;
     -*)              echo "error: unknown flag: $1" >&2; usage ;;
     *)               if [ -z "$SPOKE" ]; then SPOKE="$1"
                      else
@@ -54,9 +56,15 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ -n "$SPOKE" ] || usage
-for v in "$LIMIT" ${RECENT:+"$RECENT"}; do
-  case "$v" in ''|*[!0-9]*|0) echo "error: --limit and --recent take a positive number" >&2; exit 64 ;; esac
-done
+# count_arg <value> — the positive count it names, without leading zeros (07 is not a JSON
+# number, and the aggregate embeds them); at most 9 digits, so shell arithmetic cannot wrap it
+count_arg() {
+  local v="${1#"${1%%[!0]*}"}"
+  case "$v" in ''|*[!0-9]*|??????????*) return 1 ;; esac
+  printf '%s' "$v"
+}
+LIMIT="$(count_arg "$LIMIT")" && { [ -z "$RECENT" ] || RECENT="$(count_arg "$RECENT")"; } \
+  || { echo "error: --limit and --recent take a positive number of at most 9 digits" >&2; exit 64; }
 case "$BUDGET" in ''|*[!0-9.]*) echo "error: --claude-budget takes a dollar amount" >&2; exit 64 ;; esac
 if [ -n "$RECENT" ] && [ -n "$PRS" ]; then echo "error: name PRs or pass --recent, not both" >&2; exit 64; fi
 if [ -z "$RECENT" ] && [ -z "$PRS" ]; then echo "error: name at least one PR, or pass --recent N" >&2; exit 64; fi
@@ -104,14 +112,20 @@ remove_worktree() { # prints why on failure
   warn "could not remove the replay worktree $wt: $(head -n1 "$RUN_TMP/wt-remove.err") — run: git -C $SPOKE worktree remove --force $wt"
   return 1
 }
-CUR_PR=""
+CUR_PR=""; SUMMARY=""; SUMMARY_LOST=""; RUN_DONE=""
+say() { # say <line> — to stdout, and to the run's summary once it has one
+  printf '%s\n' "$1"
+  [ -z "$SUMMARY" ] || printf '%s\n' "$1" >> "$SUMMARY" || SUMMARY_LOST=1
+}
 # a trap can fire inside a call whose output is redirected; it reports on the script's own
 exec 3>&1 4>&2
 on_exit() {
   local rc=$?
   {
     stop_child; remove_worktree
-    [ -z "$CUR_PR" ] || echo "review-replay: failed — PR #$CUR_PR: interrupted: rc=$rc, nothing was recorded for it"
+    [ -z "$CUR_PR" ] || say "review-replay: failed — PR #$CUR_PR: interrupted: rc=$rc, nothing was recorded for it"
+    [ -z "$SUMMARY" ] || [ -n "$RUN_DONE" ] \
+      || printf 'review-replay: incomplete — the run exited %s before it finished, so it has no scorecard\n' "$rc" >> "$SUMMARY"
     rm -rf "$RUN_TMP"
   } >&3 2>&4
 }
@@ -120,6 +134,17 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 in_dir() { cd "$1" && shift && exec "$@"; }
+err_of() { head -c 300 "$1" 2>/dev/null | tr '\n' ' '; }
+codex_tokens() { # codex_tokens <raw dir> — the tokens every lens log reports, or "unknown" when one reports none
+  local f n s=0
+  for f in "$1"/log-*.txt; do
+    [ -e "$f" ] || continue
+    n="$(awk '/^tokens used$/ { if ((getline l) > 0 && l ~ /^[0-9,]+$/) { gsub(/,/, "", l); s += l; ok = 1 } } END { if (ok) print s }' "$f")"
+    [ -n "$n" ] || { echo unknown; return; }
+    s=$((s + n))
+  done
+  echo "$s"
+}
 
 # run_child <secs> <cmd...> — in its own process group with stdin closed, so an
 # interrupt or a timeout stops everything it started (review.sh's lenses too).
@@ -146,6 +171,49 @@ exit_why() {
   esac
 }
 
+# A clone behind its remote would replay an old kit and score it as today's. A branch or
+# remote-tracking ref is checked against the remote itself; a tag or a SHA names one commit.
+kit_is_current() {
+  local full remote rref up r
+  full="$(git -C "$HUB" rev-parse --symbolic-full-name "$KIT_REF" 2>/dev/null)"
+  case "$full" in
+    refs/heads/*)
+      remote="$(git -C "$HUB" config "branch.${full#refs/heads/}.remote")"
+      rref="$(git -C "$HUB" config "branch.${full#refs/heads/}.merge")"
+      [ -n "$remote" ] && [ -n "$rref" ] \
+        || { KIT_CHECK="unchecked: tracks no remote branch"; warn "--kit-ref $KIT_REF $KIT_CHECK, so the replay cannot check that it is current"; return 0; } ;;
+    refs/remotes/*)
+      # a remote name can hold a slash: the longest configured one that prefixes the ref owns it
+      remote=""
+      for r in $(git -C "$HUB" remote); do
+        case "$full" in "refs/remotes/$r/"*) [ "${#r}" -le "${#remote}" ] || remote="$r" ;; esac
+      done
+      [ -n "$remote" ] \
+        || die "--kit-ref $KIT_REF is a tracking ref of no remote the hub still has, so the replay cannot check that it is current — pass a tag or SHA"
+      rref="refs/heads/${full#refs/remotes/"$remote"/}"
+      [ "$rref" != refs/heads/HEAD ] || rref=HEAD ;;
+    *) KIT_CHECK="names one commit"; return 0 ;;
+  esac
+  run_with_timeout "$NET_TIMEOUT" git -C "$HUB" ls-remote "$remote" "$rref" < /dev/null > "$RUN_TMP/kit-remote" 2> "$RUN_TMP/kit-remote.err" \
+    || die "cannot read $rref from the hub's remote $remote, so the replay cannot check that --kit-ref $KIT_REF is current: $(err_of "$RUN_TMP/kit-remote.err") — pass a tag or SHA to replay without the check"
+  up="$(awk -v r="$rref" '$2 == r { print $1; exit }' "$RUN_TMP/kit-remote")"
+  [ -n "$up" ] || die "the hub's remote $remote has no $rref, which --kit-ref $KIT_REF tracks — pass a tag or SHA"
+  git -C "$HUB" cat-file -e "$up^{commit}" 2>/dev/null \
+    || run_with_timeout "$NET_TIMEOUT" git -C "$HUB" -c gc.auto=0 -c maintenance.auto=false fetch --quiet --no-write-fetch-head --no-tags --refmap= "$remote" "$rref" \
+      < /dev/null > "$RUN_TMP/kit-fetch.err" 2>&1 \
+    || die "cannot fetch $rref from the hub's remote $remote to check that --kit-ref $KIT_REF is current: $(err_of "$RUN_TMP/kit-fetch.err")"
+  git -C "$HUB" merge-base --is-ancestor "$up" "$KIT_SHA" 2> "$RUN_TMP/kit-anc.err"
+  case $? in
+    0) KIT_CHECK="current with $rref on $remote"
+       [ "$up" = "$KIT_SHA" ] || { KIT_CHECK="$(git -C "$HUB" rev-list --count "$up..$KIT_SHA") commit(s) ahead of $rref on $remote, unpushed"
+         warn "--kit-ref $KIT_REF is $KIT_CHECK, so the replay scores an unpushed kit"; } ;;
+    1) die "--kit-ref $KIT_REF ($KIT_SHORT) is behind $rref on $remote (${up:0:7}), so the replay would score an old kit — update the hub clone (git -C $HUB pull --ff-only), or pass a tag or SHA to replay an older kit on purpose" ;;
+    *) die "cannot compare --kit-ref $KIT_REF with $rref on $remote: $(err_of "$RUN_TMP/kit-anc.err")" ;;
+  esac
+}
+KIT_CHECK=""
+kit_is_current
+
 KIT_DIR="$RUN_TMP/kit"; mkdir -p "$KIT_DIR"
 git -C "$HUB" archive "$KIT_SHA" | tar -x -C "$KIT_DIR" || die "cannot extract the kit at $KIT_SHORT"
 grep -qF -- '--replay' "$KIT_DIR/.claude/commands/review-postmortem.md" 2>/dev/null \
@@ -157,7 +225,6 @@ if [ "${REVIEW_SKIP_AUTH_CHECK:-0}" != 1 ] && ! codex login status > /dev/null 2
   die "not authenticated to Codex — run 'codex login'"
 fi
 
-err_of() { head -c 300 "$1" 2>/dev/null | tr '\n' ' '; }
 is_ancestor() { # is_ancestor <a> <b> — sets ANC to yes or no; fails only on a git error
   git -C "$SPOKE" merge-base --is-ancestor "$1" "$2" 2> "$RUN_TMP/anc.err"
   case $? in 0) ANC=yes ;; 1) ANC=no ;; *) G_ERR="git merge-base --is-ancestor ${1:0:7} $2: $(err_of "$RUN_TMP/anc.err")"; return 1 ;; esac
@@ -174,6 +241,18 @@ have_commit "$DEFAULT_SHA" || fetch_commits "$DEFAULT_SHA" || die "cannot fetch 
 
 info "spoke $SPOKE ($REPO) · kit $KIT_DESC ($KIT_SHORT) · records in $STORE"
 
+# the run's own record: every line it prints, then its scorecard as aggregate.json
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$KIT_SHORT"
+mkdir -p "$STORE/runs" && { mkdir "$STORE/runs/$RUN_ID" 2>/dev/null || { RUN_ID="$RUN_ID-$$"; mkdir "$STORE/runs/$RUN_ID"; }; } \
+  || die "cannot create the run record under $STORE/runs"
+RUN_DIR="$STORE/runs/$RUN_ID"
+: > "$RUN_DIR/summary.txt" || die "cannot write $RUN_DIR/summary.txt"
+SUMMARY="$RUN_DIR/summary.txt"
+say_note() { warn "$1"; printf 'review-replay: note — %s\n' "$1" >> "$SUMMARY" || SUMMARY_LOST=1; }
+printf 'review-replay: run — spoke %s (%s) · kit %s (%s, %s)\n' "$SPOKE" "$REPO" "$KIT_DESC" "$KIT_SHORT" "$KIT_CHECK" >> "$SUMMARY" \
+  || die "cannot write $SUMMARY"
+die_run() { printf 'review-replay: failed — run: %s\n' "$*" >> "$SUMMARY"; die "$*"; }
+
 # --- per PR ----------------------------------------------------------------
 # A step sets R_STEP/R_MSG and returns 1 (failed) or 2 (skipped).
 R_STEP=""; R_MSG=""; R_LINE=""
@@ -187,7 +266,9 @@ gh_to() { # gh_to <file> <gh args...> — fails with gh's error
 }
 gh_pages() { # gh_pages <file> <api path> — every page, as one array
   gh_to "$1.pages" api --paginate "$2" || return 1
-  jq -s 'add // []' "$1.pages" > "$1" 2> "$1.err" || { G_ERR="gh api $2: unparseable response: $(err_of "$1.err")"; return 1; }
+  jq -s 'if length == 0 then error("no reply") elif all(type == "array") then add else error("not a list but \(map(type) | unique | join(", "))") end' \
+    "$1.pages" > "$1" 2> "$1.err" \
+    || { G_ERR="gh api $2: unparseable response: $(err_of "$1.err")"; return 1; }
 }
 
 # fetch the PR's GitHub data into $GH and find its first reviewed head (FIRST),
@@ -207,7 +288,9 @@ gather() {
   : > "$GH/statuses.pages"
   while read -r sha; do
     gh_pages "$GH/st-$sha.json" "repos/$REPO/commits/$sha/statuses" || { fail_at github "$G_ERR"; return; }
-    jq --arg s "$sha" '{sha: $s, statuses: .}' "$GH/st-$sha.json" >> "$GH/statuses.pages" && rm -f "$GH/st-$sha".*
+    jq --arg s "$sha" '{sha: $s, statuses: .}' "$GH/st-$sha.json" >> "$GH/statuses.pages" \
+      || { fail_at github "cannot read the statuses of ${sha:0:7}"; return; }
+    rm -f "$GH/st-$sha".*
   done < "$GH/pr-commits.txt"
   jq -s . "$GH/statuses.pages" > "$GH/statuses.json" || { fail_at github "cannot assemble statuses"; return; }
   rm -f "$GH"/*.pages "$GH"/*.err
@@ -246,8 +329,9 @@ overlay() {
     return
   fi
   # a PR can commit any of these as a symlink, and the overlay would write through it
-  p="$(git -C "$wt" ls-files -s -- .review scripts .claude .codex .githooks .claude-plugin REVIEW.md OPERATING.md \
-    | awk -F '\t' '{ split($1, m, " ") } m[1] == "120000" { print $2 }' | head -n3 | tr '\n' ' ')"
+  git -C "$wt" ls-files -s -- .review scripts .claude .codex .githooks .claude-plugin REVIEW.md OPERATING.md > "$REC_TMP/kit-paths.txt" \
+    || { fail_at kit "cannot list the kit's paths at ${FIRST:0:7}"; return; }
+  p="$(awk -F '\t' '{ split($1, m, " ") } m[1] == "120000" { print $2 }' "$REC_TMP/kit-paths.txt" | head -n3 | tr '\n' ' ')"
   [ -z "$p" ] || { skip_as "symlink in the kit's paths at ${FIRST:0:7} (${p% }): the kit overlay would write through it"; return; }
   # review.sh runs these two; a version that never merged would run unreviewed code
   [ "$from" != pr ] || [ -n "$MERGED" ] || { fail_at github "pulls/$CUR_PR has no merge_commit_sha to check its config against"; return; }
@@ -291,7 +375,7 @@ READ_RULES=("Bash(git log:*)" "Bash(git show:*)" "Bash(git diff:*)" "Bash(git re
   "Bash(git rev-list:*)" "Bash(git merge-base:*)" "Bash(git cat-file:*)" "Bash(git blame:*)" "Bash(jq:*)"
   "Bash(grep:*)" "Bash(wc:*)")
 claude_call() { # claude_call <out.json> <prompt> — in the worktree
-  local out="$1" prompt="$2" rc
+  local out="$1" prompt="$2" rc c
   local model_args=()
   [ -z "$MODEL" ] || model_args=(--model "$MODEL")
   run_child "$CLAUDE_TIMEOUT" in_dir "$CUR_WT" claude -p "$prompt" ${model_args[@]+"${model_args[@]}"} \
@@ -302,7 +386,11 @@ claude_call() { # claude_call <out.json> <prompt> — in the worktree
       "Bash(git * --output*)" "Bash(git * --ext-diff*)" "Bash(git * --textconv*)" \
     --allowedTools "${READ_RULES[@]}" > "$out" 2> "$out.err"
   rc=$?
-  COST="$(jq -n --argjson a "${COST:-0}" --argjson b "$(jq '.total_cost_usd // 0' "$out" 2>/dev/null || echo 0)" '$a + $b')"
+  if c="$(jq -e '.total_cost_usd | numbers' "$out" 2>/dev/null)"; then
+    COST="$(jq -n --argjson a "${COST:-0}" --argjson b "$c" '$a + $b')"
+  else
+    COST_UNKNOWN=$((COST_UNKNOWN + 1))
+  fi
   if [ "$rc" != 0 ] && ! jq -e . "$out" > /dev/null 2>&1; then
     G_ERR="claude $(exit_why "$rc" "$CLAUDE_TIMEOUT"): $(err_of "$out.err")"; return 1
   fi
@@ -311,16 +399,16 @@ claude_call() { # claude_call <out.json> <prompt> — in the worktree
 }
 
 replay_pr() {
-  local n="$1" base_tip base wt branch verdict body json rel first_line separates
-  REC="$STORE/pr$n-$KIT_SHORT"; COST=0; R_COUNTS=""; CODEX_TOKENS=0; UNFETCHED=0
+  local n="$1" base_tip base wt branch verdict body json rel first_line separates raw_err f
+  REC="$STORE/pr$n-$KIT_SHORT"; COST=0; COST_UNKNOWN=0; R_COUNTS=""; CODEX_TOKENS=0
   if [ -z "${GATHERED:-}" ]; then
     REC_TMP="$RUN_TMP/pr$n"; rm -rf "$REC_TMP"; mkdir -p "$REC_TMP"
     gather "$n" || return
   fi
   GATHERED=""
   [ -n "$FIRST" ] || { skip_as "CodeRabbit has not reviewed PR #$n"; return; }
-  rel="$(jq -r '.state // ""' "$GH/pr.json")"
-  [ "$rel" = MERGED ] || { skip_as "PR #$n is ${rel:-of unknown state}, not merged: a replay runs the commit's own .review/config.sh and analyzers.local.sh"; return; }
+  rel="$(jq -r '.state // ""' "$GH/pr.json")" && [ -n "$rel" ] || { fail_at github "gh pr view gave no state for PR #$n"; return; }
+  [ "$rel" = MERGED ] || { skip_as "PR #$n is $rel, not merged: a replay runs the commit's own .review/config.sh and analyzers.local.sh"; return; }
   short="${FIRST:0:7}"
   base_tip="$(jq -r '.base.sha // empty' "$GH/pull.json")"
   branch="$(jq -r '.headRefName // "replay"' "$GH/pr.json")"
@@ -332,12 +420,16 @@ replay_pr() {
   for rel in "$FIRST" "$base_tip" ${MERGED:+"$MERGED"}; do
     have_commit "$rel" || fetch_commits "$rel" || { fail_at fetch "$G_ERR"; return; }
   done
-  # commits CodeRabbit commented on after a force-push; a miss surfaces as compare_failed
-  jq -r --arg cr "$CR_LOGIN" '.[] | select(.user.login == $cr) | (.original_commit_id // .commit_id // empty)' \
-    "$GH/comments.json" "$GH/reviews.json" 2>/dev/null | sort -u > "$REC_TMP/commented.txt"
-  UNFETCHED=0
+  # commits CodeRabbit commented on after a force-push: one the postmortem cannot read would
+  # turn its findings into unscored ones, so a commit that cannot be fetched fails the PR
+  # one input: given two files, jq goes on past an error in the first and exits 0
+  jq -rs --arg cr "$CR_LOGIN" 'add | .[] | select(.user.login == $cr) | (.original_commit_id // .commit_id // empty)' \
+    "$GH/comments.json" "$GH/reviews.json" > "$REC_TMP/commented.all" 2> "$REC_TMP/commented.err" \
+    || { fail_at github "cannot list the commits CodeRabbit commented on: $(err_of "$REC_TMP/commented.err")"; return; }
+  sort -u "$REC_TMP/commented.all" > "$REC_TMP/commented.txt" || { fail_at github "cannot list the commits CodeRabbit commented on"; return; }
   while read -r rel; do
-    have_commit "$rel" || fetch_commits "$rel" || { UNFETCHED=$((UNFETCHED + 1)); warn "PR #$n: cannot fetch $rel, findings on it will be unscored"; }
+    have_commit "$rel" || fetch_commits "$rel" \
+      || { fail_at fetch "cannot fetch ${rel:0:7}, which CodeRabbit commented on, so its findings would go unscored: $G_ERR"; return; }
   done < "$REC_TMP/commented.txt"
 
   # --- base: where the reviewed commit left the base branch
@@ -353,7 +445,7 @@ replay_pr() {
       fi
     fi
     [ "$separates" = yes ] || { fail_at base "the base branch tip ${base_tip:0:7} already contains $short, and no merge commit separates them"; return; }
-    base_tip="$(git -C "$SPOKE" rev-parse "$rel^1")"
+    base_tip="$(git -C "$SPOKE" rev-parse --verify -q "$rel^1")" || { fail_at base "cannot read the first parent of ${rel:0:7}"; return; }
   fi
   base="$(git -C "$SPOKE" merge-base "$FIRST" "$base_tip")" || { fail_at base "no merge base of $short and ${base_tip:0:7}"; return; }
 
@@ -372,14 +464,23 @@ replay_pr() {
   # shellcheck disable=SC2086
   run_child "$REVIEW_TIMEOUT" in_dir "$wt" bash scripts/review.sh --fail-on none $REVIEW_ARGS "$base" > "$REC_TMP/review.log" 2>&1
   rel=$?
-  CODEX_TOKENS="$(cat "$wt"/.review/raw/log-*.txt 2>/dev/null | awk '/^tokens used$/ { getline; gsub(/,/, ""); s += $0 } END { print s + 0 }')"
+  CODEX_TOKENS="$(codex_tokens "$wt/.review/raw")"
   [ -f "$wt/.review/findings.json" ] && cp "$wt/.review/findings.json" "$wt/.review/findings.md" "$REC_TMP/" 2>/dev/null
+  # each lens's own output, so a miss can be checked against what the lens returned
+  raw_err=""
+  mkdir -p "$REC_TMP/raw" || raw_err="cannot create $REC_TMP/raw"
+  for f in "$wt"/.review/raw/out-*.json "$wt"/.review/raw/log-*.txt; do
+    [ -e "$f" ] || continue
+    cp "$f" "$REC_TMP/raw/" || raw_err="cannot keep .review/raw/${f##*/}"
+  done
   [ "$rel" = 0 ] || { fail_at review "review.sh $(exit_why "$rel" "$REVIEW_TIMEOUT"): $(grep -E 'error:' "$REC_TMP/review.log" | tail -n1)"; return; }
   jq -e . "$REC_TMP/findings.json" > /dev/null 2>&1 || { fail_at review "no readable .review/findings.json"; return; }
   [ "$(jq '.changed_files // 0' "$REC_TMP/findings.json")" -gt 0 ] \
     || { fail_at review "nothing was reviewed (changed_files 0) over ${base:0:7}..$short"; return; }
   jq -e '.complete == true' "$REC_TMP/findings.json" > /dev/null \
     || { fail_at review "incomplete run: $(jq -c '{lenses_failed, unreadable_paths, secrets_scan}' "$REC_TMP/findings.json")"; return; }
+  [ -z "$raw_err" ] || { fail_at review "$raw_err"; return; }
+  ls "$REC_TMP"/raw/out-*.json > /dev/null 2>&1 || { fail_at review "review.sh left no lens output in .review/raw"; return; }
 
   # --- adjudicate: the verdict /review would write, with nothing applied
   claude_call "$REC_TMP/adjudicate.json" "Replay adjudication of PR #$n, commit $FIRST.
@@ -398,8 +499,8 @@ Read .review/adjudication.md and follow it, steps 2 to 5, with the deltas in its
   cp "$verdict" "$wt/.review/verdict.md"
 
   # --- postmortem: score the verdict against CodeRabbit, record only
-  mkdir -p "$wt/.review/replay"
-  cp "$GH"/*.json "$GH/pr-commits.txt" "$wt/.review/replay/"
+  mkdir -p "$wt/.review/replay" && cp "$GH"/*.json "$GH/pr-commits.txt" "$wt/.review/replay/" \
+    || { fail_at postmortem "cannot copy the GitHub data into the worktree"; return; }
   claude_call "$REC_TMP/postmortem.json" "Replay postmortem of PR #$n.
 
 Read .claude/commands/review-postmortem.md and follow it with the arguments: $n --replay .review/replay
@@ -432,15 +533,16 @@ Its \"Replay mode\" section says what changes: the GitHub data is already in .re
   # --- record: the replay's own facts merged into the postmortem's JSON
   jq --arg ref "$KIT_REF" --arg sha "$KIT_SHA" --arg desc "$KIT_DESC" --arg base "$base" \
      --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson owned "$OWNED" --argjson cost "$COST" \
-     --argjson tokens "${CODEX_TOKENS:-0}" '. + {replay: {kit_ref: $ref, kit_sha: $sha, kit_describe: $desc,
-       base: $base, repo_owned: $owned, date: $date, cost: {claude_usd: $cost, codex_tokens: $tokens}}}' \
+     --argjson cu "$COST_UNKNOWN" --arg tokens "$CODEX_TOKENS" '. + {replay: {kit_ref: $ref, kit_sha: $sha, kit_describe: $desc,
+       base: $base, repo_owned: $owned, date: $date,
+       cost: {claude_usd: (if $cu > 0 then null else $cost end), codex_tokens: ($tokens | tonumber? // null)}}}' \
     "$json" > "$json.tmp" && mv "$json.tmp" "$json" || { fail_at record "cannot merge the replay facts"; return; }
   {
     printf '<!-- review-replay:v1 -->\n'
     printf '> **Replay** of kit `%s` (%s) on the commit CodeRabbit first reviewed. It scores today'"'"'s kit, not the review that ran on this PR.\n\n' "$KIT_SHORT" "$KIT_DESC"
     awk -v f="$json" '/^```json[[:space:]]*$/ && !done { print; while ((getline l < f) > 0) print l; skip = 1; next }
       skip && /^```[[:space:]]*$/ { skip = 0; done = 1 } !skip' "$body"
-  } > "$REC_TMP/postmortem.md"
+  } > "$REC_TMP/postmortem.md" || { fail_at record "cannot write postmortem.md"; return; }
   R_COUNTS="$(jq -r '"caught \(.counts.caught) / missed \(.counts.missed) / rejected-wrongly \(.counts.rejected_wrongly) / noise \(.counts.noise) / unscored \(.counts.unscored)"' "$json")"
 }
 
@@ -457,30 +559,43 @@ save_record() { # save_record <rc>
 }
 
 # --- the PR list -----------------------------------------------------------
-N_REPLAYED=0; N_SKIPPED=0; N_FAILED=0; N_UNREVIEWED=0; TOTAL_COST=0; TOTAL_TOKENS=0; RECORDS="$RUN_TMP/records.txt"; : > "$RECORDS"
+N_REPLAYED=0; N_SKIPPED=0; N_FAILED=0; N_UNREVIEWED=0; TOTAL_COST=0; TOTAL_TOKENS=0
+N_COST_UNKNOWN=0; N_TOKENS_UNKNOWN=0; RECENT_JSON=null
+# cost_of <usd> <calls of unknown cost> <tokens or "unknown">
+cost_of() {
+  printf 'claude $%.2f' "$1"
+  [ "$2" = 0 ] || printf ' + unknown for %s call(s)' "$2"
+  if [ "$3" = unknown ]; then printf ', codex tokens unknown'; else printf ', codex %s tokens' "$3"; fi
+}
 report() { # report <rc> <n>
-  local cost="claude \$$(printf '%.2f' "${COST:-0}"), codex ${CODEX_TOKENS:-0} tokens"
+  local cost
+  cost="$(cost_of "${COST:-0}" "${COST_UNKNOWN:-0}" "${CODEX_TOKENS:-0}")"
   case "$1" in
     0) R_LINE="review-replay: replayed — PR #$2 ($short, kit $KIT_SHORT): $R_COUNTS · cost $cost" ;;
     2) R_LINE="review-replay: skipped — PR #$2: $R_MSG" ;;
     *) R_LINE="review-replay: failed — PR #$2: $R_STEP: $R_MSG"
-       [ "${CODEX_TOKENS:-0}" = 0 ] && [ "$(printf '%.2f' "${COST:-0}")" = 0.00 ] || R_LINE="$R_LINE · cost so far $cost" ;;
+       [ "$cost" = "claude \$0.00, codex 0 tokens" ] || R_LINE="$R_LINE · cost so far $cost" ;;
   esac
   TOTAL_COST="$(jq -n --argjson a "$TOTAL_COST" --argjson b "${COST:-0}" '$a + $b')"
-  TOTAL_TOKENS=$((TOTAL_TOKENS + ${CODEX_TOKENS:-0}))
-  [ "$1" != 0 ] || [ "${UNFETCHED:-0}" = 0 ] || R_LINE="$R_LINE · $UNFETCHED commented commit(s) not fetched"
+  N_COST_UNKNOWN=$((N_COST_UNKNOWN + ${COST_UNKNOWN:-0}))
+  if [ "${CODEX_TOKENS:-0}" = unknown ]; then N_TOKENS_UNKNOWN=$((N_TOKENS_UNKNOWN + 1))
+  else TOTAL_TOKENS=$((TOTAL_TOKENS + ${CODEX_TOKENS:-0})); fi
   LOGS=""
+  # the run's scorecard reads its own copy: a later run can replace $REC before this one ends
+  if [ "$1" = 0 ] && ! cp "$REC_TMP/record.json" "$RUN_TMP/record-$((N_REPLAYED + 1)).json"; then
+    R_LINE="review-replay: failed — PR #$2: record: cannot keep a copy for the run's scorecard"; set -- 1 "$2"
+  fi
   if [ -d "${REC_TMP:-}" ] && ! save_record "$1"; then
     LOGS=""
     if [ "$1" = 0 ]; then R_LINE="review-replay: failed — PR #$2: record: cannot write $REC"; set -- 1 "$2"
     else R_LINE="$R_LINE (logs not saved: cannot write $REC)"; fi
   fi
   case "$1" in
-    0) N_REPLAYED=$((N_REPLAYED + 1)); printf '%s\n' "$REC/record.json" >> "$RECORDS"; R_LINE="$R_LINE · record $REC/postmortem.md" ;;
+    0) N_REPLAYED=$((N_REPLAYED + 1)); R_LINE="$R_LINE · record $REC/postmortem.md" ;;
     2) N_SKIPPED=$((N_SKIPPED + 1)) ;;
     *) N_FAILED=$((N_FAILED + 1)); [ -z "$LOGS" ] || R_LINE="$R_LINE (logs: $LOGS)" ;;
   esac
-  printf '%s\n' "$R_LINE"
+  say "$R_LINE"
 }
 
 run_one() {
@@ -497,12 +612,14 @@ ATTEMPTED=0
 if [ -n "$RECENT" ]; then
   LIST="$RUN_TMP/merged.json"
   gh_to "$LIST" pr list -R "$REPO" --state merged --limit "$SCAN" --json number,mergedAt \
-    || die "cannot list merged PRs: $G_ERR"
-  jq -e 'type == "array"' "$LIST" > /dev/null 2>&1 || die "gh pr list returned no PR list: $(head -c 200 "$LIST")"
+    || die_run "cannot list merged PRs: $G_ERR"
+  jq -e 'type == "array"' "$LIST" > /dev/null 2>&1 || die_run "gh pr list returned no PR list: $(head -c 200 "$LIST")"
+  NUMS="$(jq -r 'sort_by(.mergedAt) | reverse | .[].number' "$LIST" 2> "$RUN_TMP/list.err")" \
+    || die_run "cannot read the merged PR list: $(err_of "$RUN_TMP/list.err")"
   FOUND=0
-  for n in $(jq -r 'sort_by(.mergedAt) | reverse | .[].number' "$LIST"); do
+  for n in $NUMS; do
     [ "$FOUND" -lt "$RECENT" ] || break
-    REC_TMP="$RUN_TMP/pr$n"; rm -rf "$REC_TMP"; mkdir -p "$REC_TMP"; REC="$STORE/pr$n-$KIT_SHORT"; short=""; COST=0; CODEX_TOKENS=0
+    REC_TMP="$RUN_TMP/pr$n"; rm -rf "$REC_TMP"; mkdir -p "$REC_TMP"; REC="$STORE/pr$n-$KIT_SHORT"; short=""; COST=0; COST_UNKNOWN=0; CODEX_TOKENS=0
     CUR_PR="$n"; gather "$n"; rc=$?; CUR_PR=""
     if [ "$rc" = 0 ] && [ -z "$FIRST" ]; then N_UNREVIEWED=$((N_UNREVIEWED + 1)); rm -rf "$REC_TMP"; continue; fi
     FOUND=$((FOUND + 1))
@@ -510,17 +627,22 @@ if [ -n "$RECENT" ]; then
     if [ "$ATTEMPTED" -ge "$LIMIT" ]; then R_MSG="--limit $LIMIT reached"; REC_TMP=""; report 2 "$n"; continue; fi
     ATTEMPTED=$((ATTEMPTED + 1)); GATHERED=1; run_one "$n"
   done
-  [ "$FOUND" -ge "$RECENT" ] || warn "found $FOUND CodeRabbit-reviewed PR(s) among the $SCAN most recent merged PRs, not $RECENT"
+  [ "$FOUND" -ge "$RECENT" ] || say_note "found $FOUND CodeRabbit-reviewed PR(s) among the $SCAN most recent merged PRs, not $RECENT"
+  RECENT_JSON="{\"asked\": $RECENT, \"found\": $FOUND, \"scanned\": $SCAN}"
 else
   for n in $PRS; do
-    if [ "$ATTEMPTED" -ge "$LIMIT" ]; then R_MSG="--limit $LIMIT reached"; REC_TMP=""; short=""; COST=0; CODEX_TOKENS=0; report 2 "$n"; continue; fi
+    if [ "$ATTEMPTED" -ge "$LIMIT" ]; then R_MSG="--limit $LIMIT reached"; REC_TMP=""; short=""; COST=0; COST_UNKNOWN=0; CODEX_TOKENS=0; report 2 "$n"; continue; fi
     ATTEMPTED=$((ATTEMPTED + 1)); run_one "$n"
   done
 fi
 
 # --- aggregate -------------------------------------------------------------
-AGG="$RUN_TMP/aggregate.json"
-while IFS= read -r f; do cat "$f" || exit 1; done < "$RECORDS" | jq -s . > "$AGG" || die "cannot read the records back"
+AGG="$RUN_DIR/aggregate.json"
+i=0; : > "$RUN_TMP/records.all" || die_run "cannot read the records back"
+while [ "$i" -lt "$N_REPLAYED" ]; do
+  i=$((i + 1)); cat "$RUN_TMP/record-$i.json" >> "$RUN_TMP/records.all" || die_run "cannot read the records back"
+done
+jq -s . "$RUN_TMP/records.all" > "$RUN_TMP/records.json" || die_run "cannot read the records back"
 jq -r --argjson r "$N_REPLAYED" --argjson s "$N_SKIPPED" --argjson f "$N_FAILED" --argjson u "$N_UNREVIEWED" '
   def sum(p): map(p // 0) | add // 0;
   "review-replay: aggregate — replayed \($r) / skipped \($s) / failed \($f)"
@@ -533,6 +655,26 @@ jq -r --argjson r "$N_REPLAYED" --argjson s "$N_SKIPPED" --argjson f "$N_FAILED"
     | group_by(.cause) | .[]
     | "lessons — \(.[0].cause) (\(map(select(.what | startswith("missed"))) | length) missed):",
       (.[] | "  PR #\(.pr) \(.what)") )
-' "$AGG"
-printf 'review-replay: cost — claude $%.2f, codex %s tokens, failed and skipped PRs included\n' "$TOTAL_COST" "$TOTAL_TOKENS"
+' "$RUN_TMP/records.json" > "$RUN_TMP/scorecard.txt" || die_run "cannot sum the records"
+printf 'review-replay: cost — %s, failed and skipped PRs included\n' \
+  "$(cost_of "$TOTAL_COST" "$N_COST_UNKNOWN" "$TOTAL_TOKENS")$([ "$N_TOKENS_UNKNOWN" = 0 ] || printf ' + unknown for %s PR(s)' "$N_TOKENS_UNKNOWN")" \
+  >> "$RUN_TMP/scorecard.txt" || die_run "cannot sum the cost"
+while IFS= read -r l; do say "$l"; done < "$RUN_TMP/scorecard.txt"
+jq --arg run "$RUN_ID" --arg repo "$REPO" --arg ref "$KIT_REF" --arg sha "$KIT_SHA" --arg desc "$KIT_DESC" \
+   --argjson r "$N_REPLAYED" --argjson s "$N_SKIPPED" --argjson f "$N_FAILED" --argjson u "$N_UNREVIEWED" --argjson recent "$RECENT_JSON" \
+   --argjson cost "$TOTAL_COST" --argjson cu "$N_COST_UNKNOWN" --argjson tokens "$TOTAL_TOKENS" --argjson tu "$N_TOKENS_UNKNOWN" --arg check "$KIT_CHECK" \
+   --rawfile summary "$SUMMARY" '
+  def sum(p): map(p // 0) | add // 0;
+  {schema: "review-replay-run/v1", run: $run, repo: $repo, kit: {ref: $ref, sha: $sha, describe: $desc, check: $check}, recent: $recent,
+   prs: {replayed: $r, skipped: $s, failed: $f, unreviewed_passed_over: $u},
+   counts: {caught: sum(.counts.caught), missed: sum(.counts.missed), rejected_wrongly: sum(.counts.rejected_wrongly),
+            noise: sum(.counts.noise), unscored: sum(.counts.unscored)},
+   missed_by_cause: {wrong_lens: sum(.missed_by_cause.wrong_lens), tracing: sum(.missed_by_cause.tracing),
+                     threshold: sum(.missed_by_cause.threshold), structural: sum(.missed_by_cause.structural)},
+   cost: {claude_usd: $cost, claude_calls_of_unknown_cost: $cu, codex_tokens: $tokens, prs_of_unknown_codex_tokens: $tu},
+   summary: ($summary | split("\n") | map(select(. != ""))),
+   records: .}' "$RUN_TMP/records.json" > "$AGG.tmp" && mv "$AGG.tmp" "$AGG" || die_run "cannot write $AGG"
+[ -z "$SUMMARY_LOST" ] || die "cannot write every line to $SUMMARY, so the run record is incomplete"
+RUN_DONE=1
+printf 'review-replay: run record — %s\n' "$RUN_DIR"
 [ "$N_FAILED" = 0 ]
