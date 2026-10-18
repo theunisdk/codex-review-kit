@@ -2206,6 +2206,17 @@ test_update_pins_a_release_without_the_sync_script() {
   assert     "u21: the pin installs" test "$rc" -eq 0
   assert     "u21: kit-version records it" grep -qx 'release: v0.9.0' "$spoke/.review/kit-version"
   assert_not "u21: no sync script appears" test -e "$spoke/scripts/review-sync.sh"
+
+  local old="$WORK/u21-old" ispoke="$WORK/u21-init"
+  make_hub "$old"
+  ( cd "$old" && cp -R "$KIT"/templates . && rm templates/review-kit-sync.yml && git rm -q scripts/review-sync.sh \
+      && git add -A && git commit -qm old )
+  make_spoke "$ispoke"
+  run_update_init "$ispoke" REVIEW_KIT_DIR="$old"; rc=$?
+  assert     "u21: --init from a kit without the template installs" test "$rc" -eq 0
+  assert     "u21: and records the kit" test -f "$ispoke/.review/kit-version"
+  assert_not "u21: no empty workflow is left behind" test -e "$ispoke/.github/workflows/review-kit-sync.yml"
+  assert     "u21: and says why it seeded none" grep -q 'has no templates/review-kit-sync.yml' "$LOG"
 }
 
 # --- installer fixtures ----------------------------------------------------

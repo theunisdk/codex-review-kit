@@ -249,11 +249,14 @@ if [ "$INIT" = 1 ]; then
   cron="$((n % 60)) $((n / 60 % 24)) * * $((n / 1440 % 7))"
   if [ "$sync_opt" = 0 ]; then
     echo "note: $wf not seeded — .review/config.sh sets KIT_SYNC_ACTION=0" >&2
+  elif [ ! -f "$KIT/templates/review-kit-sync.yml" ]; then
+    echo "note: $wf not seeded — kit $KIT_DESC has no templates/review-kit-sync.yml" >&2
   elif [ -z "$sync_opt" ]; then
     echo "warn: $wf not seeded — .review/config.sh could not be read to check KIT_SYNC_ACTION" >&2
   elif [ ! -e "$wf" ]; then
     mkdir -p .github/workflows
-    sed "s|@CRON@|$cron|" "$KIT/templates/review-kit-sync.yml" > "$wf"
+    sed "s|@CRON@|$cron|" "$KIT/templates/review-kit-sync.yml" > "$wf.tmp"
+    mv "$wf.tmp" "$wf"
     echo "seeded $wf (weekly, cron '$cron') — opt out with KIT_SYNC_ACTION=0 in .review/config.sh" >&2
   elif ! sed "s|@CRON@|$cron|" "$KIT/templates/review-kit-sync.yml" | cmp -s - "$wf"; then
     echo "note: kept $wf — it differs from the kit's template (templates/review-kit-sync.yml); delete it and re-run --init to take the template" >&2
