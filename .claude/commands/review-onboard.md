@@ -45,8 +45,8 @@ one by default.
   REF="${REVIEW_KIT_REF:-${LATEST:+v$LATEST}}"
   [ -n "$REF" ] || { echo "stopped: no release tag on $KIT — set REVIEW_KIT_REF" >&2; exit 1; }
   if printf '%s\n' "$REF" | grep -Eqx '[0-9a-f]{40}'; then SHA=$REF
-  else SHA=$(printf '%s\n' "$TAGS" | awk -v t="refs/tags/$REF" \
-      '$2 == t {s=$1} $2 == (t "^{}") {p=$1} END {print (p != "" ? p : s)}')
+  else SHA=$(printf '%s\n' "$TAGS" | awk -v t="refs/tags/$REF" -v sha=1 -v ref=2 \
+      '$ref == t {s=$sha} $ref == (t "^{}") {p=$sha} END {print (p != "" ? p : s)}')
   fi
   [ -n "$SHA" ] || { echo "stopped: '$REF' is neither a tag on $KIT nor a full commit SHA" >&2; exit 1; }
   RU=$(mktemp) \

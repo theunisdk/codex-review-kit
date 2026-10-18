@@ -70,6 +70,19 @@ finding() { # finding <title> — one schema-shaped, above-threshold finding
   printf '{"findings":[{"file":"src.txt","line_start":1,"line_end":1,"severity":"high","category":"correctness","title":"%s","why_it_matters":"stub","evidence":"stub","suggested_fix":"stub","confidence":0.9}]}' "$1"
 }
 
+# Claude Code fills a command or skill body in before the model sees it: $<n>
+# becomes argument n, counted from 0, and is left as written past the last one.
+expand_positional() { # expand_positional [arg ...] — stdin, filled in as for `/<command> arg ...`
+  awk -v args="$*" 'BEGIN { n = split(args, a, " ") }
+    { s = $0; o = ""
+      while (match(s, /\$[0-9]+/)) {
+        i = substr(s, RSTART + 1, RLENGTH - 1) + 0
+        o = o substr(s, 1, RSTART - 1) (i < n ? a[i + 1] : substr(s, RSTART, RLENGTH))
+        s = substr(s, RSTART + RLENGTH)
+      }
+      print o s }'
+}
+
 LOG=""
 run_review() { # run_review <dir> <stubdir> <review.sh args...>; output in $LOG
   local dir="$1" stub="$2"; shift 2
@@ -1410,7 +1423,7 @@ bootstrap_block() { # bootstrap_block <md file> — the fenced block that runs l
 
 # Runs the onboard bootstrap against a local hub: curl is stubbed to read the
 # hub at the commit in the URL, and less is a no-op.
-run_bootstrap() { # run_bootstrap <spoke> <hub> [VAR=val ...] — output in $LOG
+run_bootstrap() { # run_bootstrap <spoke> <hub> [VAR=val ...] — output in $LOG; BOOT_ARGS: /review-onboard's arguments
   local dir="$1" hub="$2"; shift 2
   LOG="$dir.log"
   mkdir -p "$WORK/nohome" "$WORK/bootbin"
@@ -1423,7 +1436,7 @@ git -C "$BOOT_HUB" show "$sha:scripts/review-update.sh" > "$out"
 EOF
   printf '#!/bin/sh\nexit 0\n' > "$WORK/bootbin/less"
   chmod +x "$WORK/bootbin/curl" "$WORK/bootbin/less"
-  bootstrap_block "$KIT/.claude/commands/review-onboard.md" \
+  bootstrap_block "$KIT/.claude/commands/review-onboard.md" | expand_positional ${BOOT_ARGS:-} \
     | sed "s|^\\( *\\)KIT=https://.*|\\1KIT=file://$hub|" > "$dir.boot.sh"
   grep -q "KIT=file://" "$dir.boot.sh" || { echo "run_bootstrap: KIT not redirected" > "$LOG"; return 99; }
   ( cd "$dir" && env -i HOME="$WORK/nohome" PATH="$WORK/bootbin:$PATH" BOOT_HUB="$hub" \
@@ -1469,6 +1482,11 @@ test_bootstrap_pins_and_refuses_a_branch() {
   assert_not "b2: branch tip content NOT installed" grep -q 'MARKER: tip' "$spoke/REVIEW.md"
   assert     "b2: kit-version records the tag's commit" grep -q "^ref: $sha\$" "$spoke/.review/kit-version"
   assert     "b2: installer ran" grep -q 'INSTALL-RAN' "$LOG"
+
+  rm -rf "$spoke"; make_spoke "$spoke"
+  BOOT_ARGS="notes about the repo" run_bootstrap "$spoke" "$hub"; rc=$?
+  assert     "b2: … and the same when /review-onboard is given arguments" \
+    sh -c '[ "$1" -eq 0 ] && grep -q "^ref: $2\$" "$3"' _ "$rc" "$sha" "$spoke/.review/kit-version"
 
   rm -rf "$spoke"; make_spoke "$spoke"
   run_bootstrap "$spoke" "$hub" REVIEW_KIT_REF=main; rc=$?
@@ -2219,7 +2237,7 @@ postmortem_snippet() { # postmortem_snippet <first> <pr-commit-file> — the doc
 }
 
 test_postmortem_finds_the_verdict_for_the_reviewed_commit() {
-  local repo="$WORK/p1" wt="$WORK/p1-wt" out="$WORK/p1.out" prs="$WORK/p1.commits" hist snippet a b o p rc
+  local repo="$WORK/p1" wt="$WORK/p1-wt" out="$WORK/p1.out" prs="$WORK/p1.commits" hist snippet a b o p rc rc2
   make_repo "$repo"
   ( cd "$repo" && git checkout -qb prev main && printf 'p\n' > p.txt && git add p.txt && git commit -qm prev \
       && git checkout -q main && git merge -q --no-ff prev -m 'merge prev' \
@@ -2251,8 +2269,11 @@ test_postmortem_finds_the_verdict_for_the_reviewed_commit() {
   printf '# Spec verdict — change — %s — 2026-01-01\n' "${b:0:7}" > "$hist/spec-2026-01-01-${b:0:7}-3.md"
   printf '<!-- review-postmortem:v1 -->\n# Review verdict — change — %s — 2026-01-01\n' "${b:0:7}" > "$hist/postmortem-pr1.md"
   ( cd "$repo" && bash -c "$snippet" ) > "$out" 2>&1; rc=$?
+  ( cd "$repo" && bash -c "$(expand_positional 50 --record-only <<< "$snippet")" ) > "$WORK/p1.expanded" 2>&1; rc2=$?
 
   assert "p1: the listing succeeds" test "$rc" -eq 0
+  assert "p1: … and lists the same for /review-postmortem 50 --record-only" \
+    sh -c '[ "$1" -eq 0 ] && [ -s "$2" ] && cmp -s "$2" "$3"' _ "$rc2" "$out" "$WORK/p1.expanded"
   assert "p1: the live verdict for the reviewed commit is 'same'" grep -qE "^same ${b:0:7} 1 .*/p1/\.review/verdict\.md$" "$out"
   assert "p1: an archived verdict for an earlier commit is 'ancestor'" grep -qE "^ancestor $a 1 .*/code-2026-01-01-$a-1\.md$" "$out"
   assert "p1: … and so is a second verdict in one file, at its own line" grep -qE "^ancestor $a 5 .*/code-2026-01-01-deadbeef-2\.md$" "$out"
@@ -2300,6 +2321,23 @@ test_postmortem_finds_the_verdict_for_the_reviewed_commit() {
   else
     skip_test "p1: unreadable review history (running as root)"
   fi
+}
+
+# Every $<n> is rewritten, prose included ("$5 per run"). Codex does not fill
+# skill bodies in, but its model reads a $<n> there as an argument.
+test_expanded_files_hold_no_positional_refs() {
+  local f files=() hits rc
+  for f in "$KIT"/.claude/commands/*.md "$KIT"/.claude/skills/*/SKILL.md "$KIT"/.codex/skills/*/SKILL.md; do
+    [ -f "$f" ] && files+=("$f")
+  done
+  assert "c1: the command and skill files are found" test "${#files[@]}" -ge 7
+  assert "c1: the filler rewrites \$<n> from 0 and leaves the rest" \
+    test "$(printf 'x $0 $1 $3 $NF ${1}\n' | expand_positional 50 --record-only)" = 'x 50 --record-only $3 $NF ${1}'
+  [ "${#files[@]}" -gt 0 ] || return
+  hits="$(grep -nE '\$[0-9]' "${files[@]}")"; rc=$?
+  assert "c1: the files can be read" test "$rc" -le 1
+  if [ -z "$hits" ]; then pass "c1: no \$<n> in a file Claude Code fills in"
+  else fail "c1: no \$<n> in a file Claude Code fills in"; printf '%s\n' "$hits" | sed "s|^$KIT/|       |"; fi
 }
 
 test_postmortem_docs_record_and_route() {
@@ -2881,6 +2919,7 @@ run_tests \
   test_prepush_archives_the_verdict \
   test_review_tune_docs_name_legacy_archive \
   test_postmortem_finds_the_verdict_for_the_reviewed_commit \
+  test_expanded_files_hold_no_positional_refs \
   test_postmortem_docs_record_and_route \
   test_review_tune_docs_read_postmortem_records \
   test_postmortem_plateau_is_a_hypothesis \
