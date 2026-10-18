@@ -15,7 +15,7 @@
 collect_path_rules() {
   local changed="$1" section="$2" cfg="" f rc err
   : > "$section"
-  for f in .coderabbit.yaml .coderabbit.yml .coderabbit.config.ts; do
+  for f in .coderabbit.yaml .coderabbit.yml coderabbit.yaml coderabbit.yml .coderabbit.config.ts; do
     [ -e "$f" ] && { cfg="$f"; break; }
   done
   if [ -z "$cfg" ]; then
@@ -44,13 +44,13 @@ collect_path_rules() {
 _path_rules_set() { # _path_rules_set <status> <config> <warning>
   PATH_RULES_STATUS="$1"; PATH_RULES_WARNING="$3"
   PATH_RULES_JSON="$(jq -cn --arg s "$1" --arg c "$2" --arg w "$3" \
-    '{status: $s, config: (if $c == "" then null else $c end), rules: null, matched: null,
+    '{status: $s, config: (if $c == "" then null else $c end), rules: null, matched: null, inherits: null,
       warning: (if $w == "" then null else $w end)}')"
 }
 
 # The one-line findings.md note: a blockquote when a warning stands, plain otherwise.
 path_rules_note() {
-  local cfg rules matched
+  local cfg rules matched inherited
   if [ -n "$PATH_RULES_WARNING" ]; then
     printf '> **Path rules NOT fully applied:** %s.\n' "$PATH_RULES_WARNING"
     return
@@ -58,24 +58,33 @@ path_rules_note() {
   cfg="$(jq -r '.config // ""' <<< "$PATH_RULES_JSON")"
   rules="$(jq -r '.rules // 0' <<< "$PATH_RULES_JSON")"
   matched="$(jq -r '.matched // 0' <<< "$PATH_RULES_JSON")"
+  inherited=""
+  [ "$(jq -r '.inherits // false' <<< "$PATH_RULES_JSON")" != true ] \
+    || inherited=' Rules an org or central config adds through `inheritance: true` are not read.'
   case "$PATH_RULES_STATUS" in
-    applied)   printf 'Path rules: %s of the %s `%s` path_instructions match the change set and reached every lens.\n' "$matched" "$rules" "$cfg" ;;
-    no_match)  printf 'Path rules: none of the %s `%s` path_instructions match the change set.\n' "$rules" "$cfg" ;;
-    no_rules)  printf 'Path rules: `%s` sets no path_instructions.\n' "$cfg" ;;
+    applied)   printf 'Path rules: %s of the %s `%s` path_instructions match the change set and reached every lens.%s\n' "$matched" "$rules" "$cfg" "$inherited" ;;
+    no_match)  printf 'Path rules: none of the %s `%s` path_instructions match the change set.%s\n' "$rules" "$cfg" "$inherited" ;;
+    no_rules)  printf 'Path rules: `%s` sets no path_instructions.%s\n' "$cfg" "$inherited" ;;
     no_config) printf 'Path rules: no CodeRabbit config.\n' ;;
   esac
 }
 
+# Run from / with absolute paths: started in the repository, python3 would import
+# a repo-local yaml.py, json.py or re.py in place of the real module.
 _path_rules_read() { # _path_rules_read <config> <changed-files> <section-out> — JSON on stdout
-  python3 - "$1" "$2" "$3" <<'PYRULES'
+  local a=() p
+  for p in "$1" "$2" "$3"; do
+    case "$p" in /*) a+=("$p") ;; *) a+=("$PWD/$p") ;; esac
+  done
+  ( cd / && python3 - "${a[@]}" "$1" ) <<'PYRULES'
 import json, re, sys
 
-cfg, changed, section = sys.argv[1:4]
+path, changed, section, cfg = sys.argv[1:5]
 
 
-def emit(status, warning=None, rules=None, matched=None):
-    print(json.dumps({"status": status, "config": cfg, "rules": rules,
-                      "matched": matched, "warning": warning}))
+def emit(status, warning=None, rules=None, matched=None, inherits=None):
+    print(json.dumps({"status": status, "config": cfg, "rules": rules, "matched": matched,
+                      "inherits": inherits, "warning": warning}))
     sys.exit(0)
 
 
@@ -108,7 +117,7 @@ class StrictLoader(yaml.SafeLoader):
 
 
 try:
-    with open(cfg, encoding="utf-8") as fh:
+    with open(path, encoding="utf-8") as fh:
         d = yaml.load(fh, Loader=StrictLoader)
 except Exception as e:
     msg = (str(e).splitlines() or [type(e).__name__])[0][:120]
@@ -120,21 +129,61 @@ if not isinstance(d, dict):
     emit("unparseable", "`%s` is not a YAML mapping, so its path_instructions did NOT reach the lenses, "
          "and CodeRabbit discards the whole file and reviews with defaults" % cfg)
 
+def kind(v):
+    return "null" if v is None else type(v).__name__
+
+
+inherits = d.get("inheritance") is True
 reviews = d.get("reviews")
+if "reviews" in d and not isinstance(reviews, dict):
+    emit("invalid", "`%s` sets reviews to %s rather than a mapping, so no path_instructions reached "
+         "the lenses, and CodeRabbit may discard the whole file" % (cfg, kind(reviews)))
 pi = reviews.get("path_instructions") if isinstance(reviews, dict) else None
-if reviews is not None and not isinstance(reviews, dict):
-    emit("invalid", "`%s` sets reviews to a %s rather than a mapping, so no path_instructions reached "
-         "the lenses" % (cfg, type(reviews).__name__))
-if pi is None or pi == []:
-    emit("no_rules", rules=0, matched=0)
+if not isinstance(reviews, dict) or "path_instructions" not in reviews or pi == []:
+    emit("no_rules", rules=0, matched=0, inherits=inherits)
 if not isinstance(pi, list):
-    emit("invalid", "`%s` sets reviews.path_instructions to a %s rather than a list, so none of it "
-         "reached the lenses" % (cfg, type(pi).__name__))
+    emit("invalid", "`%s` sets reviews.path_instructions to %s rather than a list, so none of it "
+         "reached the lenses, and CodeRabbit may discard the whole file" % (cfg, kind(pi)))
+
+
+def split_top(body):
+    parts, d, cur, i = [], 0, "", 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "\\":
+            cur += body[i:i + 2]
+            i += 2
+            continue
+        if ch == "," and d == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            d += (ch == "{") - (ch == "}")
+            cur += ch
+        i += 1
+    parts.append(cur)
+    return parts
+
+
+def brace_range(body, budget):
+    m = re.fullmatch(r"(-?[0-9]+)\.\.(-?[0-9]+)|([A-Za-z])\.\.([A-Za-z])", body)
+    if not m:
+        return None
+    num = m.group(1) is not None
+    a, b = (int(m.group(1)), int(m.group(2))) if num else (ord(m.group(3)), ord(m.group(4)))
+    if abs(b - a) + 1 > budget[0]:
+        raise ValueError("brace range too large")
+    step = 1 if b >= a else -1
+    return [str(x) if num else chr(x) for x in range(a, b + step, step)]
 
 
 def braces(p, budget):
-    depth, start = 0, None
-    for i, c in enumerate(p):
+    depth, start, i = 0, None, 0
+    while i < len(p):
+        c = p[i]
+        if c == "\\":
+            i += 2
+            continue
         if c == "{":
             if depth == 0:
                 start = i
@@ -142,34 +191,38 @@ def braces(p, budget):
         elif c == "}" and depth:
             depth -= 1
             if depth == 0:
-                parts, d, cur = [], 0, ""
-                for ch in p[start + 1:i]:
-                    if ch == "," and d == 0:
-                        parts.append(cur)
-                        cur = ""
-                        continue
-                    d += (ch == "{") - (ch == "}")
-                    cur += ch
-                parts.append(cur)
-                if len(parts) < 2:
-                    continue
-                budget[0] -= len(parts)
-                if budget[0] < 0:
-                    raise ValueError("too many brace alternatives")
-                return [x for part in parts for x in braces(p[:start] + part + p[i + 1:], budget)]
+                body = p[start + 1:i]
+                parts = brace_range(body, budget) or split_top(body)
+                if len(parts) > 1 or brace_range(body, budget):
+                    budget[0] -= len(parts)
+                    if budget[0] < 0:
+                        raise ValueError("too many brace alternatives")
+                    return [x for part in parts for x in braces(p[:start] + part + p[i + 1:], budget)]
+        i += 1
     return [p]
 
 
+STAR = object()
+GLOBSTAR = object()
+
+
+# One path segment as tokens: STAR, or a one-character test. Extglobs and POSIX
+# classes are refused rather than read as literals, so they surface as invalid.
 def segment(s):
-    out, i = "", 0
+    toks, i = [], 0
     while i < len(s):
         c = s[i]
+        if c in "@+!*?" and s[i + 1:i + 2] == "(":
+            raise ValueError("extglob")
+        if c == "\\" and i + 1 < len(s):
+            toks.append(s[i + 1].__eq__)
+            i += 2
+            continue
         if c == "*":
-            while i + 1 < len(s) and s[i + 1] == "*":
-                i += 1
-            out += "[^/]*"
+            if not toks or toks[-1] is not STAR:
+                toks.append(STAR)
         elif c == "?":
-            out += "[^/]"
+            toks.append(lambda ch: True)
         elif c == "[":
             j = i + 1
             if s[j:j + 1] in ("!", "^"):
@@ -178,37 +231,78 @@ def segment(s):
                 j += 1
             j = s.find("]", j)
             if j < 0:
-                out += re.escape(c)
+                toks.append(c.__eq__)
             else:
                 body = s[i + 1:j]
+                if "[:" in body:
+                    raise ValueError("POSIX class")
                 neg = body[:1] in ("!", "^")
                 body = body[1:] if neg else body
-                out += ("[^/" if neg else "[") + re.sub(r"([\\\[\]])", r"\\\1", body) + "]"
+                rx = re.compile(("[^" if neg else "[") + re.sub(r"([\\\[\]^])", r"\\\1", body) + "]", re.DOTALL)
+                toks.append(lambda ch, rx=rx: rx.fullmatch(ch) is not None)
                 i = j
         else:
-            out += re.escape(c)
+            toks.append(c.__eq__)
         i += 1
-    return out
+    return toks
+
+
+def segment_match(toks, s):  # greedy wildcard match: O(len(toks) * len(s)), no backtracking blowup
+    ti = si = 0
+    star, mark = -1, 0
+    while si < len(s):
+        if ti < len(toks) and toks[ti] is STAR:
+            star, mark = ti, si
+            ti += 1
+        elif ti < len(toks) and toks[ti](s[si]):
+            ti += 1
+            si += 1
+        elif star >= 0:
+            mark += 1
+            si, ti = mark, star + 1
+        else:
+            return False
+    while ti < len(toks) and toks[ti] is STAR:
+        ti += 1
+    return ti == len(toks)
 
 
 # minimatch semantics, with dotfiles matched: `**` spans directories, `*` and `?`
 # stay inside one, and a pattern without a slash matches top-level paths only.
-def glob_regex(p):
+def glob_compile(p):
+    if p.startswith("!"):
+        raise ValueError("negated pattern")
     alts = []
     for q in braces(p, [256]):
         q = re.sub(r"^(\./)+", "", q).lstrip("/")
         if q.endswith("/"):
             q += "**"
-        parts = q.split("/")
-        r = ""
-        for k, s in enumerate(parts):
-            last = k == len(parts) - 1
+        segs = []
+        for s in q.split("/"):
             if s == "**":
-                r += ".*" if last else "(?:[^/]+/)*"
+                if not segs or segs[-1] is not GLOBSTAR:
+                    segs.append(GLOBSTAR)
             else:
-                r += segment(s) + ("" if last else "/")
-        alts.append("(?:%s)" % r)
-    return re.compile("|".join(alts), re.DOTALL)
+                segs.append(segment(s))
+        alts.append(segs)
+    return alts
+
+
+def glob_match(alts, path):
+    parts = path.split("/")
+    for segs in alts:
+        nxt = [False] * len(parts) + [True]
+        for seg in reversed(segs):
+            cur = [False] * (len(parts) + 1)
+            for j in range(len(parts), -1, -1):
+                if seg is GLOBSTAR:
+                    cur[j] = nxt[j] or (j < len(parts) and cur[j + 1])
+                else:
+                    cur[j] = j < len(parts) and nxt[j + 1] and segment_match(seg, parts[j])
+            nxt = cur
+        if nxt[0]:
+            return True
+    return False
 
 
 rules, bad = [], []
@@ -219,7 +313,7 @@ for n, e in enumerate(pi, 1):
         bad.append(n)
         continue
     try:
-        rules.append((path.strip(), text.strip(), glob_regex(path.strip())))
+        rules.append((path.strip(), text.strip(), glob_compile(path.strip())))
     except (re.error, ValueError, RecursionError):
         bad.append(n)
 
@@ -227,8 +321,8 @@ with open(changed, encoding="utf-8", errors="surrogateescape") as fh:
     files = [l.rstrip("\n") for l in fh if l.strip()]
 
 hits = []
-for path, text, rx in rules:
-    matched = [f for f in files if rx.fullmatch(f)]
+for path, text, alts in rules:
+    matched = [f for f in files if glob_match(alts, f)]
     if matched:
         hits.append((path, text, matched))
 
@@ -246,11 +340,12 @@ warning = None
 if bad:
     many = len(bad) > 1
     warning = ("`%s` reviews.path_instructions entr%s %s lack%s a non-empty string path and "
-               "instructions, or a usable glob, so %s did NOT reach the lenses, and CodeRabbit "
+               "instructions, or a glob this reader supports (not an extglob, a POSIX class or a "
+               "`!` negation), so %s did NOT reach the lenses, and CodeRabbit "
                "may discard the whole file" % (cfg, "ies" if many else "y",
                                                ", ".join("#%d" % n for n in bad),
                                                "" if many else "s", "they" if many else "it"))
 emit("invalid" if bad else "applied" if hits else "no_match", warning,
-     rules=len(pi), matched=len(hits))
+     rules=len(pi), matched=len(hits), inherits=inherits)
 PYRULES
 }

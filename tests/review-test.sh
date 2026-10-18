@@ -268,6 +268,27 @@ EOF
   assert "pr: status applied, 1 of 2" jq -e '.path_rules | .status == "applied" and .matched == 1 and .rules == 2 and .warning == null' "$repo/.review/findings.json"
   assert "pr: findings.md says the rule reached the lenses" grep -qF 'Path rules: 1 of the 2' "$repo/.review/findings.md"
   assert "pr: applied run is complete" jq -e '.complete == true' "$repo/.review/findings.json"
+  assert_not "pr: no inheritance note without inheritance" grep -qF 'through `inheritance: true`' "$repo/.review/findings.md"
+
+  # repo-local modules that shadow the reader's imports must never run
+  local m
+  for m in yaml json re; do
+    printf 'open("%s/pr-shadow-%s", "w").write("ran")\n' "$WORK" "$m" > "$repo/$m.py"
+  done
+  printf 'inheritance: true\n' >> "$repo/.coderabbit.yaml"
+  run_review "$repo" "$stub" --lenses correctness
+  for m in yaml json re; do
+    assert_not "pr: repo-local $m.py is not imported" test -e "$WORK/pr-shadow-$m"
+    rm -f "$repo/$m.py"
+  done
+  assert "pr: rule still applied beside shadowing modules" test "$(pr_status "$repo")" = applied
+  assert "pr: inherited rules are named as unread" grep -qF 'through `inheritance: true` are not read' "$repo/.review/findings.md"
+
+  mv "$repo/.coderabbit.yaml" "$repo/coderabbit.yml"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "pr: undotted coderabbit.yml is read" test "$(pr_status "$repo")" = applied
+  assert "pr: undotted config named" jq -e '.path_rules.config == "coderabbit.yml"' "$repo/.review/findings.json"
+  rm "$repo/coderabbit.yml"
 
   printf 'reviews:\n  path_instructions:\n    - path: "docs/**"\n      instructions: PATHRULE-DOCS-4e7d\n' > "$repo/.coderabbit.yaml"
   run_review "$repo" "$stub" --lenses correctness
@@ -322,6 +343,18 @@ EOF
   printf 'reviews:\n  path_instructions:\n    path: "lib/**"\n    instructions: x\n' > "$repo/.coderabbit.yaml"
   run_review "$repo" "$stub" --lenses correctness
   pr_assert_warned "path_instructions as a mapping" invalid
+
+  printf 'reviews:\n  path_instructions:\n' > "$repo/.coderabbit.yaml"
+  run_review "$repo" "$stub" --lenses correctness
+  pr_assert_warned "an explicit null path_instructions" invalid
+
+  printf 'reviews:\n' > "$repo/.coderabbit.yaml"
+  run_review "$repo" "$stub" --lenses correctness
+  pr_assert_warned "an explicit null reviews" invalid
+
+  printf 'reviews:\n  path_instructions:\n    - path: "lib/**/@(store|cache)/*.ts"\n      instructions: PATHRULE-EXT\n' > "$repo/.coderabbit.yaml"
+  run_review "$repo" "$stub" --lenses correctness
+  pr_assert_warned "an extglob it cannot match" invalid
 
   # a yaml module that cannot be imported, shadowing the real one
   mkdir -p "$WORK/pr-noyaml"
@@ -385,12 +418,16 @@ reviews:
     - { path: "./cfg/?.json", instructions: R-ONECHAR }
     - { path: "bin/[!x]*", instructions: R-CLASS }
     - { path: "nothing/**", instructions: R-NONE }
+    - { path: "v{1..3}/**", instructions: R-RANGE }
+    - { path: 'lit/\*.txt', instructions: R-ESCAPE }
 EOF
   printf '%s\n' src/a/b/c.ts src/top.ts README.md docs/guide.md .github/workflows/ci.yml \
-    infra/net/main.tf cfg/a.json cfg/ab.json bin/run bin/xtool > "$dir/changed.txt"
+    infra/net/main.tf cfg/a.json cfg/ab.json bin/run bin/xtool v2/x.go v4/x.go 'lit/*.txt' lit/a.txt > "$dir/changed.txt"
   out="$( cd "$dir" && . "$KIT/scripts/lib/path-rules.sh" && collect_path_rules changed.txt rules.md \
     && printf '%s' "$PATH_RULES_JSON" )"
-  assert "pg: six of seven rules match" jq -e '.status == "applied" and .matched == 6 and .rules == 7' <<< "$out"
+  assert "pg: eight of nine rules match" jq -e '.status == "applied" and .matched == 8 and .rules == 9' <<< "$out"
+  assert "pg: numeric brace range expands" grep -qxF '### `v{1..3}/**` - applies to `v2/x.go`' "$dir/rules.md"
+  assert "pg: an escaped star is literal" grep -qxF '### `lit/\*.txt` - applies to `lit/*.txt`' "$dir/rules.md"
   assert "pg: ** spans nested and zero directories" grep -qF '`src/a/b/c.ts`, `src/top.ts`' "$dir/rules.md"
   assert "pg: slashless pattern is top-level only" grep -qxF '### `*.md` - applies to `README.md`' "$dir/rules.md"
   assert "pg: braces expand and dotfiles match" grep -qF '`.github/workflows/ci.yml`' "$dir/rules.md"
@@ -398,6 +435,30 @@ EOF
   assert "pg: ? is one character" grep -qxF '### `./cfg/?.json` - applies to `cfg/a.json`' "$dir/rules.md"
   assert "pg: negated class excludes" grep -qxF '### `bin/[!x]*` - applies to `bin/run`' "$dir/rules.md"
   assert_not "pg: unmatched rule left out" grep -qF 'R-NONE' "$dir/rules.md"
+
+  cat > "$dir/.coderabbit.yaml" <<'EOF'
+reviews:
+  path_instructions:
+    - { path: "src/**/!(*.test).ts", instructions: R-EXT }
+    - { path: "src/[[:alpha:]]*.ts", instructions: R-POSIX }
+    - { path: "!src/**", instructions: R-NEG }
+    - { path: "src/**", instructions: R-OK }
+EOF
+  out="$( cd "$dir" && . "$KIT/scripts/lib/path-rules.sh" && collect_path_rules changed.txt rules.md \
+    && printf '%s' "$PATH_RULES_JSON" )"
+  assert "pg: unsupported syntax is invalid, not no_match" jq -e '.status == "invalid" and .matched == 1' <<< "$out"
+  assert "pg: each unsupported entry is named" jq -e '.warning | contains("#1, #2, #3")' <<< "$out"
+
+  # a deep near-miss against many globstars must not backtrack for minutes
+  local deep="" i start
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do deep="$deep**/b/"; done
+  printf 'reviews:\n  path_instructions:\n    - { path: "a/%sc", instructions: R-DEEP }\n' "$deep" > "$dir/.coderabbit.yaml"
+  printf 'a/%sx\n' "$(printf 'b/%.0s' $(seq 1 40))" > "$dir/changed.txt"
+  start="$(date +%s)"
+  out="$( cd "$dir" && . "$KIT/scripts/lib/path-rules.sh" && collect_path_rules changed.txt rules.md \
+    && printf '%s' "$PATH_RULES_JSON" )"
+  assert "pg: deep globstar near-miss is no_match" jq -e '.status == "no_match"' <<< "$out"
+  assert "pg: deep globstar near-miss is fast" test "$(( $(date +%s) - start ))" -lt 5
 }
 
 # Without -z git C-quotes non-ASCII and backslash names; the quoted name matched

@@ -231,22 +231,27 @@ review at all.
 
 A house rule that holds only for some paths lives in the CodeRabbit config's
 `reviews.path_instructions`, not in `rubric.md`. On every run, `review.sh` reads
-that config (`.coderabbit.yaml`, else `.coderabbit.yml`) and puts each rule whose
+that config (the first of `.coderabbit.yaml`, `.coderabbit.yml`,
+`coderabbit.yaml` and `coderabbit.yml`) and puts each rule whose
 glob matches a changed file into every lens prompt, under the rubric, so the
 lenses grade those files against the same text the gate does. The config is read
 at review time rather than copied into the rubric, so there is no second copy to
-drift. Globs follow minimatch: `**` spans directories, and a pattern without a
-slash matches top-level paths only. Rules the org-level config adds through
-`inheritance: true` are not in the file and do not reach the lenses.
+drift. Globs follow minimatch: `**` spans directories, braces and ranges
+expand, and a pattern without a slash matches top-level paths only. Extglobs,
+POSIX classes and `!` negation are not supported, and an entry that uses them is
+reported as `invalid` rather than matching nothing. Rules the org-level config adds through
+`inheritance: true` are not in the file and do not reach the lenses;
+`findings.md` says so whenever the file sets it.
 
 `findings.json` records the outcome in `path_rules.status`. Three statuses are
 a real "nothing": `no_config`, `no_rules` (no `path_instructions`) and
 `no_match` (no glob matches the change set). `applied` means at least one rule
 reached the lenses. Every other status carries a `warning`, shown in
 `findings.md` and on stderr, because the lenses graded without some or all of
-the rules: `unparseable` (CodeRabbit discards such a file too), `invalid` (an
-entry without a string `path` and `instructions`; the valid entries still
-apply), `no_parser` (no `python3` or PyYAML), `not_inspected`
+the rules: `unparseable` (CodeRabbit discards such a file too), `invalid`
+(`reviews` or `path_instructions` of the wrong type, explicit null included, or
+an entry without a string `path` and `instructions` or with an unsupported
+glob; the valid entries still apply), `no_parser` (no `python3` or PyYAML), `not_inspected`
 (`.coderabbit.config.ts`, which is not read) and `failed` (an unreadable file
 or a crashed reader). None of them makes `complete` false: the lenses still
 reviewed the diff.

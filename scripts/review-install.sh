@@ -31,7 +31,8 @@ ok()  { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 no()  { printf '  \033[31m✗\033[0m %s\n' "$*"; fail=1; }
 skip(){ printf '  \033[2m·\033[0m %s\n' "$*"; }
 
-have_yaml_parser() { python3 -c 'import yaml' 2>/dev/null; }
+# From /, so a repo-local yaml.py is never the module imported.
+have_yaml_parser() { ( cd / && python3 -c 'import yaml' ) 2>/dev/null; }
 
 # Print one line per wiring defect in a YAML CodeRabbit config; silence means
 # correctly wired. Parsed rather than grepped: the seeded template names
@@ -39,7 +40,7 @@ have_yaml_parser() { python3 -c 'import yaml' 2>/dev/null; }
 # path_instructions is not a guideline at all, and a valid config may quote
 # differently than the template.
 cfg_diagnose() {
-  python3 - "$1" 2>/dev/null <<'PYCFG'
+  ( cd / && python3 - "$REPO_ROOT/$1" ) 2>/dev/null <<'PYCFG'
 import sys, yaml
 
 
