@@ -9,10 +9,14 @@ Hunt specifically for:
   mistakes in refactored conditionals.
 - **Null / undefined / empty** — a value that became optional but is dereferenced
   unconditionally; empty collection treated as failure or vice versa; default
-  values that are falsy (`0`, `""`, `false`) silently replaced by `||` fallbacks.
+  values that are falsy (`0`, `""`, `false`) silently replaced by `||` fallbacks;
+  a count or list reported as zero or "none" when its source failed to read or
+  parse — unknown is not empty.
 - **Error paths that swallow** — bare catch blocks, `except: pass`, errors logged
   and then execution continuing with corrupt state, promises without rejection
-  handling, errors converted to a sentinel value the caller never checks.
+  handling, errors converted to a sentinel value the caller never checks; a
+  remote write that threw treated as not having happened ("nothing changed", or a
+  rollback) when it can fail after the server committed.
 - **Async ordering** — missing `await`, fire-and-forget calls whose result is
   needed, `Promise.all` where sequential ordering was required, `forEach` with an
   async callback, cleanup that runs before the work it is cleaning up after.

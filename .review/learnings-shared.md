@@ -37,3 +37,11 @@ before this file dilutes the prompts it feeds.
   paragraphs from the hunk and survived because the lens read the diff and its
   immediate context. When a diff relaxes or widens an assumption, re-read the
   whole file for sentences written under the narrower one.
+- 2026-10-18: an error path reported "nothing written" after a remote write
+  threw, but a rejected or timed-out call can still have committed. Flag any
+  message or rollback that assumes a thrown remote call had no effect, unless
+  the code reads back or the write is conditional or idempotent.
+- 2026-10-18: a "changed since shown?" guard compared a parsed summary, so two
+  different unparseable values compared equal and a reset could overwrite the
+  wrong one. A guard deciding whether data changed must compare the raw bytes
+  or a version/ETag, not a lossy parse.
