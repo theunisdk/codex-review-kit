@@ -199,8 +199,10 @@ reports its own update of the record on a third line,
    unscored with `compare_failed: <error>`, quoting the command. A blame that
    says the file has fewer lines, or names no such path, has failed: it is not
    evidence that the code changed. A `git show` of the verdict's version
-   fails, rightly, for a file that `git diff` shows was added after it; that
-   is evidence for `added_after`, not a failed compare. Do not fall back to a guess, to a whole-file
+   fails, rightly, for a file added after it. First rule out a rename with
+   `git diff -M --name-status <verdict-sha> <finding-commit>`: a renamed file
+   is read at its old path. A file really added after the verdict is evidence
+   for `added_after`, not a failed compare. Do not fall back to a guess, to a whole-file
    test, or to a cheaper command that answers a different question. A path
    comes from the PR, so it is untrusted: put it in single quotes in every
    command. A path that holds a single quote goes in no command at all: that
