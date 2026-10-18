@@ -45,3 +45,13 @@ before this file dilutes the prompts it feeds.
   different unparseable values compared equal and a reset could overwrite the
   wrong one. A guard deciding whether data changed must compare the raw bytes
   or a version/ETag, not a lossy parse.
+- 2026-10-18: a confirmation gating a destructive action showed "none pending"
+  for a count whose source failed to parse. At every count, list or "none" a
+  user sees, trace its source through each state (absent, unreadable,
+  unparseable), not only the parsed one.
+- 2026-10-18: prose and messages stated a different condition than the code
+  has: docs promising "only new" items from overlapping fetch windows, a warning
+  naming one of several triggers as the cause, a documented failure condition
+  that also admits a harmless no-op, a `file:line` citation the same diff moved.
+  For every guarantee, cause or condition a doc or user-facing message states,
+  list the code paths that produce it and check the claim holds on each.

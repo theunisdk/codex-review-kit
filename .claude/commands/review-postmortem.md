@@ -214,8 +214,9 @@ reports its own update of the record on a third line,
    - **Missed** — CodeRabbit found a real defect our lenses did not surface.
    - **Rejected wrongly** — we saw it and rejected it, and the rejection reason
      does not hold. Judge it by the REJECT rules of `.review/adjudication.md`
-     §3: a design document that accepts a risk is not a reason when a cheap
-     guard closes it.
+     §3: a design document that accepts a risk, or documented, tested or
+     deliberate behaviour, is not a reason to reject or part-fix a finding when
+     a cheap guard closes it.
    - **Noise** — CodeRabbit is wrong, it is out of scope per the rubric, or we
      rejected it for a reason that holds.
 

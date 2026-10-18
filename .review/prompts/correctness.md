@@ -16,7 +16,10 @@ Hunt specifically for:
   and then execution continuing with corrupt state, promises without rejection
   handling, errors converted to a sentinel value the caller never checks; a
   remote write that threw treated as not having happened ("nothing changed", or a
-  rollback) when it can fail after the server committed.
+  rollback) when it can fail after the server committed. At every write, restart
+  or rollback whose result carries its outcome (affected-row count, exit status,
+  returned flag), find the check before any message, redirect or next step claims
+  success: zero rows or a non-zero exit is a failure, not a no-op.
 - **Async ordering** — missing `await`, fire-and-forget calls whose result is
   needed, `Promise.all` where sequential ordering was required, `forEach` with an
   async callback, cleanup that runs before the work it is cleaning up after.
