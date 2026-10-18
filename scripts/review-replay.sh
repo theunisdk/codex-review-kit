@@ -157,6 +157,7 @@ if [ "${REVIEW_SKIP_AUTH_CHECK:-0}" != 1 ] && ! codex login status > /dev/null 2
   die "not authenticated to Codex — run 'codex login'"
 fi
 
+err_of() { head -c 300 "$1" 2>/dev/null | tr '\n' ' '; }
 is_ancestor() { # is_ancestor <a> <b> — sets ANC to yes or no; fails only on a git error
   git -C "$SPOKE" merge-base --is-ancestor "$1" "$2" 2> "$RUN_TMP/anc.err"
   case $? in 0) ANC=yes ;; 1) ANC=no ;; *) G_ERR="git merge-base --is-ancestor ${1:0:7} $2: $(err_of "$RUN_TMP/anc.err")"; return 1 ;; esac
@@ -178,7 +179,6 @@ info "spoke $SPOKE ($REPO) · kit $KIT_DESC ($KIT_SHORT) · records in $STORE"
 R_STEP=""; R_MSG=""; R_LINE=""
 fail_at() { R_STEP="$1"; R_MSG="$(printf '%s' "$2" | tr '\n' ' ' | cut -c1-400 | sed 's/[[:space:]]*$//')"; return 1; }
 skip_as() { R_MSG="$1"; return 2; }
-err_of() { head -c 300 "$1" 2>/dev/null | tr '\n' ' '; }
 
 gh_to() { # gh_to <file> <gh args...> — fails with gh's error
   local f="$1"; shift
@@ -285,8 +285,9 @@ overlay() {
 
 # Read-only by construction: no settings file is loaded (a user's allow rules would apply under
 # dontAsk), there is no Edit or Write tool, every Bash command not allowed here is denied, and
-# gh is denied outright, so a replay cannot comment, file or push.
-READ_RULES=("Bash(git log:*)" "Bash(git show:*)" "Bash(git diff:*)" "Bash(git grep:*)" "Bash(git rev-parse:*)"
+# gh is denied outright, so a replay cannot comment, file or push. No git grep: its -O runs a
+# command, and can hide in a cluster such as -nO.
+READ_RULES=("Bash(git log:*)" "Bash(git show:*)" "Bash(git diff:*)" "Bash(git rev-parse:*)"
   "Bash(git rev-list:*)" "Bash(git merge-base:*)" "Bash(git cat-file:*)" "Bash(git blame:*)" "Bash(jq:*)"
   "Bash(grep:*)" "Bash(wc:*)")
 claude_call() { # claude_call <out.json> <prompt> — in the worktree
@@ -298,6 +299,7 @@ claude_call() { # claude_call <out.json> <prompt> — in the worktree
     --settings '{"disableAllHooks":true}' --max-budget-usd "$BUDGET" \
     --tools "Read,Grep,Glob,Bash" --permission-mode dontAsk \
     --disallowedTools "Bash(gh:*)" "Bash(git push:*)" "Bash(git commit:*)" "Bash(git fetch:*)" \
+      "Bash(git * --output*)" "Bash(git * --ext-diff*)" "Bash(git * --textconv*)" \
     --allowedTools "${READ_RULES[@]}" > "$out" 2> "$out.err"
   rc=$?
   COST="$(jq -n --argjson a "${COST:-0}" --argjson b "$(jq '.total_cost_usd // 0' "$out" 2>/dev/null || echo 0)" '$a + $b')"

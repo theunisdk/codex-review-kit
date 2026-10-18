@@ -3126,6 +3126,8 @@ test_replay_scores_reports_and_writes_nothing_else() {
     sh -c '[ "$(grep -c . "$1")" -eq 4 ] && ! grep -vF -- "--disallowedTools Bash(gh:*)" "$1" | grep -q . && ! grep -vF -- "--tools Read,Grep,Glob,Bash" "$1" | grep -q .' _ "$RCL/calls.log"
   assert "r1: … nor any settings file, whose allow rules would apply" \
     sh -c '[ "$(grep -c . "$1")" -eq 4 ] && ! grep -vF -- "[--setting-sources][][--output-format]" "$1" | grep -q .' _ "$RCL/argv.log"
+  assert "r1: … nor a git option that writes a file or runs a command" \
+    sh -c '! grep -vF -- "[Bash(git * --output*)][Bash(git * --ext-diff*)][Bash(git * --textconv*)]" "$1" | grep -q . && ! grep -qF "[Bash(git grep" "$1"' _ "$RCL/argv.log"
   assert "r1: the spoke's refs are untouched" test "$(git -C "$RS" for-each-ref)" = "$refs_before"
   assert "r1: … and no FETCH_HEAD is written" test ! -e "$common/FETCH_HEAD"
   assert "r1: … and its checkout is clean" test -z "$(git -C "$RS" status --porcelain)"
