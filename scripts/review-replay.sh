@@ -175,12 +175,13 @@ kit_is_current() {
       remote="$(git -C "$HUB" config "branch.${full#refs/heads/}.remote")"
       rref="$(git -C "$HUB" config "branch.${full#refs/heads/}.merge")"
       [ -n "$remote" ] && [ -n "$rref" ] \
-        || { warn "--kit-ref $KIT_REF tracks no remote branch, so the replay cannot check that it is current"; return 0; } ;;
+        || { KIT_CHECK="unchecked: tracks no remote branch"; warn "--kit-ref $KIT_REF $KIT_CHECK, so the replay cannot check that it is current"; return 0; } ;;
     refs/remotes/*)
       remote="${full#refs/remotes/}"; remote="${remote%%/*}"; rref="refs/heads/${full#refs/remotes/"$remote"/}"
       [ "$rref" != refs/heads/HEAD ] || rref=HEAD
-      git -C "$HUB" config "remote.$remote.url" > /dev/null || return 0 ;;
-    *) return 0 ;;
+      git -C "$HUB" config "remote.$remote.url" > /dev/null \
+        || die "--kit-ref $KIT_REF is a tracking ref of $remote, which the hub no longer has as a remote, so the replay cannot check that it is current — pass a tag or SHA" ;;
+    *) KIT_CHECK="names one commit"; return 0 ;;
   esac
   run_with_timeout "$NET_TIMEOUT" git -C "$HUB" ls-remote "$remote" "$rref" < /dev/null > "$RUN_TMP/kit-remote" 2> "$RUN_TMP/kit-remote.err" \
     || die "cannot read $rref from the hub's remote $remote, so the replay cannot check that --kit-ref $KIT_REF is current: $(err_of "$RUN_TMP/kit-remote.err") — pass a tag or SHA to replay without the check"
@@ -192,11 +193,14 @@ kit_is_current() {
     || die "cannot fetch $rref from the hub's remote $remote to check that --kit-ref $KIT_REF is current: $(err_of "$RUN_TMP/kit-fetch.err")"
   git -C "$HUB" merge-base --is-ancestor "$up" "$KIT_SHA" 2> "$RUN_TMP/kit-anc.err"
   case $? in
-    0) [ "$up" = "$KIT_SHA" ] || warn "--kit-ref $KIT_REF is $(git -C "$HUB" rev-list --count "$up..$KIT_SHA") commit(s) ahead of $remote, so the replay scores an unpushed kit" ;;
+    0) KIT_CHECK="current with $rref on $remote"
+       [ "$up" = "$KIT_SHA" ] || { KIT_CHECK="$(git -C "$HUB" rev-list --count "$up..$KIT_SHA") commit(s) ahead of $rref on $remote, unpushed"
+         warn "--kit-ref $KIT_REF is $KIT_CHECK, so the replay scores an unpushed kit"; } ;;
     1) die "--kit-ref $KIT_REF ($KIT_SHORT) is behind $rref on $remote (${up:0:7}), so the replay would score an old kit — update the hub clone (git -C $HUB pull --ff-only), or pass a tag or SHA to replay an older kit on purpose" ;;
     *) die "cannot compare --kit-ref $KIT_REF with $rref on $remote: $(err_of "$RUN_TMP/kit-anc.err")" ;;
   esac
 }
+KIT_CHECK=""
 kit_is_current
 
 KIT_DIR="$RUN_TMP/kit"; mkdir -p "$KIT_DIR"
@@ -233,6 +237,9 @@ mkdir -p "$STORE/runs" && { mkdir "$STORE/runs/$RUN_ID" 2>/dev/null || { RUN_ID=
 RUN_DIR="$STORE/runs/$RUN_ID"
 : > "$RUN_DIR/summary.txt" || die "cannot write $RUN_DIR/summary.txt"
 SUMMARY="$RUN_DIR/summary.txt"
+say_note() { warn "$1"; printf 'review-replay: note — %s\n' "$1" >> "$SUMMARY" || SUMMARY_LOST=1; }
+printf 'review-replay: run — spoke %s (%s) · kit %s (%s, %s)\n' "$SPOKE" "$REPO" "$KIT_DESC" "$KIT_SHORT" "$KIT_CHECK" >> "$SUMMARY" \
+  || die "cannot write $SUMMARY"
 die_run() { printf 'review-replay: failed — run: %s\n' "$*" >> "$SUMMARY"; die "$*"; }
 
 # --- per PR ----------------------------------------------------------------
@@ -248,7 +255,8 @@ gh_to() { # gh_to <file> <gh args...> — fails with gh's error
 }
 gh_pages() { # gh_pages <file> <api path> — every page, as one array
   gh_to "$1.pages" api --paginate "$2" || return 1
-  jq -s 'add // [] | if type == "array" then . else error("not a list but \(type)") end' "$1.pages" > "$1" 2> "$1.err" \
+  jq -s 'if length == 0 then error("no reply") elif all(type == "array") then add else error("not a list but \(map(type) | unique | join(", "))") end' \
+    "$1.pages" > "$1" 2> "$1.err" \
     || { G_ERR="gh api $2: unparseable response: $(err_of "$1.err")"; return 1; }
 }
 
@@ -540,7 +548,7 @@ save_record() { # save_record <rc>
 }
 
 # --- the PR list -----------------------------------------------------------
-N_REPLAYED=0; N_SKIPPED=0; N_FAILED=0; N_UNREVIEWED=0; TOTAL_COST=0; TOTAL_TOKENS=0; RECORD_LIST=""
+N_REPLAYED=0; N_SKIPPED=0; N_FAILED=0; N_UNREVIEWED=0; TOTAL_COST=0; TOTAL_TOKENS=0
 N_COST_UNKNOWN=0; N_TOKENS_UNKNOWN=0; RECENT_JSON=null
 # cost_of <usd> <calls of unknown cost> <tokens or "unknown">
 cost_of() {
@@ -562,14 +570,17 @@ report() { # report <rc> <n>
   if [ "${CODEX_TOKENS:-0}" = unknown ]; then N_TOKENS_UNKNOWN=$((N_TOKENS_UNKNOWN + 1))
   else TOTAL_TOKENS=$((TOTAL_TOKENS + ${CODEX_TOKENS:-0})); fi
   LOGS=""
+  # the run's scorecard reads its own copy: a later run can replace $REC before this one ends
+  if [ "$1" = 0 ] && ! cp "$REC_TMP/record.json" "$RUN_TMP/record-$((N_REPLAYED + 1)).json"; then
+    R_LINE="review-replay: failed — PR #$2: record: cannot keep a copy for the run's scorecard"; set -- 1 "$2"
+  fi
   if [ -d "${REC_TMP:-}" ] && ! save_record "$1"; then
     LOGS=""
     if [ "$1" = 0 ]; then R_LINE="review-replay: failed — PR #$2: record: cannot write $REC"; set -- 1 "$2"
     else R_LINE="$R_LINE (logs not saved: cannot write $REC)"; fi
   fi
   case "$1" in
-    0) N_REPLAYED=$((N_REPLAYED + 1)); RECORD_LIST="$RECORD_LIST$REC/record.json
-"; R_LINE="$R_LINE · record $REC/postmortem.md" ;;
+    0) N_REPLAYED=$((N_REPLAYED + 1)); R_LINE="$R_LINE · record $REC/postmortem.md" ;;
     2) N_SKIPPED=$((N_SKIPPED + 1)) ;;
     *) N_FAILED=$((N_FAILED + 1)); [ -z "$LOGS" ] || R_LINE="$R_LINE (logs: $LOGS)" ;;
   esac
@@ -605,7 +616,7 @@ if [ -n "$RECENT" ]; then
     if [ "$ATTEMPTED" -ge "$LIMIT" ]; then R_MSG="--limit $LIMIT reached"; REC_TMP=""; report 2 "$n"; continue; fi
     ATTEMPTED=$((ATTEMPTED + 1)); GATHERED=1; run_one "$n"
   done
-  [ "$FOUND" -ge "$RECENT" ] || warn "found $FOUND CodeRabbit-reviewed PR(s) among the $SCAN most recent merged PRs, not $RECENT"
+  [ "$FOUND" -ge "$RECENT" ] || say_note "found $FOUND CodeRabbit-reviewed PR(s) among the $SCAN most recent merged PRs, not $RECENT"
   RECENT_JSON="{\"asked\": $RECENT, \"found\": $FOUND, \"scanned\": $SCAN}"
 else
   for n in $PRS; do
@@ -616,8 +627,11 @@ fi
 
 # --- aggregate -------------------------------------------------------------
 AGG="$RUN_DIR/aggregate.json"
-printf '%s' "$RECORD_LIST" | while IFS= read -r f; do cat "$f" || exit 1; done | jq -s . > "$RUN_TMP/records.json" \
-  || die_run "cannot read the records back"
+i=0; : > "$RUN_TMP/records.all" || die_run "cannot read the records back"
+while [ "$i" -lt "$N_REPLAYED" ]; do
+  i=$((i + 1)); cat "$RUN_TMP/record-$i.json" >> "$RUN_TMP/records.all" || die_run "cannot read the records back"
+done
+jq -s . "$RUN_TMP/records.all" > "$RUN_TMP/records.json" || die_run "cannot read the records back"
 jq -r --argjson r "$N_REPLAYED" --argjson s "$N_SKIPPED" --argjson f "$N_FAILED" --argjson u "$N_UNREVIEWED" '
   def sum(p): map(p // 0) | add // 0;
   "review-replay: aggregate — replayed \($r) / skipped \($s) / failed \($f)"
@@ -637,10 +651,10 @@ printf 'review-replay: cost — %s, failed and skipped PRs included\n' \
 while IFS= read -r l; do say "$l"; done < "$RUN_TMP/scorecard.txt"
 jq --arg run "$RUN_ID" --arg repo "$REPO" --arg ref "$KIT_REF" --arg sha "$KIT_SHA" --arg desc "$KIT_DESC" \
    --argjson r "$N_REPLAYED" --argjson s "$N_SKIPPED" --argjson f "$N_FAILED" --argjson u "$N_UNREVIEWED" --argjson recent "$RECENT_JSON" \
-   --argjson cost "$TOTAL_COST" --argjson cu "$N_COST_UNKNOWN" --argjson tokens "$TOTAL_TOKENS" --argjson tu "$N_TOKENS_UNKNOWN" \
+   --argjson cost "$TOTAL_COST" --argjson cu "$N_COST_UNKNOWN" --argjson tokens "$TOTAL_TOKENS" --argjson tu "$N_TOKENS_UNKNOWN" --arg check "$KIT_CHECK" \
    --rawfile summary "$SUMMARY" '
   def sum(p): map(p // 0) | add // 0;
-  {schema: "review-replay-run/v1", run: $run, repo: $repo, kit: {ref: $ref, sha: $sha, describe: $desc}, recent: $recent,
+  {schema: "review-replay-run/v1", run: $run, repo: $repo, kit: {ref: $ref, sha: $sha, describe: $desc, check: $check}, recent: $recent,
    prs: {replayed: $r, skipped: $s, failed: $f, unreviewed_passed_over: $u},
    counts: {caught: sum(.counts.caught), missed: sum(.counts.missed), rejected_wrongly: sum(.counts.rejected_wrongly),
             noise: sum(.counts.noise), unscored: sum(.counts.unscored)},

@@ -3134,11 +3134,13 @@ test_replay_scores_reports_and_writes_nothing_else() {
     sh -c '[ "$(ls "$1" | wc -l)" -eq 1 ] && ls "$1" | grep -qE "^[0-9]{8}T[0-9]{6}Z-$2\$"' _ "$runs" "$kit"
   run="$runs/$(ls "$runs")"
   assert "r1: … says where it is" grep -qxF "review-replay: run record — $run" "$LOG"
+  assert "r1: … and opens with the kit and how its freshness was checked" \
+    sh -c 'head -n1 "$1" | grep -qE "^review-replay: run — spoke .* \(o/r\) · kit .*\($2, unchecked: tracks no remote branch\)\$"' _ "$run/summary.txt" "$kit"
   assert "r1: … with every line the run printed" \
     sh -c 'grep -qE "^review-replay: replayed — PR #1 " "$1" && grep -qE "^review-replay: failed — PR #4: " "$1" && grep -qF "review-replay: aggregate — replayed 2 / skipped 5 / failed 1 — " "$1" \
       && grep -qxF "lessons — wrong_lens (2 missed):" "$1" && grep -qF "review-replay: cost — claude \$1.00, codex 2468 tokens" "$1" && ! grep -q incomplete "$1"' _ "$run/summary.txt"
   assert "r1: … and the aggregate, which the run used to delete" \
-    jq -e --arg k "$(git -C "$RHUB" rev-parse main)" '.kit.sha == $k and .prs == {replayed: 2, skipped: 5, failed: 1, unreviewed_passed_over: 0}
+    jq -e --arg k "$(git -C "$RHUB" rev-parse main)" '.kit.sha == $k and .kit.check == "unchecked: tracks no remote branch" and .prs == {replayed: 2, skipped: 5, failed: 1, unreviewed_passed_over: 0}
       and (.records | length) == 2 and .counts.missed == 2 and .missed_by_cause.wrong_lens == 2
       and .cost == {claude_usd: 1, claude_calls_of_unknown_cost: 0, codex_tokens: 2468, prs_of_unknown_codex_tokens: 0}
       and (.summary | any(startswith("review-replay: aggregate — replayed 2 ")))' "$run/aggregate.json"
@@ -3276,6 +3278,10 @@ test_replay_silent_failures_are_failures() {
   run_replay 1; rc=$?
   assert "r6: a GitHub page that is not a list fails the PR" \
     sh -c '[ "$2" -eq 1 ] && grep -qE "^review-replay: failed — PR #1: github: gh api repos/o/r/issues/1/comments: unparseable response: .*not a list" "$1"' _ "$LOG" "$rc"
+  : > "$RGH/api-repos_o_r_issues_1_comments.json"
+  run_replay 1; rc=$?
+  assert "r6: a GitHub reply with nothing in it fails the PR, not reads as an empty list" \
+    sh -c '[ "$2" -eq 1 ] && grep -qE "^review-replay: failed — PR #1: github: gh api repos/o/r/issues/1/comments: unparseable response: .*no reply" "$1"' _ "$LOG" "$rc"
   gh_json "$RGH" api-repos_o_r_issues_1_comments '[]'
   rm "$RCX/correctness.tokens"; : > "$RCL/no-cost"
   run_replay 1; rc=$?
@@ -3283,6 +3289,8 @@ test_replay_silent_failures_are_failures() {
     sh -c '[ "$2" -eq 0 ] && grep -qE "^review-replay: replayed — PR #1 .* · cost claude \\\$0.00 \+ unknown for 2 call\(s\), codex tokens unknown · " "$1" \
       && grep -qxF "review-replay: cost — claude \$0.00 + unknown for 2 call(s), codex 0 tokens + unknown for 1 PR(s), failed and skipped PRs included" "$1"' _ "$LOG" "$rc"
   assert "r6: … in the record too" jq -e '.replay.cost == {claude_usd: null, codex_tokens: null}' "$rec/record.json"
+  assert "r6: … and in the run's aggregate" \
+    sh -c 'f="$(grep -lF "unknown for 2 call(s)" "$1"/review-replay/runs/*/summary.txt)" && jq -e ".cost == {claude_usd: 0, claude_calls_of_unknown_cost: 2, codex_tokens: 0, prs_of_unknown_codex_tokens: 1}" "${f%/summary.txt}/aggregate.json"' _ "$common"
 }
 
 # A hub clone behind its remote must not replay its old kit as today's.
@@ -3302,6 +3310,10 @@ test_replay_refuses_a_stale_kit() {
   run_replay --kit-ref origin/main 1; rc=$?
   assert "r7: … and so is a remote-tracking ref that was never fetched" \
     sh -c '[ "$2" -ne 0 ] && grep -qF -- "--kit-ref origin/main" "$1" && grep -qF "is behind refs/heads/main on origin" "$1"' _ "$LOG" "$rc"
+  git -C "$RHUB" update-ref refs/remotes/gone/main main
+  run_replay --kit-ref gone/main 1; rc=$?
+  assert "r7: a tracking ref whose remote is gone is refused" \
+    sh -c '[ "$2" -ne 0 ] && grep -qF "which the hub no longer has as a remote" "$1"' _ "$LOG" "$rc"
   git -C "$RHUB" remote set-url origin "$WORK/r7-nowhere.git"
   run_replay 1; rc=$?
   assert "r7: a remote that cannot be read is refused, not taken as current" \
@@ -3310,6 +3322,8 @@ test_replay_refuses_a_stale_kit() {
   run_replay 1; rc=$?
   assert "r7: a current main replays" \
     sh -c '[ "$2" -eq 0 ] && grep -qE "^review-replay: replayed — PR #1 " "$1"' _ "$LOG" "$rc"
+  assert "r7: … and its record says the kit was checked" \
+    sh -c 'jq -e ".kit.check == \"current with refs/heads/main on origin\"" "$1"/.git/review-replay/runs/*/aggregate.json' _ "$RS"
 }
 
 test_replay_docs_post_nothing() {

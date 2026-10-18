@@ -73,10 +73,12 @@ Read a replay differently from a live postmortem:
   CodeRabbit commented on that cannot be fetched fails the PR, rather than
   leaving its findings unscored. A re-run that fails keeps the scored record
   and writes its logs to `<record>.last-unscored`.
-- **Each run keeps its own record** in `review-replay/runs/<time>-<kit>/`:
-  `summary.txt` holds every line the run printed, and `aggregate.json` the
-  scorecard with each PR's record. A run that stopped early says so in
-  `summary.txt` and has no `aggregate.json`.
+- **Each run keeps its own record** in `review-replay/runs/<time>-<kit>/`.
+  `summary.txt` opens with the kit and how its freshness was checked, then
+  holds each PR's line, any note such as a short `--recent` scan, and the
+  scorecard. `aggregate.json` holds the same scorecard with each PR's record.
+  A run that stopped early says so in `summary.txt` and has no
+  `aggregate.json`.
 
 Each PR costs one full `review.sh` run (six Codex lenses at the configured
 effort) plus two headless `claude -p` calls, capped by `--claude-budget`.
