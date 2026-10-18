@@ -3167,7 +3167,7 @@ case "$2" in
   *) echo "unexpected prompt" >&2; exit 1 ;;
 esac
 [ ! -e .review/replay ] || touch "$CLAUDE_STUB_DIR/$kind.saw-github-data"
-[ -z "${CLAUDE_STUB_SLEEP:-}" ] || { echo "$$" > "$CLAUDE_STUB_DIR/started"; sleep "$CLAUDE_STUB_SLEEP"; }
+[ -z "${CLAUDE_STUB_SLEEP:-}" ] || { pwd -P > "$CLAUDE_STUB_DIR/cwd"; echo "$$" > "$CLAUDE_STUB_DIR/started"; sleep "$CLAUDE_STUB_SLEEP"; }
 pr="$(printf '%s\n' "$2" | sed -n '1s/.* PR #\([0-9]*\).*/\1/p')"
 [ ! -x "$CLAUDE_STUB_DIR/on-$kind-$pr" ] || "$CLAUDE_STUB_DIR/on-$kind-$pr"
 sed -e "s/@SHA@/$(git rev-parse HEAD)/g" -e "s/@SHORT@/$(git rev-parse --short HEAD)/g" -e "s/@PR@/$pr/g" \
@@ -3464,11 +3464,12 @@ test_replay_interrupt_removes_the_worktree() {
   pid=$!
   for i in $(seq 1 60); do [ -e "$RCL/started" ] && break; sleep 1; done
   assert "r3: the replay reached adjudication" test -e "$RCL/started"
-  assert "r3: … in its checkout" sh -c 'test "$(git -C "$(ls -d "$1"/*/replay-pr1)" rev-parse HEAD)" = "$2"' _ "$tmp" "$RA"
+  assert "r3: … in its checkout, outside the spoke" \
+    sh -c 'd="$(cat "$1")" && test "$(git -C "$d" rev-parse HEAD)" = "$2" && case "$d" in "$3"/*) exit 1 ;; esac' _ "$RCL/cwd" "$RA" "$(cd "$RS" && pwd -P)"
   kill -TERM "$pid"; wait "$pid"; rc=$?
   assert "r3: an interrupted replay exits 143" test "$rc" -eq 143
   assert "r3: … and removes its worktree" no_replay_worktrees "$RS"
-  assert "r3: … and its checkout and temp files" test -z "$(ls -A "$tmp")"
+  assert "r3: … and its checkout and temp files" sh -c '! test -e "$(cat "$1")" && test -z "$(ls -A "$2")"' _ "$RCL/cwd" "$tmp"
   assert "r3: … and says the PR was interrupted" grep -qxF 'review-replay: failed — PR #1: interrupted: rc=143, nothing was recorded for it' "$LOG"
   assert "r3: … and stops what it started" sh -c 'test -s "$1" && ! kill -0 "$(cat "$1")" 2>/dev/null' _ "$RCL/started"
   assert "r3: the run's record says it was interrupted, with no scorecard" \
