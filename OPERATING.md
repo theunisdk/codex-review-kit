@@ -142,13 +142,16 @@ point of the design. Findings applied unverified are worse than no review.
 - **Repo-owned, in full — this list is the short one, so learn it instead:**
   `.review/rubric.md`, `.review/learnings.md`, `.review/config.sh`,
   `.review/analyzers.local.sh`, `.review/prompts.local/`, and the CodeRabbit
-  config at the repo root (`.coderabbit.yaml`). These six are seeded once on
-  `--init` and never touched again — and the gate config is not seeded at all
-  when the repo already has one, so hub improvements to it never arrive
-  automatically.
+  config at the repo root (`.coderabbit.yaml`), plus
+  `.github/workflows/review-kit-sync.yml` unless `.review/config.sh` sets
+  `KIT_SYNC_ACTION=0`. These seven are seeded once on `--init` and never
+  touched again — and the gate config is not seeded at all when the repo
+  already has one, so hub improvements to it never arrive automatically. The
+  same holds for the workflow: an existing copy is kept, edited or not.
 - **Everything else the kit installs is synced and will be overwritten** by the next
-  `review-update.sh`, silently: the four kit scripts (`scripts/review.sh`,
-  `scripts/review-install.sh`, `scripts/review-update.sh`, `scripts/make-plugin.sh`) and
+  `review-update.sh`, silently: the five kit scripts (`scripts/review.sh`,
+  `scripts/review-install.sh`, `scripts/review-update.sh`, `scripts/review-sync.sh`,
+  `scripts/make-plugin.sh`) and
   `scripts/lib/*.sh`; `.review/prompts/`, `.review/adjudication.md`,
   `.review/learnings-shared.md`, `.review/schema.json`, `.review/.gitignore`;
   `.claude/commands/`, `.claude/skills/pre-pr-review/`, `.codex/skills/`,
@@ -166,10 +169,13 @@ point of the design. Findings applied unverified are worse than no review.
   not just a note in the repo — routing only works if the hub receives it.
 - The hub is public: nothing routed there may carry client, repo, schema, or
   incident specifics.
-- Updates are pull-based. A lesson reaches spokes once it ships in a release
-  tag; `review-update.sh` installs the latest release (`--local` for unreleased
-  hub work). `review.sh` warns when a spoke's kit is behind the latest release,
-  or when it cannot tell.
+- Updates are pull-based: the hub pushes nothing to spokes. A lesson reaches
+  spokes once it ships in a release tag; `review-update.sh` installs the latest
+  release (`--local` for unreleased hub work). The seeded
+  `review-kit-sync.yml` workflow polls weekly and opens a sync PR when the
+  spoke is behind; a human still has to merge it. A spoke without the workflow
+  (opted out, or never re-run with `--init`) relies on `review.sh`, which warns
+  when the kit is behind the latest release, or when it cannot tell.
 
 ### Cost and depth dials
 
