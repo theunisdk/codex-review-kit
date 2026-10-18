@@ -29,8 +29,10 @@ the local verdict whose header names the first commit CodeRabbit reviewed, or
 an ancestor of it on the PR's branch. `.review/verdict.md` counts only when
 its header names that commit. A `<sha>+uncommitted` verdict, from
 `/review --uncommitted`, is skipped and named in the record: it may hold fixes
-written after reading CodeRabbit. Findings on files changed after the local
-review are `unscored`. With no matching verdict the PR is `no-local-verdict`: recorded, with `null` counts,
+written after reading CodeRabbit. A finding on code a later commit brought
+in is `unscored`; code that was there at the local review is scored, even in
+a file changed since. A compare that failed or was denied is counted apart,
+as `compare_failed`. With no matching verdict the PR is `no-local-verdict`: recorded, with `null` counts,
 and never read as `missed 0`.
 
 Each run leaves a record: a PR comment marked `<!-- review-postmortem:v1 -->`,

@@ -285,11 +285,13 @@ matched by the SHA in the verdict header; `.review/verdict.md` is used only
 when its header names that commit. A `<sha>+uncommitted` verdict from
 `--uncommitted` is never used: it may have been written after reading
 CodeRabbit, and the postmortem names each one it skips. A verdict for an earlier commit on the
-PR's branch still scores the files the later commits did not touch. With no
+PR's branch, or findings CodeRabbit raised on later heads, still score
+whatever code was already there at the reviewed commit. With no
 verdict for that commit or such an ancestor, the PR is recorded as `no-local-verdict` and not scored, which is
 not the same as `missed 0`. Every missed finding is diagnosed by cause —
 wrong lens, insufficient tracing, filtered by threshold, or structurally out of
-reach — and turned into a prompt edit or a WATCH entry.
+reach — from the lens logs in `.review/raw/`, and turned into a prompt edit
+or a WATCH entry. Without those logs the cause is `unverified`.
 
 The scorecard is kept twice. It is a PR comment marked
 `<!-- review-postmortem:v1 -->` with a JSON record, which a re-run updates
