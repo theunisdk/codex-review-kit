@@ -59,9 +59,13 @@ Read a replay differently from a live postmortem:
 - **The lenses may see later history.** The worktree shares the clone's
   objects, so a lens that runs `git log --all` can see fix commits. Read the
   catch rate as an upper bound.
+- **It runs the PR commit's own code,** as `/review` would on that branch:
+  its `.review/config.sh` and `analyzers.local.sh`. So it replays merged PRs
+  only.
 - **It skips what it cannot replay faithfully,** with a stated reason: a
-  pre-hub kit, a PR CodeRabbit never reviewed, and `--limit` reached. A
-  failed step reads `failed — <step>: <error>`, never a skip or `missed 0`.
+  pre-hub kit, a PR CodeRabbit never reviewed, an unmerged PR, a symlink in
+  the kit's paths, and `--limit` reached. A failed step reads
+  `failed — <step>: <error>`, never a skip or `missed 0`.
 
 Each PR costs one full `review.sh` run (six Codex lenses at the configured
 effort) plus two headless `claude -p` calls, capped by `--claude-budget`.

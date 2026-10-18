@@ -2927,7 +2927,8 @@ case "$2" in
 esac
 [ ! -e .review/replay ] || touch "$CLAUDE_STUB_DIR/$kind.saw-github-data"
 [ -z "${CLAUDE_STUB_SLEEP:-}" ] || { touch "$CLAUDE_STUB_DIR/started"; sleep "$CLAUDE_STUB_SLEEP"; }
-sed -e "s/@SHA@/$(git rev-parse HEAD)/g" -e "s/@SHORT@/$(git rev-parse --short HEAD)/g" \
+pr="$(printf '%s\n' "$2" | sed -n '1s/.* PR #\([0-9]*\).*/\1/p')"
+sed -e "s/@SHA@/$(git rev-parse HEAD)/g" -e "s/@SHORT@/$(git rev-parse --short HEAD)/g" -e "s/@PR@/$pr/g" \
   "$CLAUDE_STUB_DIR/$kind.txt" > "$CLAUDE_STUB_DIR/$kind.reply"
 jq -n --rawfile r "$CLAUDE_STUB_DIR/$kind.reply" '{type: "result", subtype: "success", is_error: false, result: $r, total_cost_usd: 0.25}'
 EOF
@@ -2959,8 +2960,9 @@ gh_pr_fixture() { # gh_pr_fixture <stubdir> <n> <first-reviewed sha> <head sha> 
 # $RS: spoke · $RREMOTE: its origin · $RHUB: the hub · $RGH / $RCL / $RCX: gh, claude, codex stub dirs
 # PR 1: A (first reviewed) then B, squash-merged as S · PR 2: a pre-hub kit
 # PR 3: PR 1's commits again · PR 4: a GitHub read fails · PR 5: CodeRabbit never reviewed it
+# PR 6: merged with a merge commit, reviewed only by a status · PR 7: still open · PR 8: a symlinked REVIEW.md
 replay_fixture() { # replay_fixture <id>
-  local id="$1" m a b s p
+  local id="$1" m a b s p c6 m6 l8
   RS="$WORK/$id-spoke"; RREMOTE="$WORK/$id-remote.git"; RHUB="$WORK/$id-hub"
   RGH="$WORK/$id-gh"; RCL="$WORK/$id-claude"; RCX="$WORK/$id-codex"
   mkdir -p "$RGH" "$RCL" "$RCX"
@@ -2986,10 +2988,15 @@ replay_fixture() { # replay_fixture <id>
     git checkout -qb prehub main~1
     printf 'kit: https://github.com/theunisdk/ai-dev 7654321\n' > .review/kit-version
     git commit -qam 'pre-hub change'
+    git checkout -qb merged6 main~1
+    printf 'six\n' > six.txt && git add six.txt && git commit -qm six
+    git checkout -qb link8 main~1
+    ln -s ../../../outside.txt REVIEW.md && git add REVIEW.md && git commit -qm link
     git checkout -q main
+    git merge -q --no-ff merged6 -m 'merge six'
   )
   m=$(git -C "$src" rev-parse main); a=$(git -C "$src" rev-parse feat~1); b=$(git -C "$src" rev-parse feat)
-  p=$(git -C "$src" rev-parse prehub)
+  p=$(git -C "$src" rev-parse prehub); c6=$(git -C "$src" rev-parse merged6); l8=$(git -C "$src" rev-parse link8)
   git clone -q --bare "$src" "$RREMOTE"
   git -C "$RREMOTE" config uploadpack.allowAnySHA1InWant true
   git -C "$RREMOTE" update-ref refs/pull/1/head "$b"
@@ -2997,7 +3004,11 @@ replay_fixture() { # replay_fixture <id>
   git -C "$RREMOTE" update-ref refs/pull/3/head "$b"
   git -C "$RREMOTE" update-ref refs/pull/4/head "$b"
   git -C "$RREMOTE" update-ref refs/pull/5/head "$b"
-  git -C "$RREMOTE" for-each-ref --format='delete %(refname)' refs/heads/feat refs/heads/prehub | git -C "$RREMOTE" update-ref --stdin
+  git -C "$RREMOTE" update-ref refs/pull/6/head "$c6"
+  git -C "$RREMOTE" update-ref refs/pull/7/head "$b"
+  git -C "$RREMOTE" update-ref refs/pull/8/head "$l8"
+  git -C "$RREMOTE" for-each-ref --format='delete %(refname)' refs/heads/feat refs/heads/prehub refs/heads/merged6 refs/heads/link8 \
+    | git -C "$RREMOTE" update-ref --stdin
   git clone -q "$RREMOTE" "$RS"
   printf '.claude/worktrees/\n' >> "$RS/.git/info/exclude"
   gh_pr_fixture "$RGH" 1 "$a" "$b" "$m"
@@ -3006,6 +3017,13 @@ replay_fixture() { # replay_fixture <id>
   gh_pr_fixture "$RGH" 4 "$a" "$b" "$m"; rm "$RGH/api-repos_o_r_pulls_4_comments.json"
   gh_pr_fixture "$RGH" 5 "$a" "$b" "$m"
   gh_json "$RGH" api-repos_o_r_pulls_5_reviews '[]'
+  gh_pr_fixture "$RGH" 6 "$c6" "$c6" "$m"
+  gh_json "$RGH" api-repos_o_r_pulls_6 "{\"number\":6,\"base\":{\"sha\":\"$m\"},\"merge_commit_sha\":\"$m\"}"
+  gh_json "$RGH" api-repos_o_r_pulls_6_reviews '[]'
+  gh_json "$RGH" "api-repos_o_r_commits_${c6}_statuses" '[{"creator":{"login":"coderabbitai[bot]"},"context":"CodeRabbit","state":"success","description":"Review completed","created_at":"2026-01-02T08:00:00Z"}]'
+  gh_pr_fixture "$RGH" 7 "$a" "$b" "$m"
+  sed 's/"MERGED"/"OPEN"/' "$RGH/pr-view-7.json" > "$RGH/pr-view-7.tmp" && mv "$RGH/pr-view-7.tmp" "$RGH/pr-view-7.json"
+  gh_pr_fixture "$RGH" 8 "$l8" "$l8" "$m"
   gh_json "$RGH" pr-list '[{"number":5,"mergedAt":"2026-01-05T00:00:00Z"},{"number":1,"mergedAt":"2026-01-04T00:00:00Z"},{"number":3,"mergedAt":"2026-01-01T00:00:00Z"}]'
   RA="$a"
   finding 'replayed finding' > "$RCX/correctness.json"
@@ -3020,16 +3038,16 @@ Lenses: correctness · Effort: high · Secrets: not_scanned
 ```
 EOF
   cat > "$RCL/postmortem.txt" <<'EOF'
-review-postmortem: scored — PR #1: caught 1 / missed 1 / rejected-wrongly 0 / noise 0 / unscored 0
+review-postmortem: scored — PR #@PR@: caught 1 / missed 1 / rejected-wrongly 0 / noise 0 / unscored 0
 review-postmortem: record — replay: comment not posted; local copy written by the caller
 
 <!-- review-postmortem:v1 -->
-## Review postmortem — PR #1
+## Review postmortem — PR #@PR@
 
 <details><summary>Machine-readable record</summary>
 
 ```json
-{"schema": "review-postmortem/v1", "pr": 1, "status": "scored", "compared_commit": "@SHA@",
+{"schema": "review-postmortem/v1", "pr": @PR@, "status": "scored", "compared_commit": "@SHA@",
  "counts": {"caught": 1, "missed": 1, "rejected_wrongly": 0, "noise": 0, "unscored": 0},
  "missed_by_cause": {"wrong_lens": 1, "tracing": 0, "threshold": 0, "structural": 0},
  "findings": [{"file": "src.txt", "summary": "off by one", "class": "missed", "cause": "wrong_lens"}],
@@ -3055,7 +3073,7 @@ test_replay_scores_reports_and_writes_nothing_else() {
   local rc rec refs_before common short kit
   replay_fixture r1
   refs_before="$(git -C "$RS" for-each-ref)"
-  run_replay 1 2 4 5; rc=$?
+  run_replay --limit 10 1 2 4 5 6 7 8; rc=$?
   common="$(cd "$RS" && cd "$(git rev-parse --git-common-dir)" && pwd -P)"
   short="$(git -C "$RS" rev-parse --short "$RA")"; kit="$(git -C "$RHUB" rev-parse --short main)"
   rec="$common/review-replay/pr1-$kit"
@@ -3068,10 +3086,19 @@ test_replay_scores_reports_and_writes_nothing_else() {
     grep -qE '^review-replay: failed — PR #4: github: gh api --paginate repos/o/r/pulls/4/comments: HTTP 404' "$LOG"
   assert "r1: a PR CodeRabbit never reviewed is skipped" \
     grep -qxF 'review-replay: skipped — PR #5: CodeRabbit has not reviewed PR #5' "$LOG"
+  assert "r1: a merge-commit PR reviewed only by a status is replayed from the merge's first parent" \
+    sh -c 'grep -qE "^review-replay: replayed — PR #6 " "$1" && jq -e --arg b "$2" ".replay.base == \$b" "$3"' \
+    _ "$LOG" "$(git -C "$RS" rev-parse "$RA~1")" "$common/review-replay/pr6-$kit/record.json"
+  assert "r1: an open PR is skipped, because a replay runs its config" \
+    grep -qE '^review-replay: skipped — PR #7: PR #7 is OPEN, not merged' "$LOG"
+  assert "r1: a symlink in the kit's paths is skipped" \
+    grep -qE "^review-replay: skipped — PR #8: symlink in the kit's paths at [0-9a-f]{7} \(REVIEW.md\)" "$LOG"
+  assert "r1: … and nothing is written through it" test ! -e "$RS/outside.txt"
   assert "r1: the aggregate sums the scorecards" \
-    grep -qF 'review-replay: aggregate — replayed 1 / skipped 2 / failed 1 — caught 1 / missed 1 (wrong lens 1 / tracing 0 / threshold 0 / structural 0) / rejected-wrongly 0 / noise 0 / unscored 0' "$LOG"
+    grep -qF 'review-replay: aggregate — replayed 2 / skipped 4 / failed 1 — caught 2 / missed 2 (wrong lens 2 / tracing 0 / threshold 0 / structural 0) / rejected-wrongly 0 / noise 0 / unscored 0' "$LOG"
   assert "r1: … and groups lessons by cause" \
-    sh -c 'grep -qxF "lessons — wrong_lens (1 missed):" "$1" && grep -qF "PR #1 propose (hub) .review/prompts/correctness.md" "$1"' _ "$LOG"
+    sh -c 'grep -qxF "lessons — wrong_lens (2 missed):" "$1" && grep -qF "PR #1 propose (hub) .review/prompts/correctness.md" "$1"' _ "$LOG"
+  assert "r1: … and the cost line covers every PR" grep -qxF 'review-replay: cost — claude $1.00, codex 0 tokens, failed and skipped PRs included' "$LOG"
   assert "r1: the record is written, marked as a replay" grep -qxF '<!-- review-replay:v1 -->' "$rec/postmortem.md"
   assert "r1: … with the kit ref and the source of each repo-owned file" \
     jq -e --arg k "$(git -C "$RHUB" rev-parse main)" '.replay.kit_sha == $k and .replay.repo_owned[".review/rubric.md"] == "pr"
@@ -3086,7 +3113,7 @@ test_replay_scores_reports_and_writes_nothing_else() {
   assert_not "r1: nothing is commented, filed or written on GitHub" \
     grep -qE '^(pr comment|pr review|issue create|issue comment|label create)|(^| )(-X|--method|-f|-F|--field|--raw-field|--input)( |$)' "$RGH/calls.log"
   assert "r1: claude never gets gh, Edit or Write" \
-    sh -c '[ "$(grep -c . "$1")" -eq 2 ] && ! grep -vF -- "--disallowedTools Bash(gh:*)" "$1" | grep -q . && ! grep -vF -- "--tools Read,Grep,Glob,Bash" "$1" | grep -q .' _ "$RCL/calls.log"
+    sh -c '[ "$(grep -c . "$1")" -eq 4 ] && ! grep -vF -- "--disallowedTools Bash(gh:*)" "$1" | grep -q . && ! grep -vF -- "--tools Read,Grep,Glob,Bash" "$1" | grep -q .' _ "$RCL/calls.log"
   assert "r1: the spoke's refs are untouched" test "$(git -C "$RS" for-each-ref)" = "$refs_before"
   assert "r1: … and no FETCH_HEAD is written" test ! -e "$common/FETCH_HEAD"
   assert "r1: … and its checkout is clean" test -z "$(git -C "$RS" status --porcelain)"
@@ -3107,6 +3134,21 @@ test_replay_failure_is_reported_and_cleaned_up() {
   assert "r2: claude is never called" test ! -e "$RCL/calls.log"
   assert "r2: the aggregate counts the failure, with nothing scored" \
     grep -qF 'review-replay: aggregate — replayed 0 / skipped 0 / failed 1 — caught 0 / missed 0' "$LOG"
+
+  finding 'salvaged' > "$RCX/correctness.json"; printf '3\n' > "$RCX/correctness.rc"
+  run_replay 3
+  assert "r2: a review that exits 0 but is incomplete is a failure" \
+    grep -qE '^review-replay: failed — PR #3: review: incomplete run: .*"lenses_failed":\["correctness"\]' "$LOG"
+  assert "r2: … and its worktree is removed" no_replay_worktrees "$RS"
+
+  rm "$RCX/correctness.rc"
+  sed 's/"counts": {"caught": 1, /"counts": {/' "$RCL/postmortem.txt" > "$RCL/postmortem.bad" && mv "$RCL/postmortem.bad" "$RCL/postmortem.txt"
+  run_replay 3
+  assert "r2: a scored record without its counts is a failure" \
+    grep -qE "^review-replay: failed — PR #3: postmortem: the record's JSON is missing, unparseable, or not a scored record of PR #3" "$LOG"
+  assert "r2: … that still reports what it cost" grep -qF '· cost so far claude $0.50, codex 0 tokens' "$LOG"
+  assert "r2: … and no record replaces the logs" test ! -e "$common/review-replay/pr3-$kit/postmortem.md"
+  assert "r2: … and its worktree is removed" no_replay_worktrees "$RS"
 }
 
 test_replay_interrupt_removes_the_worktree() {
