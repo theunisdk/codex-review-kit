@@ -381,7 +381,7 @@ reproduced this way.
 ## Replay mode
 
 `scripts/review-replay.sh`, in the hub, re-runs today's kit on the commit
-CodeRabbit first reviewed on an old PR, in a temporary worktree, and calls
+CodeRabbit first reviewed on an old PR, in a temporary clone, and calls
 this command with `<n> --replay <dir>`. A replay scores today's kit, not the
 review that ran on the PR. It must not reach the PR, because a comment
 notifies everyone on it. The steps above apply, with these changes:
@@ -389,7 +389,7 @@ notifies everyone on it. The steps above apply, with these changes:
 - **One plain command per Bash call.** The replay allows only read-only
   commands, matched by their first words, such as `git show`, `git diff`,
   `git blame`, `git log`, `git cat-file`, `jq`, `grep` and `wc`, run from the
-  worktree's root. It denies everything else: `git -C`, `cd`, `&&`, `;`,
+  clone's root. It denies everything else: `git -C`, `cd`, `&&`, `;`,
   pipes, loops, redirection, `$(…)`, and interpreters such as `python3`.
   Read a file with the Read tool, and JSON with `jq <filter> <file>`, one file
   per call. A denied command follows the rule above: a denied step-2 compare
@@ -404,12 +404,12 @@ notifies everyone on it. The steps above apply, with these changes:
   is missing or does not parse, report `failed — read: <file>`.
 - **Fetch nothing.** The caller fetched the PR's commits. A finding whose
   commit is still missing is unscored with `compare_failed`.
-- **The verdict is this worktree's `.review/verdict.md`**, relation `same`.
-  Do not list other worktrees or the review history. They hold verdicts from
+- **The verdict is this clone's `.review/verdict.md`**, relation `same`.
+  Do not list worktrees or the review history. They hold verdicts from
   the kit that ran then, which a replay does not measure. If its header does
   not name the comparison commit, report `failed — verdict: <why>`.
-- **The lens evidence for step 4 is this worktree's `.review/raw/`**, from
-  the run that the verdict adjudicated. The worktree held only that run, so
+- **The lens evidence for step 4 is this clone's `.review/raw/`**, from
+  the run that the verdict adjudicated. The clone held only that run, so
   the `head` and `mode` check alone ties them; skip the `find`, which the
   replay does not allow. A replay that keeps them copies them
   into the record, at `<record>/raw/log-<lens>.txt` and

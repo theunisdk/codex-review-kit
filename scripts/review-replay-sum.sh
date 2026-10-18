@@ -8,7 +8,11 @@
 # prints the same scorecard over all of them, each lesson named by repo#PR.
 #
 #   scripts/review-replay-sum.sh <run dir | aggregate.json>...
-#     --json    print the combined scorecard as JSON instead
+#     --json            print the combined scorecard as JSON instead
+#     --aliases <file>  name each repo by its alias, and print lessons as counts
+#                       only, so the output is safe to paste into the public hub.
+#                       One "<owner/repo> <alias>" per line; # starts a comment.
+#                       A repo the file does not cover is refused.
 #
 # Refuses, rather than sums: a run that stopped before its scorecard, one made
 # by an older review-replay.sh, the same run twice, a PR scored in two runs,
@@ -20,13 +24,15 @@ HUB="$(cd "$(dirname "$0")/.." && pwd -P)"
 # shellcheck source=lib/common.sh
 . "$HUB/scripts/lib/common.sh"
 
-usage() { sed -n '2,16p' "$0" >&2; exit 64; }
+usage() { sed -n '2,21p' "$0" >&2; exit 64; }
 
-JSON=""; RUNS=()
+JSON=""; ALIASES=""; RUNS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --json)    JSON=1 ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    --aliases) [ $# -ge 2 ] || { echo "error: --aliases needs a file" >&2; usage; }
+               ALIASES="$2"; shift ;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
     -*)        echo "error: unknown flag: $1" >&2; usage ;;
     *)         RUNS+=("$1") ;;
   esac
@@ -37,6 +43,21 @@ need_cmd jq
 
 TMP="$(mktemp -d)" || die "no temp dir"
 trap 'rm -rf "$TMP"' EXIT
+
+# {"owner/repo" (lower case): alias}; the alias must not be able to carry a repo name
+if [ -n "$ALIASES" ]; then
+  [ -f "$ALIASES" ] && [ -r "$ALIASES" ] || die "cannot read the alias file $ALIASES"
+  sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$ALIASES" | grep . > "$TMP/aliases.txt"
+  [ $? -le 1 ] || die "cannot read the alias file $ALIASES"
+  [ -s "$TMP/aliases.txt" ] || die "the alias file $ALIASES names no repo"
+  bad="$(grep -vnE '^[^/[:space:]]+/[^/[:space:]]+[[:space:]]+[A-Za-z0-9_-]+$' "$TMP/aliases.txt" | head -n1)"
+  [ -z "$bad" ] || die "alias file line is not \"<owner/repo> <alias>\" with a letters, digits, _ or - alias: ${bad%%:*} (comments and blank lines not counted)"
+  jq -R -s 'split("\n") | map(select(. != "") | [splits("[[:space:]]+")] | {key: (.[0] | ascii_downcase), value: .[1]})
+    | if (map(.key) | unique | length) != length then error("a repo is named twice")
+      elif (map(.value | ascii_downcase) | unique | length) != length then error("two repos share an alias")
+      else from_entries end' "$TMP/aliases.txt" > "$TMP/aliases.json" 2> "$TMP/aliases.err" \
+    || die "bad alias file $ALIASES: $(sed 's/^jq: error[^:]*: //' "$TMP/aliases.err" | head -n1)"
+fi
 
 : > "$TMP/runs.all"
 for r in "${RUNS[@]}"; do
@@ -66,6 +87,14 @@ jq -r '(group_by("\(.spoke) \(.run)") | map(select(length > 1)) | .[] | "the sam
   "$TMP/runs.json" > "$TMP/refused" || die "cannot check the runs"
 [ ! -s "$TMP/refused" ] || die "$(head -n1 "$TMP/refused")"
 
+if [ -n "$ALIASES" ]; then
+  jq -r --slurpfile a "$TMP/aliases.json" '[.[].repo | select(($a[0][ascii_downcase] // null) == null)] | unique | .[]' \
+    "$TMP/runs.json" > "$TMP/unaliased" || die "cannot check the runs against the alias file"
+  [ ! -s "$TMP/unaliased" ] || die "the alias file covers no alias for $(head -n1 "$TMP/unaliased") (and $(($(grep -c . < "$TMP/unaliased") - 1)) more repo(s))"
+  jq --slurpfile a "$TMP/aliases.json" 'map(.repo = $a[0][.repo | ascii_downcase] | .records |= map(.repo = $a[0][.repo | ascii_downcase]))' \
+    "$TMP/runs.json" > "$TMP/runs.aliased" && mv "$TMP/runs.aliased" "$TMP/runs.json" || die "cannot alias the runs"
+fi
+
 SCORE=(jq -L "$HUB/scripts/lib")
 "${SCORE[@]}" 'include "replay-scorecard";
   def total(p): map(p) | add;
@@ -80,12 +109,20 @@ SCORE=(jq -L "$HUB/scripts/lib")
                prs_of_unknown_denials: total(.denials.prs_of_unknown_denials)},
      records: map(.records[])}' "$TMP/runs.json" > "$TMP/sum.json" || die "cannot sum the runs"
 
+# aliased: no spoke path, no record, and lessons as counts — what each finding quotes is spoke code
+if [ -n "$ALIASES" ]; then
+  "${SCORE[@]}" 'include "replay-scorecard";
+    del(.records) + {runs: (.runs | map(del(.spoke, .path))), lessons: (.records | lesson_counts("\(.repo) #\(.pr)"))}' \
+    "$TMP/sum.json" > "$TMP/sum.aliased" && mv "$TMP/sum.aliased" "$TMP/sum.json" || die "cannot alias the scorecard"
+fi
+
 if [ -n "$JSON" ]; then cat "$TMP/sum.json"; exit 0; fi
 "${SCORE[@]}" -r 'include "replay-scorecard";
   "review-replay-sum: runs — \(.runs | length) run(s) of kit \(.kit.describe) (\(.kit.sha[0:7])) across \(.runs | map(.repo | ascii_downcase) | unique | length) repo(s)",
   (.runs[] | "  \(.repo) \(.run): \(.prs | prs_text)"),
   "review-replay-sum: aggregate — \(.prs | prs_text) — \(counts_text)",
-  (.records | lessons("\(.repo)#\(.pr)"))' "$TMP/sum.json" || die "cannot print the scorecard"
+  if has("lessons") then (.lessons[] | "lessons — \(.cause) (\(.missed) missed, \(.proposals) proposal(s)): \(.prs | join(", "))")
+  else (.records | lessons("\(.repo)#\(.pr)")) end' "$TMP/sum.json" || die "cannot print the scorecard"
 cost="$(jq -r '.cost | [.claude_usd, .claude_calls_of_unknown_cost, .codex_tokens, .prs_of_unknown_codex_tokens] | @tsv' "$TMP/sum.json")" \
   && read -r usd cu tokens tu <<< "$cost" || die "cannot print the cost"
 printf 'review-replay-sum: cost — claude $%.2f' "$usd"

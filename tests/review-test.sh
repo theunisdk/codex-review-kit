@@ -1345,6 +1345,10 @@ test_js_tsc_findings_vs_failure() {
   printf "error TS18003: No inputs were found in config file 'tsconfig.json'.\n" > "$WORK/j18-stub/tsc.out"
   js_review j18 "printf '{}' > package.json; : > pnpm-lock.yaml; printf '{}' > tsconfig.json"
   assert "j18: config error is FAILED" grep -qF 'tsc --noEmit FAILED (rc=1)' "$JS_REPORT"
+  assert "j17-j18: located errors are findings, a config error is failed" \
+    bash -c '[ "$(status_of "$1" tsc)" = "analyzer status: ran — type errors above" ] \
+      && [ "$(status_of "$2" tsc)" = "analyzer status: failed — rc=1 with a configuration error and no located type error" ]' \
+    _ "$WORK/j17/.review/raw/analyzers.txt" "$JS_REPORT"
 }
 
 # TypeScript < 5.6 rejects --build --noEmit (TS5094). Plain --build would write
@@ -1369,6 +1373,148 @@ test_js_without_package_json_is_named() {
   js_review j14 ":"
   assert "j14: no package.json gets a skip line" grep -qF 'no package.json at the repo root' "$JS_REPORT"
   assert "j14: eslint section is not empty" section_nonempty "$JS_REPORT" eslint
+}
+
+# --- analyzer tests: status labels ----------------------------------------
+# Every boundary here can return "nothing" and can also fail, and the caller must
+# tell them apart: an analyzer that could not run (npx fetching an unrelated
+# `tsc` package, a missing dependency) is labelled failed, a non-zero exit with
+# no recognisable finding is unknown, an empty section is unknown, exit 0 with
+# an error banner is failed, a skipped tool is skipped, and an analyzers.txt
+# that was never written is a failed pass. Only `ran` reads as results, in
+# analyzers.txt, the lens prompt, findings.json and findings.md. Regression for
+# hub #68 §7 bug 1.
+status_of() { section_body "$1" "$2" | grep '^analyzer status: ' | tail -n 1; }
+export -f section_body status_of
+
+test_analyzer_that_cannot_run_is_labelled() {
+  analyzer_repo al1
+  cat > "$AREPO/.review/analyzers.local.sh" <<'EOF'
+_run_analyzer tsc '\([0-9]+,[0-9]+\): error TS' bash -c 'printf "\n%s\n\n" "                This is not the tsc command you are looking for"; exit 1'
+_run_analyzer vitest '^ FAIL ' bash -c 'echo "Error: Cannot find package '\''vitest'\'' imported from vitest.config.ts"; exit 1'
+_run_analyzer banner0 '' bash -c 'echo "npm error could not determine executable to run"; exit 0'
+_run_analyzer clean '' true
+_run_analyzer lint ':[0-9]+:[0-9]+: ' bash -c 'echo "a.sh:1:1: warning: unquoted"; exit 1'
+_run_analyzer crash ':[0-9]+:[0-9]+: ' bash -c 'echo "out of memory"; exit 2'
+_run_analyzer shapeless '' bash -c 'echo "3 problems"; exit 1'
+_section legacy-banner; printf 'tsc rc=1\n%s\n' "This is not the tsc command you are looking for" >> "$report"
+_section legacy-plain; echo "lint: clean" >> "$report"
+_section legacy-empty
+EOF
+  ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  local r="$AREPO/.review/raw/analyzers.txt" json="$AREPO/.review/findings.json" \
+    prompt="$AREPO/.review/raw/prompt-correctness.md" md="$AREPO/.review/findings.md"
+
+  assert "al1: the wrong npx tsc is failed, with its banner" \
+    bash -c '[ "$(status_of "$1" tsc)" = "analyzer status: failed — tsc could not run (rc=1): This is not the tsc command you are looking for" ]' _ "$r"
+  assert "al1: a missing dependency is failed" bash -c 'status_of "$1" vitest | grep -qF "analyzer status: failed — vitest could not run (rc=1): Error: Cannot find package"' _ "$r"
+  assert "al1: exit 0 with an error banner is failed, not clean" bash -c 'status_of "$1" banner0 | grep -qF "analyzer status: failed — banner0 could not run (rc=0)"' _ "$r"
+  assert "al1: exit 0 and no output is clean" bash -c '[ "$(status_of "$1" clean)" = "analyzer status: ran — clean (rc=0, no output)" ]' _ "$r"
+  assert "al1: a non-zero exit with findings is findings" bash -c '[ "$(status_of "$1" lint)" = "analyzer status: ran — findings above (rc=1)" ]' _ "$r"
+  assert "al1: a non-zero exit with no finding is unknown, not findings or clean" \
+    bash -c 'status_of "$1" crash | grep -qF "analyzer status: unknown — rc=2 and no output line is a finding"' _ "$r"
+  assert "al1: … and so is one with no findings pattern" \
+    bash -c 'status_of "$1" shapeless | grep -qF "analyzer status: unknown — rc=1 and no findings pattern"' _ "$r"
+  assert "al1: an unlabelled section quoting a banner is failed" \
+    bash -c 'status_of "$1" legacy-banner | grep -qF "analyzer status: failed — the tool could not run: This is not the tsc command"' _ "$r"
+  assert "al1: an unlabelled section is unknown, since no exit status was kept" \
+    bash -c 'status_of "$1" legacy-plain | grep -qF "analyzer status: unknown — no exit status was recorded"' _ "$r"
+  assert "al1: an empty section is unknown, not clean" \
+    bash -c 'status_of "$1" legacy-empty | grep -qF "analyzer status: unknown — the section is empty"' _ "$r"
+  assert "al1: every section has exactly one status line" \
+    bash -c '[ "$(awk "/^### /{ if (n) print c; n = 1; c = 0 } /^analyzer status: /{ c++ } END { print c }" "$1" | sort -u)" = 1 ]' _ "$r"
+  assert "al1: findings.json carries each tool's status" \
+    jq -e '.analyzers.status == "ran" and (.analyzers.tools | map(select(.name | test("^(semgrep|shellcheck)") | not) | {(.name): .status}) | add) == {
+      "gitleaks (secrets)": "ran", tsc: "failed", vitest: "failed", banner0: "failed", clean: "ran", lint: "ran",
+      crash: "unknown", shapeless: "unknown", "legacy-banner": "failed", "legacy-plain": "unknown", "legacy-empty": "unknown"}
+      and (.analyzers.tools[] | select(.name == "tsc") | .reason | startswith("tsc could not run"))' "$json"
+  assert "al1: a tool that did not run leaves complete alone" jq -e '.complete == true' "$json"
+  assert "al1: the lens prompt names each tool that produced no results" \
+    bash -c 'grep -qF "These analyzers produced NO results" "$1" && grep -qF "  - tsc (failed — tsc could not run (rc=1): This is not the tsc command" "$1" \
+      && grep -qF "  - legacy-empty (unknown — " "$1" && ! grep -qE "^  - (clean|lint|gitleaks \(secrets\)) \(" "$1"' _ "$prompt"
+  assert "al1: … and says only a ran section holds results" grep -qF 'only a `ran` section holds results' "$prompt"
+  assert "al1: findings.md names them too" \
+    bash -c 'grep -qF "These analyzers produced no results" "$1" && grep -qF "> - vitest (failed — " "$1"' _ "$md"
+  assert "al1: the run warns" grep -qE 'analyzer\(s\) produced no results: .*tsc vitest banner0 crash' "$LOG"
+}
+
+# The other "nothing"s: no analyzers.txt because the pass was turned off, because
+# it broke, or because every tool ran clean.
+test_analyzers_not_run_or_broken_are_said() {
+  analyzer_repo al2
+  ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  assert "al2: a run where every tool ran names none as missing" \
+    bash -c 'jq -e ".analyzers.status == \"ran\" and (.analyzers.tools | length) > 0 and all(.analyzers.tools[]; .status == \"ran\")" "$1" \
+      && ! grep -qF "produced NO results" "$2" && ! grep -qF "produced no results" "$3"' \
+    _ "$AREPO/.review/findings.json" "$AREPO/.review/raw/prompt-correctness.md" "$AREPO/.review/findings.md"
+
+  run_review "$AREPO" "$ASTUB"
+  assert "al2: --no-analyzers is not_run, not an empty ran" \
+    jq -e '.analyzers == {status: "not_run", reason: "--no-analyzers", tools: []}' "$AREPO/.review/findings.json"
+  assert "al2: … and the lenses and findings.md are told" \
+    bash -c 'grep -qF "Static analyzers were NOT run (--no-analyzers)" "$1" && grep -qF "Analyzers were NOT run (--no-analyzers)" "$2"' \
+    _ "$AREPO/.review/raw/prompt-correctness.md" "$AREPO/.review/findings.md"
+
+  printf ': > "$report"\n' > "$AREPO/.review/analyzers.local.sh"
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  assert "al2: a pass that leaves no analyzers.txt is failed" \
+    jq -e '.analyzers.status == "failed" and (.analyzers.reason | test("wrote no"))' "$AREPO/.review/findings.json"
+  assert "al2: … and the lenses and findings.md are told" \
+    bash -c 'grep -qF "The analyzer pass FAILED" "$1" && grep -qF "The analyzer pass FAILED" "$2"' \
+    _ "$AREPO/.review/raw/prompt-correctness.md" "$AREPO/.review/findings.md"
+
+  ( cd "$AREPO" && cp "$KIT/.review/prompts/_common-spec.md" .review/prompts/ && printf '# spec\n' > spec.md )
+  run_review_analyzers "$AREPO" "$ASTUB" --spec spec.md
+  assert "al2: spec mode is not_run, and findings.md does not call it missing" \
+    bash -c 'jq -e ".analyzers.status == \"not_run\" and .analyzers.reason == \"spec mode\"" "$1" && ! grep -qF "Analyzers were NOT run" "$2"' \
+    _ "$AREPO/.review/findings.json" "$AREPO/.review/findings.md"
+}
+
+# Declared dependencies that are not installed: a type check would fail on every
+# import, so neither tool runs. tsc's own exit: a banner is failed, an exit with
+# no located error and no known failure is unknown.
+test_js_without_deps_and_tsc_evidence() {
+  mkdir -p "$WORK/j21-stub"
+  printf 'pnpm\n' > "$WORK/j21-stub/runner"; printf '0\n' > "$WORK/j21-stub/eslint.rc"; printf '0\n' > "$WORK/j21-stub/tsc.rc"
+  js_review j21 "printf '{\"devDependencies\":{\"typescript\":\"5.6.0\"}}' > package.json; : > pnpm-lock.yaml; printf '{}' > tsconfig.json"
+  assert "j21: eslint skipped, dependencies not installed" \
+    bash -c '[ "$(status_of "$1" eslint)" = "analyzer status: skipped — dependencies are not installed (no node_modules)" ]' _ "$JS_REPORT"
+  assert "j21: tsc skipped too" \
+    bash -c '[ "$(status_of "$1" tsc)" = "analyzer status: skipped — dependencies are not installed (no node_modules)" ]' _ "$JS_REPORT"
+  assert_not "j21: … and neither was run" grep -qE 'exec (eslint|tsc) ' "$ASTUB/runner.calls"
+
+  mkdir -p "$WORK/j22-stub"
+  printf 'npx\n' > "$WORK/j22-stub/runner"; printf '0\n' > "$WORK/j22-stub/eslint.rc"; printf '1\n' > "$WORK/j22-stub/tsc.rc"
+  printf '\n                This is not the tsc command you are looking for\n' > "$WORK/j22-stub/tsc.out"
+  js_review j22 "printf '{}' > package.json; printf '{}' > tsconfig.json"
+  assert "j22: the wrong tsc package is failed, not type errors" \
+    bash -c 'status_of "$1" tsc | grep -qF "analyzer status: failed — tsc could not run: This is not the tsc command"' _ "$JS_REPORT"
+  assert "j22: eslint still ran" bash -c '[ "$(status_of "$1" eslint)" = "analyzer status: ran — no errors" ]' _ "$JS_REPORT"
+
+  mkdir -p "$WORK/j23-stub"
+  printf 'pnpm\n' > "$WORK/j23-stub/runner"; printf '2\n' > "$WORK/j23-stub/tsc.rc"; printf '1\n' > "$WORK/j23-stub/eslint.rc"
+  printf 'Killed\n' > "$WORK/j23-stub/tsc.out"
+  printf "Error: Cannot find package '@typescript-eslint/parser' imported from eslint.config.js\n" > "$WORK/j23-stub/eslint.out"
+  js_review j23 "printf '{}' > package.json; : > pnpm-lock.yaml; printf '{}' > tsconfig.json"
+  assert "j23: tsc with no located error and no known failure is unknown, not clean" \
+    bash -c '[ "$(status_of "$1" tsc)" = "analyzer status: unknown — rc=2 with no located type error" ] && grep -qF "types are UNKNOWN, not clean" "$1"' _ "$JS_REPORT"
+  assert "j23: eslint rc 1 that never loaded is failed, not findings" \
+    bash -c 'status_of "$1" eslint | grep -qF "analyzer status: failed — eslint could not run: Error: Cannot find package" && grep -qF "eslint FAILED (rc=1)" "$1"' _ "$JS_REPORT"
+}
+
+# A per-language tool that is not installed used to leave no section at all,
+# which reads as "nothing to lint".
+test_missing_language_tool_is_skipped() {
+  if command -v tflint > /dev/null 2>&1; then skip_test "al3: tflint is installed here"; return; fi
+  analyzer_repo al3
+  ( cd "$AREPO" && printf 'resource "x" "y" {}\n' > main.tf && git add -A && git commit -qm tf )
+  run_review_analyzers "$AREPO" "$ASTUB" main
+  assert "al3: a missing tflint is a named skip" \
+    bash -c '[ "$(status_of "$1" tflint)" = "analyzer status: skipped — tflint is not installed" ]' _ "$AREPO/.review/raw/analyzers.txt"
+  assert "al3: … that findings.json carries" \
+    jq -e '.analyzers.tools[] | select(.name == "tflint") | .status == "skipped"' "$AREPO/.review/findings.json"
 }
 
 # --- updater fixtures ------------------------------------------------------
@@ -3973,6 +4119,32 @@ test_replay_sum_across_spokes() {
   assert "r13: --json gives the same scorecard with every record" \
     sh -c 'bash "$1/scripts/review-replay-sum.sh" --json "$2" "$3" | jq -e ".schema == \"review-replay-sum/v1\" and .prs.replayed == 2 and .counts.caught == 2
       and (.records | map(\"\(.repo)#\(.pr)\") | sort) == [\"o/r#1\", \"o/r#6\"] and (.runs | length) == 2"' _ "$hub" "$a" "$b"
+  # the hub is public: with --aliases no repo name, spoke path or quoted code is printed
+  printf '# private key\nO/R  S1\n\nx/y S2 # unused\n' > "$WORK/r13.aliases"
+  bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$a" "$b" > "$WORK/r13.pub" 2>&1; rc=$?
+  assert "r13: --aliases prints the same scorecard, by alias" \
+    sh -c '[ "$2" -eq 0 ] && grep -qxF "$(grep "^review-replay-sum: aggregate — " "$3")" "$1" && [ "$(grep -c "^  S1 .*: replayed 1 / " "$1")" -eq 2 ] \
+      && grep -qE "^lessons — wrong_lens \(2 missed, [0-9]+ proposal\(s\)\): S1 #1, S1 #6$" "$1" && grep -qF "review-replay-sum: cost — " "$1"' _ "$WORK/r13.pub" "$rc" "$out"
+  assert "r13: … and names no repo, path or finding" \
+    sh -c '! grep -qiF "o/r" "$1" && ! grep -qF "src.txt" "$1" && ! grep -qF "$2" "$1" && ! grep -qF " missed: " "$1"' _ "$WORK/r13.pub" "$WORK"
+  bash "$hub/scripts/review-replay-sum.sh" --json --aliases "$WORK/r13.aliases" "$a" "$b" > "$WORK/r13.pub.json" 2>&1
+  assert "r13: --json --aliases carries counts and aliases only" \
+    sh -c 'jq -e "(has(\"records\") | not) and .counts.caught == 2 and (.runs | map(.repo) | unique) == [\"S1\"] and all(.runs[]; has(\"spoke\") or has(\"path\") | not)
+      and .lessons == [{cause: \"wrong_lens\", missed: 2, proposals: .lessons[0].proposals, prs: [\"S1 #1\", \"S1 #6\"]}]" "$1" \
+      && ! grep -qiF "o/r" "$1" && ! grep -qF "src.txt" "$1" && ! grep -qF "$2" "$1"' _ "$WORK/r13.pub.json" "$WORK"
+  mkdir -p "$WORK/r13-runs/freecause"; jq '.run = "free-run" | .records[0].pr = 7 | .records[0].findings |= map(.cause = "see src.txt line 3")' "$b/aggregate.json" > "$WORK/r13-runs/freecause/aggregate.json"
+  bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$a" "$WORK/r13-runs/freecause" > "$WORK/r13.pub" 2>&1; rc=$?
+  assert "r13: … and a free-text cause is printed as other, never quoted" \
+    sh -c '[ "$2" -eq 0 ] && grep -qE "^lessons — other \(1 missed, " "$1" && ! grep -qF "src.txt" "$1"' _ "$WORK/r13.pub" "$rc"
+  printf 'x/y S2\n' > "$WORK/r13.aliases2"
+  bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases2" "$a" > "$WORK/r13.pub" 2>&1; rc=$?
+  assert "r13: a repo the alias file does not cover is refused, not printed by name" \
+    sh -c '[ "$2" -eq 1 ] && grep -qF "the alias file covers no alias for o/r" "$1" && ! grep -q "aggregate —" "$1"' _ "$WORK/r13.pub" "$rc"
+  for bad in 'o/r' 'o/r S 1' 'o/r S1\nO/R S2' 'o/r S1\nx/y s1' '# nothing'; do
+    printf "$bad\n" > "$WORK/r13.aliases2"
+    bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases2" "$a" > "$WORK/r13.pub" 2>&1; rc=$?
+    assert "r13: a bad alias file is refused: $bad" sh -c '[ "$2" -eq 1 ] && ! grep -q "aggregate —" "$1"' _ "$WORK/r13.pub" "$rc"
+  done
   bash "$hub/scripts/review-replay-sum.sh" > "$out" 2>&1; rc=$?
   assert "r13: no run is a usage error, not an empty scorecard" test "$rc" -eq 64
   bash "$hub/scripts/review-replay-sum.sh" "$a" "$a/aggregate.json" > "$out" 2>&1; rc=$?
@@ -4062,6 +4234,8 @@ test_replay_docs_post_nothing() {
   assert "r5: the postmortem has a replay mode" grep -qF '`--replay <dir>` is only for' "$pm"
   assert "r5: … that calls no gh and saves nothing" sh -c 'grep -qF "**Call no \`gh\`.**" "$1" && grep -qF "**Save nothing.**" "$1"' _ "$pm"
   assert "r5: … and keeps the status contract" grep -qF 'review-postmortem: record — replay: comment not posted; local copy written by the caller' "$pm"
+  assert "r5: … in a temporary clone, since #67, not a worktree" \
+    sh -c 'awk "/^## Replay mode/ { on = 1 } on" "$1" > "$2" && grep -qF "in a temporary clone" "$2" && ! grep -qiE "temporary worktree|this worktree|worktree.s root" "$2"' _ "$pm" "$WORK/r5-replay-mode.md"
   assert "r5: adjudication has replay deltas" grep -qF '## Replay mode' "$KIT/.review/adjudication.md"
   assert "r5: REVIEW.md says what a replay measures" grep -qF 'scripts/review-replay.sh' "$KIT/REVIEW.md"
   assert "r5: … and so does OPERATING.md" grep -qF 'scripts/review-replay.sh' "$KIT/OPERATING.md"
@@ -4556,6 +4730,10 @@ run_tests \
   test_js_tsc_findings_vs_failure \
   test_js_tsc_build_skipped_before_ts56 \
   test_js_without_package_json_is_named \
+  test_analyzer_that_cannot_run_is_labelled \
+  test_analyzers_not_run_or_broken_are_said \
+  test_js_without_deps_and_tsc_evidence \
+  test_missing_language_tool_is_skipped \
   test_update_reports_source_and_revision \
   test_update_marks_a_dirty_local_hub \
   test_update_marks_an_untracked_hub_file \

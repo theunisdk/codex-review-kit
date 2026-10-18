@@ -322,12 +322,31 @@ fi
 
 # --- cheap static signal (fed to Codex as priors, so it aims higher) -------
 SECRETS_LEAKED=0; SECRETS_FAILED=0; SECRETS_NOTE=""
+ANALYZERS_STATUS="not_run"; ANALYZERS_WHY="--no-analyzers"; [ "$MODE" != "spec" ] || ANALYZERS_WHY="spec mode"
 if [ "$RUN_ANALYZERS" = "1" ]; then
   . "$REPO_ROOT/scripts/lib/analyzers.sh"
-  collect_analyzer_output "$OUT" || warn "analyzer collection had errors (non-fatal)"
+  ANALYZERS_STATUS="ran"; ANALYZERS_WHY=""
+  collect_analyzer_output "$OUT" || { ANALYZERS_STATUS="failed"; ANALYZERS_WHY="the analyzer pass returned an error"
+    warn "analyzer collection had errors (non-fatal)"; }
+  # the secret scan always writes a section, so no file means the pass broke
+  [ -s "$OUT/analyzers.txt" ] || { ANALYZERS_STATUS="failed"; ANALYZERS_WHY="the analyzer pass wrote no .review/raw/analyzers.txt"; }
 elif [ "$MODE" != "spec" ]; then
   SECRETS_NOTE="--no-analyzers"
 fi
+# Each section's last status line, as [{name, status, reason}]: a section with
+# none is unknown.
+ANALYZER_TOOLS="$(awk '
+  /^### / { if (n != "") print n "\t" s; n = substr($0, 5); s = ""; next }
+  n != "" && /^analyzer status: / { s = substr($0, 18) }
+  END { if (n != "") print n "\t" s }' "$OUT/analyzers.txt" 2>/dev/null | jq -R -s '
+  split("\n") | map(select(. != "") | split("\t") | {name: .[0]}
+    + ((.[1] // "") | capture("^(?<status>ran|skipped|failed|unknown)( — (?<reason>.*))?$")
+       // {status: "unknown", reason: "no analyzer status line"}))')" || ANALYZER_TOOLS="[]"
+ANALYZERS_JSON="$(jq -n --arg s "$ANALYZERS_STATUS" --arg why "$ANALYZERS_WHY" --argjson tools "$ANALYZER_TOOLS" \
+  '{status: $s, reason: (if $why == "" then null else $why end), tools: $tools}')" \
+  || die "could not summarise the analyzers"
+# what the lenses and the verdict must not read as checked: "tsc (failed — …)"
+ANALYZERS_NOT_RAN="$(jq -r '.tools[] | select(.status != "ran") | "\(.name) (\(.status)\(if .reason then " — " + .reason else "" end))"' <<< "$ANALYZERS_JSON")"
 if [ "$MODE" = "branch" ]; then
   SECRETS_WHY="gitleaks found it in $MERGE_BASE..HEAD, and pushing those commits publishes it, even where a later commit removed it."
 else
@@ -352,10 +371,26 @@ secret_notes() { # the findings.md lines for a failed or skipped secret scan
     echo
   fi
 }
+analyzer_notes() { # the findings.md lines for analyzers that produced no results
+  if [ "$ANALYZERS_STATUS" = failed ]; then
+    echo "> **The analyzer pass FAILED** ($ANALYZERS_WHY), so no linter or type checker result is available."
+    echo
+  elif [ "$ANALYZERS_STATUS" = not_run ] && [ "$MODE" != spec ]; then
+    echo "> Analyzers were NOT run ($ANALYZERS_WHY): nothing a linter or type checker catches was checked."
+    echo
+  fi
+  if [ -n "$ANALYZERS_NOT_RAN" ]; then
+    echo "> **These analyzers produced no results** — what they check was NOT checked, so their silence is not clean:"
+    printf '%s\n' "$ANALYZERS_NOT_RAN" | sed 's/^/> - /'
+    echo
+  fi
+}
 secret_warnings() {
   [ "$SECRETS_FAILED" = 0 ] || warn "INCOMPLETE: the gitleaks secret scan failed — see $OUT/analyzers.txt"
   [ "$SECRETS_LEAKED" = 0 ] || warn "gitleaks found a secret — see $OUT/analyzers.txt"
   [ -z "$SECRETS_NOTE" ] || warn "secrets were not checked: $SECRETS_NOTE"
+  [ "$ANALYZERS_STATUS" != failed ] || warn "the analyzer pass failed: $ANALYZERS_WHY"
+  [ -z "$ANALYZERS_NOT_RAN" ] || warn "analyzer(s) produced no results: $(printf '%s\n' "$ANALYZERS_NOT_RAN" | sed 's/ (.*//' | tr '\n' ' ')— see $OUT/analyzers.txt"
 }
 
 # --- build the shared context block ----------------------------------------
@@ -373,7 +408,19 @@ secret_warnings() {
     echo "- Changed file list: \`.review/raw/changed-files.txt\`"
   fi
   [ -f "$OUT/commits.txt" ] && echo "- Commits in range: \`.review/raw/commits.txt\`"
-  [ -s "$OUT/analyzers.txt" ] && echo "- Static analyzer output already collected: \`.review/raw/analyzers.txt\` (do NOT re-report anything a linter already flagged there)"
+  if [ -s "$OUT/analyzers.txt" ]; then
+    echo "- Static analyzer output already collected: \`.review/raw/analyzers.txt\` (do NOT re-report anything a linter already flagged there)."
+    echo "  Each section ends with an \`analyzer status:\` line; only a \`ran\` section holds results."
+  fi
+  if [ "$ANALYZERS_STATUS" = failed ]; then
+    echo "- The analyzer pass FAILED ($ANALYZERS_WHY): no linter or type checker has checked this change."
+  elif [ "$ANALYZERS_STATUS" = not_run ] && [ "$MODE" != spec ]; then
+    echo "- Static analyzers were NOT run ($ANALYZERS_WHY): no linter or type checker has checked this change."
+  fi
+  if [ -n "$ANALYZERS_NOT_RAN" ]; then
+    echo "- These analyzers produced NO results, so what they check is unchecked; their silence is not clean:"
+    printf '%s\n' "$ANALYZERS_NOT_RAN" | sed 's/^/  - /'
+  fi
   echo
 } > "$OUT/context.md"
 
@@ -507,15 +554,16 @@ if [ "$ok_lenses" -eq 0 ]; then
   failed_lenses="$failed_lenses${missing_lenses:-}"
   jq -n --arg failed "$(printf '%s' "${failed_lenses# }")" --argjson secrets "$SECRET_FINDINGS" \
     --argjson n "$CHANGED_COUNT" --arg scan "$SECRETS_SCAN" --arg mode "$MODE" --argjson head "$HEAD_JSON" \
-    --argjson path_rules "$PATH_RULES_JSON" \
+    --argjson path_rules "$PATH_RULES_JSON" --argjson analyzers "$ANALYZERS_JSON" \
     '{findings: $secrets, lenses_failed: ($failed | if . == "" then [] else split(" ") end), complete: false,
-      changed_files: $n, secrets_scan: $scan, mode: $mode, head: $head, path_rules: $path_rules}' \
+      changed_files: $n, secrets_scan: $scan, analyzers: $analyzers, mode: $mode, head: $head, path_rules: $path_rules}' \
     > .review/findings.json
   {
     printf '# Codex pre-PR review\n\n> **INCOMPLETE — every lens failed.** No area of this diff was reviewed.\n> Check `%s/log-*.txt`.\n\n' "$OUT"
     [ "$SECRETS_LEAKED" = 0 ] || printf '> **gitleaks found a secret** — see `.review/findings.json` and `%s/analyzers.txt`.\n\n' "$OUT"
     secret_notes
     path_rules_note
+    analyzer_notes
   } > .review/findings.md
   REPORT_WRITTEN=1
   secret_warnings
@@ -550,13 +598,13 @@ UNREADABLE_COUNT=0
 [ -s "$OUT/unreadable.txt" ] && UNREADABLE_COUNT="$(grep -c . < "$OUT/unreadable.txt")"
 jq --arg failed "$FAILED_LIST" --arg unreadable "$(cat "$OUT/unreadable.txt" 2>/dev/null)" \
   --argjson secrets "$SECRET_FINDINGS" --argjson scan_failed "$SECRETS_FAILED" --argjson n "$CHANGED_COUNT" \
-  --arg scan "$SECRETS_SCAN" --arg mode "$MODE" --argjson head "$HEAD_JSON" \
+  --arg scan "$SECRETS_SCAN" --arg mode "$MODE" --argjson head "$HEAD_JSON" --argjson analyzers "$ANALYZERS_JSON" \
   --argjson path_rules "$PATH_RULES_JSON" '
   .findings = ($secrets + .findings | to_entries | map(.value + {id: ("F" + ((.key + 1)|tostring))}))
   | . + { lenses_failed: ($failed | if . == "" then [] else split(" ") end),
         unreadable_paths: ($unreadable | split("\n") | map(select(. != ""))) }
   | . + { complete: ((.lenses_failed | length) == 0 and (.unreadable_paths | length) == 0 and $scan_failed == 0),
-          changed_files: $n, secrets_scan: $scan,
+          changed_files: $n, secrets_scan: $scan, analyzers: $analyzers,
           mode: $mode, head: $head, path_rules: $path_rules }
 ' .review/findings.json > .review/findings.json.tmp \
   && mv .review/findings.json.tmp .review/findings.json || die "could not finalise findings.json"
@@ -585,6 +633,7 @@ TOTAL="$(jq '.findings | length' .review/findings.json)"
   secret_notes
   path_rules_note
   echo
+  analyzer_notes
   if [ "$(jq '.findings | length' .review/findings.json)" -eq 0 ]; then
     if [ -n "$FAILED_LIST" ] || [ "$UNREADABLE_COUNT" -gt 0 ] || [ "$SECRETS_FAILED" = 1 ]; then
       echo "_No findings — but the run was incomplete, so this is not a clean result._"

@@ -29,6 +29,15 @@ def lessons(who):
   | group_by(.cause) | .[]
   | "lessons — \(.[0].cause) (\(map(select(.what | startswith("missed"))) | length) missed):",
     (.[] | "  \(.who) \(.what)");
+# lesson_counts(who): lessons without what they quote, for output that leaves the spoke;
+# a cause outside the postmortem's own set is "other", since free text could quote code
+def lesson_counts(who):
+  def known: (.cause // "unclassified") as $c
+    | if any(("wrong_lens", "tracing", "threshold", "structural", "unverified", "unclassified"); . == $c) then $c else "other" end;
+  [.[] | who as $who | ((.findings // [])[] | select(.class == "missed") | {cause: known, who: $who, missed: 1}),
+                       ((.proposals // [])[] | {cause: known, who: $who, missed: 0})]
+  | group_by(.cause) | map({cause: .[0].cause, missed: (map(.missed) | add), proposals: (map(1 - .missed) | add),
+                            prs: (map(.who) | unique)});
 # denials_text: of {commands, prs_with_denials, prs_of_unknown_denials}
 def denials_text:
   "\(.commands) command(s) denied in \(.prs_with_denials) PR(s)"
