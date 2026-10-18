@@ -26,7 +26,8 @@ assert_not() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then fail "$d"; els
 
 # --- codex stub ------------------------------------------------------------
 # Writes $CODEX_STUB_DIR/<lens>.json to the -o path and exits with the code
-# in $CODEX_STUB_DIR/<lens>.rc (default 0). `codex login status` succeeds.
+# in $CODEX_STUB_DIR/<lens>.rc (default 0), and prints the token count in
+# $CODEX_STUB_DIR/<lens>.tokens as codex does. `codex login status` succeeds.
 mkdir -p "$WORK/bin"
 cat > "$WORK/bin/codex" <<'EOF'
 #!/usr/bin/env bash
@@ -38,6 +39,7 @@ while [ $# -gt 0 ]; do
 done
 lens="$(basename "$out" .json)"; lens="${lens#out-}"
 [ -n "$out" ] && [ -f "$CODEX_STUB_DIR/$lens.json" ] && cp "$CODEX_STUB_DIR/$lens.json" "$out"
+[ -f "$CODEX_STUB_DIR/$lens.tokens" ] && printf 'tokens used\n%s\n' "$(cat "$CODEX_STUB_DIR/$lens.tokens")"
 rc=0
 [ -f "$CODEX_STUB_DIR/$lens.rc" ] && rc="$(cat "$CODEX_STUB_DIR/$lens.rc")"
 exit "$rc"
@@ -2917,7 +2919,8 @@ test_postmortem_plateau_is_a_hypothesis() {
 # A hub holding this checkout's kit (tracked and new files), a spoke cloned from
 # a bare remote that serves refs/pull/<n>/head, and stubs for gh and claude that
 # log every call. The claude stub answers from per-call fixtures, with the
-# worktree's HEAD substituted for @SHA@ / @SHORT@.
+# worktree's HEAD substituted for @SHA@ / @SHORT@, and reports no cost when
+# $CLAUDE_STUB_DIR/no-cost exists.
 mkdir -p "$WORK/bin-replay"
 cat > "$WORK/bin-replay/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -2946,7 +2949,8 @@ esac
 pr="$(printf '%s\n' "$2" | sed -n '1s/.* PR #\([0-9]*\).*/\1/p')"
 sed -e "s/@SHA@/$(git rev-parse HEAD)/g" -e "s/@SHORT@/$(git rev-parse --short HEAD)/g" -e "s/@PR@/$pr/g" \
   "$CLAUDE_STUB_DIR/$kind.txt" > "$CLAUDE_STUB_DIR/$kind.reply"
-jq -n --rawfile r "$CLAUDE_STUB_DIR/$kind.reply" '{type: "result", subtype: "success", is_error: false, result: $r, total_cost_usd: 0.25}'
+jq -n --rawfile r "$CLAUDE_STUB_DIR/$kind.reply" --argjson cost "$([ -e "$CLAUDE_STUB_DIR/no-cost" ] && echo null || echo 0.25)" \
+  '{type: "result", subtype: "success", is_error: false, result: $r} + if $cost then {total_cost_usd: $cost} else {} end'
 EOF
 chmod +x "$WORK/bin-replay/gh" "$WORK/bin-replay/claude"
 
@@ -3047,7 +3051,7 @@ replay_fixture() { # replay_fixture <id>
   gh_pr_fixture "$RGH" 9 "$c9" "$c9" "$m"
   gh_json "$RGH" pr-list '[{"number":5,"mergedAt":"2026-01-05T00:00:00Z"},{"number":1,"mergedAt":"2026-01-04T00:00:00Z"},{"number":3,"mergedAt":"2026-01-01T00:00:00Z"}]'
   RA="$a"
-  finding 'replayed finding' > "$RCX/correctness.json"
+  finding 'replayed finding' > "$RCX/correctness.json"; printf '1,234\n' > "$RCX/correctness.tokens"
   cat > "$RCL/adjudicate.txt" <<'EOF'
 Here is the verdict.
 
@@ -3092,7 +3096,7 @@ no_replay_worktrees() { # the spoke has only its own checkout, and no replay dir
 
 # --- replay tests ----------------------------------------------------------
 test_replay_scores_reports_and_writes_nothing_else() {
-  local rc rec refs_before common short kit
+  local rc rec refs_before common short kit runs run
   replay_fixture r1
   # a fetch refspec for pull refs would let a fetch update refs/remotes/origin/pr/*
   git -C "$RS" config --add remote.origin.fetch '+refs/pull/*/head:refs/remotes/origin/pr/*'
@@ -3124,7 +3128,24 @@ test_replay_scores_reports_and_writes_nothing_else() {
     grep -qF 'review-replay: aggregate — replayed 2 / skipped 5 / failed 1 — caught 2 / missed 2 (wrong lens 2 / tracing 0 / threshold 0 / structural 0) / rejected-wrongly 0 / noise 0 / unscored 0' "$LOG"
   assert "r1: … and groups lessons by cause" \
     sh -c 'grep -qxF "lessons — wrong_lens (2 missed):" "$1" && grep -qF "PR #1 propose (hub) .review/prompts/correctness.md" "$1"' _ "$LOG"
-  assert "r1: … and the cost line covers every PR" grep -qxF 'review-replay: cost — claude $1.00, codex 0 tokens, failed and skipped PRs included' "$LOG"
+  assert "r1: … and the cost line covers every PR" grep -qxF 'review-replay: cost — claude $1.00, codex 2468 tokens, failed and skipped PRs included' "$LOG"
+  runs="$common/review-replay/runs"
+  assert "r1: the run keeps its own record, named for its kit" \
+    sh -c '[ "$(ls "$1" | wc -l)" -eq 1 ] && ls "$1" | grep -qE "^[0-9]{8}T[0-9]{6}Z-$2\$"' _ "$runs" "$kit"
+  run="$runs/$(ls "$runs")"
+  assert "r1: … says where it is" grep -qxF "review-replay: run record — $run" "$LOG"
+  assert "r1: … with every line the run printed" \
+    sh -c 'grep -qE "^review-replay: replayed — PR #1 " "$1" && grep -qE "^review-replay: failed — PR #4: " "$1" && grep -qF "review-replay: aggregate — replayed 2 / skipped 5 / failed 1 — " "$1" \
+      && grep -qxF "lessons — wrong_lens (2 missed):" "$1" && grep -qF "review-replay: cost — claude \$1.00, codex 2468 tokens" "$1" && ! grep -q incomplete "$1"' _ "$run/summary.txt"
+  assert "r1: … and the aggregate, which the run used to delete" \
+    jq -e --arg k "$(git -C "$RHUB" rev-parse main)" '.kit.sha == $k and .prs == {replayed: 2, skipped: 5, failed: 1, unreviewed_passed_over: 0}
+      and (.records | length) == 2 and .counts.missed == 2 and .missed_by_cause.wrong_lens == 2
+      and .cost == {claude_usd: 1, claude_calls_of_unknown_cost: 0, codex_tokens: 2468, prs_of_unknown_codex_tokens: 0}
+      and (.summary | any(startswith("review-replay: aggregate — replayed 2 ")))' "$run/aggregate.json"
+  assert "r1: each lens's raw output is kept beside the record" \
+    jq -e '.findings == [.findings[0]] and .findings[0].title == "replayed finding" and .findings[0].lens == "correctness"' "$rec/raw/out-correctness.json"
+  assert "r1: … with its log" grep -qxF 'tokens used' "$rec/raw/log-correctness.txt"
+  assert "r1: the record counts the codex tokens" jq -e '.replay.cost == {claude_usd: 0.5, codex_tokens: 1234}' "$rec/record.json"
   assert "r1: the record is written, marked as a replay" grep -qxF '<!-- review-replay:v1 -->' "$rec/postmortem.md"
   assert "r1: … with the kit ref and the source of each repo-owned file" \
     jq -e --arg k "$(git -C "$RHUB" rev-parse main)" '.replay.kit_sha == $k and .replay.repo_owned[".review/rubric.md"] == "pr"
@@ -3154,6 +3175,7 @@ test_replay_scores_reports_and_writes_nothing_else() {
   assert "r1: a failed re-run keeps the scored record" grep -qxF '<!-- review-replay:v1 -->' "$rec/postmortem.md"
   assert "r1: … and keeps its own logs beside it" \
     sh -c 'test -s "$1.last-unscored/review.log" && grep -qF "(logs: $1.last-unscored)" "$2"' _ "$rec" "$LOG"
+  assert "r1: a second run keeps a record of its own" test "$(ls "$runs" | wc -l)" -eq 2
 }
 
 test_replay_failure_is_reported_and_cleaned_up() {
@@ -3188,7 +3210,7 @@ test_replay_failure_is_reported_and_cleaned_up() {
   run_replay 3
   assert "r2: a scored record without its counts is a failure" \
     grep -qE "^review-replay: failed — PR #3: postmortem: the record's JSON is missing, unparseable, or not a scored record of PR #3" "$LOG"
-  assert "r2: … that still reports what it cost" grep -qF '· cost so far claude $0.50, codex 0 tokens' "$LOG"
+  assert "r2: … that still reports what it cost" grep -qF '· cost so far claude $0.50, codex 1234 tokens' "$LOG"
   assert "r2: … and no record replaces the logs" test ! -e "$common/review-replay/pr3-$kit/postmortem.md"
   assert "r2: … and its worktree is removed" no_replay_worktrees "$RS"
 }
@@ -3209,9 +3231,13 @@ test_replay_interrupt_removes_the_worktree() {
   assert "r3: … and removes its worktree" no_replay_worktrees "$RS"
   assert "r3: … and says the PR was interrupted" grep -qxF 'review-replay: failed — PR #1: interrupted: rc=143, nothing was recorded for it' "$LOG"
   assert "r3: … and stops what it started" sh -c 'test -s "$1" && ! kill -0 "$(cat "$1")" 2>/dev/null' _ "$RCL/started"
+  assert "r3: the run's record says it was interrupted, with no scorecard" \
+    sh -c 'cd "$1"/.git/review-replay/runs/*/ && grep -qxF "review-replay: failed — PR #1: interrupted: rc=143, nothing was recorded for it" summary.txt \
+      && grep -qxF "review-replay: incomplete — the run exited 143 before it finished, so it has no scorecard" summary.txt && test ! -e aggregate.json' _ "$RS"
 }
 
 test_replay_recent_and_limit() {
+  local rc
   replay_fixture r4
   run_replay --recent 2 --limit 1
   assert "r4: --recent passes over a PR CodeRabbit never reviewed" grep -qF '(1 merged PR(s) CodeRabbit never reviewed passed over)' "$LOG"
@@ -3221,6 +3247,69 @@ test_replay_recent_and_limit() {
   run_replay --recent 2
   assert "r4: a PR list that is not a list is an error, not an empty run" \
     sh -c 'grep -qF "gh pr list returned no PR list" "$1" && ! grep -q aggregate "$1"' _ "$LOG"
+  gh_json "$RGH" pr-list '["not a PR"]'
+  run_replay --recent 2; rc=$?
+  assert "r4: a PR list that cannot be read is an error, not an empty run" \
+    sh -c '[ "$2" -ne 0 ] && grep -qF "cannot read the merged PR list" "$1" && ! grep -q "aggregate —" "$1"' _ "$LOG" "$rc"
+  assert "r4: … and the run's record says so, with no scorecard" \
+    sh -c 'f="$(grep -lF "review-replay: failed — run: cannot read the merged PR list" "$1"/.git/review-replay/runs/*/summary.txt)" \
+      && [ "$(printf "%s\n" "$f" | wc -l)" -eq 1 ] && grep -qF "review-replay: incomplete — " "$f" && test ! -e "${f%/summary.txt}/aggregate.json"' _ "$RS"
+}
+
+# Each of these once read as a PR with nothing to score, or a cost of nothing.
+test_replay_silent_failures_are_failures() {
+  local rc common kit rec dead=dddddddddddddddddddddddddddddddddddddddd
+  replay_fixture r6
+  common="$RS/.git"; kit="$(git -C "$RHUB" rev-parse --short main)"; rec="$common/review-replay/pr1-$kit"
+  cp "$RGH/api-repos_o_r_pulls_1_comments.json" "$RGH/comments.good"
+  gh_json "$RGH" api-repos_o_r_pulls_1_comments '["not a comment"]'
+  run_replay 1; rc=$?
+  assert "r6: comments whose commits cannot be listed fail the PR" \
+    sh -c '[ "$2" -eq 1 ] && grep -qE "^review-replay: failed — PR #1: github: cannot list the commits CodeRabbit commented on: .*jq" "$1"' _ "$LOG" "$rc"
+  jq --arg d "$dead" '. + [.[0] + {id: 8, original_commit_id: $d}]' "$RGH/comments.good" > "$RGH/api-repos_o_r_pulls_1_comments.json"
+  run_replay 1; rc=$?
+  assert "r6: a commented commit that cannot be fetched fails the PR, not leaves its findings unscored" \
+    sh -c '[ "$2" -eq 1 ] && grep -qE "^review-replay: failed — PR #1: fetch: cannot fetch ddddddd, which CodeRabbit commented on" "$1"' _ "$LOG" "$rc"
+  assert "r6: … and is never scored" sh -c '! grep -q "aggregate — replayed 1" "$1" && test ! -e "$2/record.json"' _ "$LOG" "$rec"
+  cp "$RGH/comments.good" "$RGH/api-repos_o_r_pulls_1_comments.json"
+  gh_json "$RGH" api-repos_o_r_issues_1_comments '{"message": "Not Found"}'
+  run_replay 1; rc=$?
+  assert "r6: a GitHub page that is not a list fails the PR" \
+    sh -c '[ "$2" -eq 1 ] && grep -qE "^review-replay: failed — PR #1: github: gh api repos/o/r/issues/1/comments: unparseable response: .*not a list" "$1"' _ "$LOG" "$rc"
+  gh_json "$RGH" api-repos_o_r_issues_1_comments '[]'
+  rm "$RCX/correctness.tokens"; : > "$RCL/no-cost"
+  run_replay 1; rc=$?
+  assert "r6: a cost that cannot be read is unknown, not 0" \
+    sh -c '[ "$2" -eq 0 ] && grep -qE "^review-replay: replayed — PR #1 .* · cost claude \\\$0.00 \+ unknown for 2 call\(s\), codex tokens unknown · " "$1" \
+      && grep -qxF "review-replay: cost — claude \$0.00 + unknown for 2 call(s), codex 0 tokens + unknown for 1 PR(s), failed and skipped PRs included" "$1"' _ "$LOG" "$rc"
+  assert "r6: … in the record too" jq -e '.replay.cost == {claude_usd: null, codex_tokens: null}' "$rec/record.json"
+}
+
+# A hub clone behind its remote must not replay its old kit as today's.
+test_replay_refuses_a_stale_kit() {
+  local rc up="$WORK/r7-hub-remote.git" tmp="$WORK/r7-hub-push"
+  replay_fixture r7
+  git clone -q --bare "$RHUB" "$up"
+  git -C "$RHUB" remote add origin "$up" && git -C "$RHUB" fetch -q origin && git -C "$RHUB" branch -q -u origin/main main
+  git clone -q "$up" "$tmp"
+  ( cd "$tmp" && git config user.email review-test@example.invalid && git config user.name review-test \
+      && printf 'newer\n' > newer.txt && git add newer.txt && git commit -qm newer && git push -q origin main )
+  run_replay 1; rc=$?
+  assert "r7: a main behind origin is refused" \
+    sh -c '[ "$2" -ne 0 ] && grep -qE "error:.* --kit-ref main \([0-9a-f]+\) is behind refs/heads/main on origin" "$1"' _ "$LOG" "$rc"
+  assert "r7: … before anything is replayed or recorded" \
+    sh -c 'test ! -e "$1/calls.log" && test ! -e "$2/.git/review-replay/runs"' _ "$RCL" "$RS"
+  run_replay --kit-ref origin/main 1; rc=$?
+  assert "r7: … and so is a remote-tracking ref that was never fetched" \
+    sh -c '[ "$2" -ne 0 ] && grep -qF -- "--kit-ref origin/main" "$1" && grep -qF "is behind refs/heads/main on origin" "$1"' _ "$LOG" "$rc"
+  git -C "$RHUB" remote set-url origin "$WORK/r7-nowhere.git"
+  run_replay 1; rc=$?
+  assert "r7: a remote that cannot be read is refused, not taken as current" \
+    sh -c '[ "$2" -ne 0 ] && grep -qF "cannot read refs/heads/main from the hub" "$1" && test ! -e "$3/calls.log"' _ "$LOG" "$rc" "$RCL"
+  git -C "$RHUB" remote set-url origin "$up" && git -C "$RHUB" pull -q --ff-only
+  run_replay 1; rc=$?
+  assert "r7: a current main replays" \
+    sh -c '[ "$2" -eq 0 ] && grep -qE "^review-replay: replayed — PR #1 " "$1"' _ "$LOG" "$rc"
 }
 
 test_replay_docs_post_nothing() {
@@ -3778,6 +3867,8 @@ run_tests \
   test_replay_failure_is_reported_and_cleaned_up \
   test_replay_interrupt_removes_the_worktree \
   test_replay_recent_and_limit \
+  test_replay_silent_failures_are_failures \
+  test_replay_refuses_a_stale_kit \
   test_replay_docs_post_nothing \
   test_review_warns_when_hook_unwired \
   test_review_warns_when_hooks_path_points_elsewhere \
