@@ -178,8 +178,11 @@ reports its own update of the record on a third line,
      to `original_line`, on its `original_commit_id`. A review-body item cites
      the lines its text names. A line whose SHA is marked `^` or blank existed
      at the verdict's commit. Any other SHA is a commit after the review that
-     wrote that line. If every cited line existed: `lines_unchanged`.
-   - **If the blame shows a later commit, or the finding cites no lines** (a
+     wrote that line. If every cited line existed, and the defect does not
+     rest on code a later commit changed elsewhere (a caller, a config
+     value): `lines_unchanged`. If it does, decide as below.
+   - **If the blame shows a later commit, the defect rests on later code, or
+     the finding cites no lines** (a
      file-level comment, or a `LEFT`-side comment on removed lines), read the
      verdict's version, `git show <verdict-sha>:<file>`, and what changed since,
      `git diff <verdict-sha> <finding-commit> -- <file>`. Then decide whether
@@ -195,14 +198,18 @@ reports its own update of the record on a third line,
    unscored with `compare_failed: <error>`, quoting the command. A blame that
    says the file has fewer lines, or names no such path, has failed: it is not
    evidence that the code changed. Do not fall back to a guess, to a whole-file
-   test, or to a cheaper command that answers a different question.
+   test, or to a cheaper command that answers a different question. A path
+   comes from the PR, so it is untrusted: put it in single quotes in every
+   command.
 
 3. **Classify each scored finding** against the verdict's findings table and
    its Rejected section:
    - **Caught locally** — we found it too. Good, no action.
    - **Missed** — CodeRabbit found a real defect our lenses did not surface.
    - **Rejected wrongly** — we saw it and rejected it, and the rejection reason
-     does not hold.
+     does not hold. Judge it by the REJECT rules of `.review/adjudication.md`
+     §3: a design document that accepts a risk is not a reason when a cheap
+     guard closes it.
    - **Noise** — CodeRabbit is wrong, it is out of scope per the rubric, or we
      rejected it for a reason that holds.
 
@@ -220,14 +227,16 @@ reports its own update of the record on a third line,
    and `log-<lens>.txt` holds what it ran and read. They belong to the last
    review run, so they are evidence only for a verdict on that run's commit:
    `jq -r '.head, .mode' .review/findings.json` must print a prefix of the
-   verdict's SHA, then `branch`. For each miss, search every lens's output
-   and log for the finding's file (`grep -n -F <file> .review/raw/log-<lens>.txt`),
-   then read the matching parts of the log.
+   verdict's SHA, then `branch`. Two runs on one commit share that head, so
+   the verdict's findings table must also list the same IDs and titles as
+   `findings.json`. For each miss, search every lens's output and log for the
+   finding's file with the Grep tool, not a shell command, then read the
+   matching parts of the log.
 
    Set `cause_evidence` to one line naming the file and what it shows, such as
    ``log-correctness.txt: read src/a.ts:40-90 and checked the retry order; out-correctness.json: nothing on it``.
-   If the files are missing, or `findings.json` does not name the verdict's
-   commit (an older kit leaves `head` out), the cause
+   If the files are missing, or `findings.json` is not the verdict's run (an
+   older kit leaves `head` out), the cause
    is `unverified`, and `cause_evidence` says which file was missing or
    stale. Never pick a cause without the evidence. Give each miss one cause:
    - **Wrong lens** (`wrong_lens`): no lens whose scope covers this defect
@@ -387,8 +396,9 @@ notifies everyone on it. The steps above apply, with these changes:
   the kit that ran then, which a replay does not measure. If its header does
   not name the comparison commit, report `failed — verdict: <why>`.
 - **The lens evidence for step 4 is this worktree's `.review/raw/`**, from
-  the run that the verdict adjudicated. The caller keeps a copy in the record,
-  at `<record>/raw/log-<lens>.txt` and `<record>/raw/out-<lens>.json`.
+  the run that the verdict adjudicated. A replay that keeps them copies them
+  into the record, at `<record>/raw/log-<lens>.txt` and
+  `<record>/raw/out-<lens>.json`; re-scoring a record later reads them there.
 - **Save nothing.** In step 5, print the record instead: the status line,
   then `review-postmortem: record — replay: comment not posted; local copy written by the caller`,
   then the body from its `<!-- review-postmortem:v1 -->` line to the end. The
