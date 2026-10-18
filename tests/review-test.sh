@@ -344,7 +344,7 @@ reviews:
 EOF
   run_review "$repo" "$stub" --lenses correctness
   pr_assert_warned "malformed entries" invalid
-  assert "pr: malformed entries are named" grep -qF 'entries #2, #3' "$repo/.review/findings.md"
+  assert "pr: malformed entries are named" grep -qF 'entries #2, #3 lack a non-empty string path' "$repo/.review/findings.md"
   assert "pr: the valid entry beside them still applies" grep -qF 'PATHRULE-VALID-0b1f' "$prompt"
 
   printf 'reviews:\n  path_instructions:\n    path: "lib/**"\n    instructions: x\n' > "$repo/.coderabbit.yaml"
@@ -405,9 +405,6 @@ EOF
     grep -qF '<path_rules.warning, when there is one>' "$KIT/.review/adjudication.md"
 }
 
-# The globs follow minimatch: `**` spans directories, `*` and `?` stay in one,
-# braces expand, a slashless pattern is top-level only, a trailing slash means
-# the whole directory, and dotfiles match.
 # The installer's yaml probe and config check run from /, so a repo-local yaml.py
 # neither runs nor stands in for PyYAML.
 test_install_ignores_repo_local_yaml_module() {
@@ -424,6 +421,9 @@ test_install_ignores_repo_local_yaml_module() {
   assert "iy: wired config still reported wired" grep -qF 'wires inheritance and both guideline mappings' "$LOG"
 }
 
+# The globs follow minimatch: `**` spans directories, `*` and `?` stay in one,
+# braces expand, a slashless pattern is top-level only, a trailing slash means
+# the whole directory, and dotfiles match.
 test_path_rule_globs() {
   local dir="$WORK/pg" out
   if ! have_yaml_parser; then
@@ -446,19 +446,21 @@ reviews:
     - { path: 'lit/\*.txt', instructions: R-ESCAPE }
     - { path: "rel/{01..03}/*", instructions: R-PAD }
     - { path: "odd/{1..5..2}/*", instructions: R-STEP }
+    - { path: "pad/{1..10..03}/*", instructions: R-PADSTEP }
     - { path: "big/{1..256}/*", instructions: R-BUDGET }
     - { path: "huge/{1..257}/*", instructions: R-OVER }
 EOF
   printf '%s\n' src/a/b/c.ts src/top.ts README.md docs/guide.md .github/workflows/ci.yml \
     infra/net/main.tf cfg/a.json cfg/ab.json bin/run bin/xtool v2/x.go v4/x.go 'lit/*.txt' lit/a.txt \
-    rel/02/f rel/2/f odd/3/f odd/4/f big/256/f huge/1/f > "$dir/changed.txt"
+    rel/02/f rel/2/f odd/3/f odd/4/f pad/04/f pad/4/f big/256/f huge/1/f > "$dir/changed.txt"
   out="$( cd "$dir" && . "$KIT/scripts/lib/path-rules.sh" && collect_path_rules changed.txt rules.md \
     && printf '%s' "$PATH_RULES_JSON" )"
-  assert "pg: eleven of thirteen rules match, the oversized range is invalid" \
-    jq -e '.status == "invalid" and .matched == 11 and .rules == 13 and (.warning | contains("#13 lacks"))' <<< "$out"
+  assert "pg: twelve of fourteen rules match, the oversized range is invalid" \
+    jq -e '.status == "invalid" and .matched == 12 and .rules == 14 and (.warning | contains("entry #14 uses a glob this reader cannot match"))' <<< "$out"
   assert "pg: numeric brace range expands" grep -qxF '### `v{1..3}/**` - applies to `v2/x.go`' "$dir/rules.md"
   assert "pg: zero-padded range keeps its padding" grep -qxF '### `rel/{01..03}/*` - applies to `rel/02/f`' "$dir/rules.md"
   assert "pg: stepped range steps" grep -qxF '### `odd/{1..5..2}/*` - applies to `odd/3/f`' "$dir/rules.md"
+  assert "pg: a padded step pads" grep -qxF '### `pad/{1..10..03}/*` - applies to `pad/04/f`' "$dir/rules.md"
   assert "pg: a range at the budget expands" grep -qF 'R-BUDGET' "$dir/rules.md"
   assert "pg: an escaped star is literal" grep -qxF '### `lit/\*.txt` - applies to `lit/*.txt`' "$dir/rules.md"
   assert "pg: ** spans nested and zero directories" grep -qF '`src/a/b/c.ts`, `src/top.ts`' "$dir/rules.md"

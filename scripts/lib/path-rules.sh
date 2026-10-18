@@ -177,7 +177,7 @@ def brace_range(body, budget):
     if (abs(b - a) // step) + 1 > budget[0]:
         raise ValueError("brace range too large")
     width = 0
-    if num and any(re.match(r"-?0[0-9]", e) for e in (m.group(1), m.group(2))):
+    if num and any(re.match(r"-?0[0-9]", e) for e in (m.group(1), m.group(2), m.group(5) or "")):
         width = max(len(m.group(1)), len(m.group(2)))
     step = step if b >= a else -step
     out = []
@@ -319,7 +319,7 @@ def glob_match(alts, path):
     return False
 
 
-rules, bad = [], []
+rules, bad, unread = [], [], []
 for n, e in enumerate(pi, 1):
     path = e.get("path") if isinstance(e, dict) else None
     text = e.get("instructions") if isinstance(e, dict) else None
@@ -329,7 +329,7 @@ for n, e in enumerate(pi, 1):
     try:
         rules.append((path.strip(), text.strip(), glob_compile(path.strip())))
     except (re.error, ValueError, RecursionError):
-        bad.append(n)
+        unread.append(n)
 
 with open(changed, encoding="utf-8", errors="surrogateescape") as fh:
     files = [l.rstrip("\n") for l in fh if l.strip()]
@@ -351,15 +351,23 @@ if hits:
             out.write("\n### `%s` - applies to %s%s\n\n%s\n" % (path, shown, more, text))
 
 warning = None
+def entries(ns):
+    return "entr%s %s" % ("ies" if len(ns) > 1 else "y", ", ".join("#%d" % n for n in ns))
+
+
+notes = []
 if bad:
-    many = len(bad) > 1
-    warning = ("`%s` reviews.path_instructions entr%s %s lack%s a non-empty string path and "
-               "instructions, or a glob this reader supports (not an extglob, a POSIX class or a "
-               "`!` negation), so %s did NOT reach the lenses, and CodeRabbit "
-               "may discard the whole file" % (cfg, "ies" if many else "y",
-                                               ", ".join("#%d" % n for n in bad),
-                                               "" if many else "s", "they" if many else "it"))
-emit("invalid" if bad else "applied" if hits else "no_match", warning,
+    notes.append("%s lack%s a non-empty string path and instructions, so CodeRabbit may discard "
+                 "the whole file" % (entries(bad), "" if len(bad) > 1 else "s"))
+if unread:
+    notes.append("%s use%s a glob this reader cannot match (an extglob, a POSIX class, a `!` "
+                 "negation, or braces expanding to more than 256 alternatives in total)"
+                 % (entries(unread), "" if len(unread) > 1 else "s"))
+warning = None
+if notes:
+    warning = ("`%s` reviews.path_instructions %s; %s did NOT reach the lenses"
+               % (cfg, "; ".join(notes), "they" if len(bad) + len(unread) > 1 else "it"))
+emit("invalid" if notes else "applied" if hits else "no_match", warning,
      rules=len(pi), matched=len(hits), inherits=inherits)
 PYRULES
 }

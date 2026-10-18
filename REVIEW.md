@@ -237,8 +237,9 @@ lenses grade those files against the same text the gate does. The config is read
 at review time rather than copied into the rubric, so there is no second copy to
 drift. Globs follow minimatch: `**` spans directories, braces and ranges
 expand, and a pattern without a slash matches top-level paths only. Extglobs,
-POSIX classes and `!` negation are not supported, and an entry that uses them is
-reported as `invalid` rather than matching nothing. Rules the org-level config adds through
+POSIX classes, `!` negation and braces expanding to more than 256 alternatives
+are not supported, and an entry that uses them is reported as `invalid` rather
+than matching nothing. Rules the org-level config adds through
 `inheritance: true` are not in the file and do not reach the lenses;
 `findings.md` says so whenever the file sets it.
 
