@@ -112,6 +112,8 @@ command -v claude >/dev/null 2>&1 && ok "claude" || skip "claude CLI not found (
 for c in semgrep gitleaks shellcheck; do
   command -v "$c" >/dev/null 2>&1 && ok "$c (optional analyzer)" || skip "$c not installed (optional)"
 done
+have_yaml_parser && ok "python3 yaml module (reads CodeRabbit path_instructions for the lenses)" \
+  || skip "python3 yaml module not installed (optional) — without it, a review in a repo with a YAML CodeRabbit config warns that the lenses did not see its path_instructions"
 [ "$fail" -eq 1 ] && { echo; echo "Install the missing required tools, then re-run." >&2; exit 1; }
 
 # --- 2. codex auth ---------------------------------------------------------

@@ -147,7 +147,11 @@ What is left to fill in is optional and grounded the same way as everything else
 
 - **`reviews.path_instructions`** — only a rule that applies to SOME paths and
   would misfire elsewhere. `path` is minimatch, `instructions` is inline text.
-  Anything holding repo-wide is already covered by the rubric pointer.
+  Anything holding repo-wide is already covered by the rubric pointer. This file
+  is the only home for these rules: `review.sh` reads it on every run and hands
+  each rule whose glob matches a changed file to the lenses, so do not copy them
+  into the rubric. Read the existing ones while you are here — they are often
+  the repo's sharpest house rules, and a vague one grades badly in both places.
 - **`reviews.tools.<key>.enabled: false`** — rarely, and never to deduplicate
   against the local pass. CodeRabbit already skips a tool it can see running
   in your CI, so genuine duplication is mostly handled. And the local
@@ -177,7 +181,11 @@ that reaches both graders for free.
 
 `./scripts/review-install.sh --check` must pass. Then prove the pipeline on a
 scratch branch: plant 2–3 deliberate violations of the rubric you just wrote
-(pick ones invisible to lint and tests) and run `./scripts/review.sh`. A
+(pick ones invisible to lint and tests), and one of a `path_instructions` rule
+if the config has any, and run `./scripts/review.sh`. Check that
+`path_rules.status` in `.review/findings.json` is `applied` and that the rule's
+text is in `.review/raw/prompt-<lens>.md`; any warning there means the lenses
+never saw it. A
 planted violation the lenses miss is a prompt problem — fix it now, cheaply.
 See OPERATING.md.
 

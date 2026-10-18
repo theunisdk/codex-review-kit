@@ -37,7 +37,9 @@ diff into callers, tests, and config.
 ## Install
 
 **Requires:** `git`, `jq`, `codex` (authenticated). Optional but recommended:
-`semgrep`, `gitleaks`, plus your language's linter.
+`semgrep`, `gitleaks`, plus your language's linter, and `python3` with PyYAML,
+which reads the CodeRabbit config's `path_instructions` for the lenses (see
+[Path rules](#path-rules)).
 
 **Hub and spokes.** The kit's source of truth is one public hub
 (`github.com/theunisdk/codex-review-kit`). Each repo is a spoke: it
@@ -225,6 +227,30 @@ The verification step is the point. Codex hallucinates line numbers and
 occasionally invents behaviour; findings applied unverified are worse than no
 review at all.
 
+## Path rules
+
+A house rule that holds only for some paths lives in the CodeRabbit config's
+`reviews.path_instructions`, not in `rubric.md`. On every run, `review.sh` reads
+that config (`.coderabbit.yaml`, else `.coderabbit.yml`) and puts each rule whose
+glob matches a changed file into every lens prompt, under the rubric, so the
+lenses grade those files against the same text the gate does. The config is read
+at review time rather than copied into the rubric, so there is no second copy to
+drift. Globs follow minimatch: `**` spans directories, and a pattern without a
+slash matches top-level paths only. Rules the org-level config adds through
+`inheritance: true` are not in the file and do not reach the lenses.
+
+`findings.json` records the outcome in `path_rules.status`. Three statuses are
+a real "nothing": `no_config`, `no_rules` (no `path_instructions`) and
+`no_match` (no glob matches the change set). `applied` means at least one rule
+reached the lenses. Every other status carries a `warning`, shown in
+`findings.md` and on stderr, because the lenses graded without some or all of
+the rules: `unparseable` (CodeRabbit discards such a file too), `invalid` (an
+entry without a string `path` and `instructions`; the valid entries still
+apply), `no_parser` (no `python3` or PyYAML), `not_inspected`
+(`.coderabbit.config.ts`, which is not read) and `failed` (an unreadable file
+or a crashed reader). None of them makes `complete` false: the lenses still
+reviewed the diff.
+
 ## Skills: which tool needs one, and why
 
 **Claude Code: yes — for discovery.** Slash commands only fire when typed. Without
@@ -365,11 +391,13 @@ scripts/               all synced
   review-install.sh    idempotent per-machine setup
   lib/common.sh        portable helpers (macOS bash 3.2 safe)
   lib/analyzers.sh     generic analyzer collection; defers to analyzers.local.sh
+  lib/path-rules.sh    the CodeRabbit path_instructions that match the diff, for the lenses
 .claude/               synced: /review, /review-tune, /review-postmortem + skill
 .codex/                synced: optional interactive-Codex skill
 .claude-plugin/        synced: plugin manifests
 .githooks/pre-push     synced: warns on a stale verdict by default; blocks when REVIEW_STRICT=1
-.coderabbit.yaml       REPO-OWNED  the PR gate; points CodeRabbit at rubric.md
+.coderabbit.yaml       REPO-OWNED  the PR gate; points CodeRabbit at rubric.md, and its
+                                   path_instructions reach the lenses too
 .github/workflows/review-kit-sync.yml
                        REPO-OWNED  weekly release check, seeded by --init
 templates/             hub only: seeds for the repo-owned files (--init)
