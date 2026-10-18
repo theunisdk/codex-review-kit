@@ -4164,6 +4164,10 @@ test_replay_sum_across_spokes() {
   bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$a" "$a" > "$WORK/r13.pub" 2>&1; rc=$?
   assert "r13: an aliased refusal names runs by argument, not path" \
     sh -c '[ "$2" -eq 1 ] && grep -qF "the same run twice: argument 1, argument 2" "$1" && ! grep -qF "$3" "$1"' _ "$WORK/r13.pub" "$rc" "$WORK"
+  mkdir -p "$WORK/r13-runs/norecords"; jq '.records = null' "$b/aggregate.json" > "$WORK/r13-runs/norecords/aggregate.json"
+  bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$WORK/r13-runs/norecords" > "$WORK/r13.pub" 2>&1; rc=$?
+  assert "r13: … and so does jq's own error on a malformed run" \
+    sh -c '[ "$2" -eq 1 ] && grep -qF "cannot read argument 1" "$1" && ! grep -qF "$3" "$1"' _ "$WORK/r13.pub" "$rc" "$WORK"
   mkdir -p "$WORK/r13-runs/dup"; jq '.run = "dup-run"' "$b/aggregate.json" > "$WORK/r13-runs/dup/aggregate.json"
   bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$b" "$WORK/r13-runs/dup" > "$WORK/r13.pub" 2>&1; rc=$?
   assert "r13: … and a PR scored twice by alias" \

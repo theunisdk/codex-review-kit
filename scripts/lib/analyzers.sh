@@ -36,9 +36,9 @@ _cannot_run_line() {
 _run_analyzer() {
   local title="$1" re="$2" raw="$report.run" out rc why; shift 2
   _section "$title"
-  # through a file, so a flood of diagnostics never sits whole in memory
-  "$@" < /dev/null > "$raw" 2>&1; rc=$?
-  out="$(head -c 1000000 "$raw")"; rm -f "$raw"
+  # the first 1 MB, and the rest drained unkept, so the tool keeps its own exit status
+  "$@" < /dev/null 2>&1 | { head -c 1000000 > "$raw"; cat > /dev/null; }; rc=${PIPESTATUS[0]}
+  out="$(cat "$raw")"; rm -f "$raw"
   why="$(_cannot_run_line "$out")"
   if [ -n "$why" ]; then
     printf '%s\n' "$out" | head -20 >> "$report"

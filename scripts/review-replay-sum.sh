@@ -71,13 +71,13 @@ for r in "${RUNS[@]}"; do
       && die "$rl has no aggregate.json: the run stopped before its scorecard (see its summary.txt)"
     die "$lbl does not exist"
   fi
-  jq -e 'type == "object" and (.schema | type) == "string"' "$f" > /dev/null 2>&1 || die "$lbl is not a replay run's aggregate"
-  schema="$(jq -r .schema "$f")"
+  jq -e 'type == "object" and (.schema | type) == "string"' < "$f" > /dev/null 2>&1 || die "$lbl is not a replay run's aggregate"
+  schema="$(jq -r .schema < "$f")"
   [ "$schema" = review-replay-run/v2 ] \
     || die "$lbl is $schema, not review-replay-run/v2: an older review-replay.sh wrote it, without its incomplete PRs and denied commands — re-run it"
-  jq -e '(.spoke | type) == "string" and (.run | type) == "string"' "$f" > /dev/null || die "$lbl names no spoke or run, so it cannot be told apart from another run"
+  jq -e '(.spoke | type) == "string" and (.run | type) == "string"' < "$f" > /dev/null || die "$lbl names no spoke or run, so it cannot be told apart from another run"
   jq -c --arg path "$lbl" '{path: $path, run, spoke, repo, kit, prs, cost, denials, records: [.repo as $r | .records[] | . + {repo: $r}]}' \
-    "$f" >> "$TMP/runs.all" \
+    < "$f" >> "$TMP/runs.all" \
     || die "cannot read $lbl"
 done
 jq -s . "$TMP/runs.all" > "$TMP/runs.json" || die "cannot read the runs back"
