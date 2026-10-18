@@ -49,8 +49,8 @@ before this file dilutes the prompts it feeds.
   matched zero rows still redirected as saved; a recovery restart's exit status
   went unread under "started again". At every write, restart or rollback call,
   find the line that reads what it returned (count, exit status, flag); none
-  before a success message, redirect or next step that needs it to have
-  happened is a finding.
+  before a message, redirect or next step that presumes it changed a row or ran
+  is a finding.
 - 2026-10-18: a confirmation gating a destructive action showed "none pending"
   for a count whose source failed to parse. At every count, list or "none" a
   user sees, trace its source through each state (absent, unreadable,
