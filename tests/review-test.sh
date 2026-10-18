@@ -364,6 +364,13 @@ EOF
   run_review "$repo" "$stub" --lenses correctness
   pr_assert_warned "an extglob it cannot match" invalid
 
+  printf 'reviews:\n  path_instructions:\n    - path: "lib/**"\n    - path: "!lib/**"\n      instructions: x\n' > "$repo/.coderabbit.yaml"
+  run_review "$repo" "$stub" --lenses correctness
+  pr_assert_warned "a malformed entry beside an unmatchable glob" invalid
+  assert "pr: both kinds named, one warning" jq -e '.path_rules.warning
+    | contains("entry #1 lacks") and contains("entry #2 uses a glob") and endswith("they did NOT reach the lenses")' \
+    "$repo/.review/findings.json"
+
   # a yaml module that cannot be imported, shadowing the real one
   mkdir -p "$WORK/pr-noyaml"
   printf 'raise ImportError("stubbed out")\n' > "$WORK/pr-noyaml/yaml.py"

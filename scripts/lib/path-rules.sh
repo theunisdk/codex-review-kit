@@ -350,7 +350,8 @@ if hits:
             more = " and %d more" % (len(matched) - 10) if len(matched) > 10 else ""
             out.write("\n### `%s` - applies to %s%s\n\n%s\n" % (path, shown, more, text))
 
-warning = None
+
+
 def entries(ns):
     return "entr%s %s" % ("ies" if len(ns) > 1 else "y", ", ".join("#%d" % n for n in ns))
 
@@ -360,8 +361,8 @@ if bad:
     notes.append("%s lack%s a non-empty string path and instructions, so CodeRabbit may discard "
                  "the whole file" % (entries(bad), "" if len(bad) > 1 else "s"))
 if unread:
-    notes.append("%s use%s a glob this reader cannot match (an extglob, a POSIX class, a `!` "
-                 "negation, or braces expanding to more than 256 alternatives in total)"
+    notes.append("%s use%s a glob this reader cannot match (such as an extglob, a POSIX class, "
+                 "a `!` negation, or braces expanding to more than 256 alternatives in total)"
                  % (entries(unread), "" if len(unread) > 1 else "s"))
 warning = None
 if notes:
