@@ -2920,6 +2920,7 @@ EOF
 cat > "$WORK/bin-replay/claude" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "${*:3}" >> "$CLAUDE_STUB_DIR/calls.log"
+i=0; for a in "$@"; do i=$((i + 1)); [ "$i" -le 2 ] || printf '[%s]' "$a"; done >> "$CLAUDE_STUB_DIR/argv.log"; echo >> "$CLAUDE_STUB_DIR/argv.log"
 case "$2" in
   "Replay adjudication"*) kind=adjudicate ;;
   "Replay postmortem"*)   kind=postmortem ;;
@@ -3124,7 +3125,7 @@ test_replay_scores_reports_and_writes_nothing_else() {
   assert "r1: claude never gets gh, Edit or Write" \
     sh -c '[ "$(grep -c . "$1")" -eq 4 ] && ! grep -vF -- "--disallowedTools Bash(gh:*)" "$1" | grep -q . && ! grep -vF -- "--tools Read,Grep,Glob,Bash" "$1" | grep -q .' _ "$RCL/calls.log"
   assert "r1: … nor any settings file, whose allow rules would apply" \
-    sh -c '! grep -vF -- "--setting-sources  --output-format" "$1" | grep -q .' _ "$RCL/calls.log"
+    sh -c '[ "$(grep -c . "$1")" -eq 4 ] && ! grep -vF -- "[--setting-sources][][--output-format]" "$1" | grep -q .' _ "$RCL/argv.log"
   assert "r1: the spoke's refs are untouched" test "$(git -C "$RS" for-each-ref)" = "$refs_before"
   assert "r1: … and no FETCH_HEAD is written" test ! -e "$common/FETCH_HEAD"
   assert "r1: … and its checkout is clean" test -z "$(git -C "$RS" status --porcelain)"
