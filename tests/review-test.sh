@@ -1513,6 +1513,21 @@ test_bootstrap_tells_unreachable_from_missing() {
   assert_not "b3: nothing synced" test -f "$spoke/.review/kit-version"
 }
 
+# A tag lookup that fails is not a missing tag: an awk that exits non-zero
+# leaves SHA empty, the same as a tag that does not exist.
+test_bootstrap_tells_failed_lookup_from_missing() {
+  local hub="$WORK/b4-hub" spoke="$WORK/b4-spoke" bin="$WORK/b4-bin"
+  make_boot_hub "$hub"; make_spoke "$spoke"
+  mkdir -p "$bin"
+  printf '#!/bin/sh\nexit 2\n' > "$bin/awk"; chmod +x "$bin/awk"
+
+  run_bootstrap "$spoke" "$hub" PATH="$bin:$WORK/bootbin:$PATH"; local rc=$?
+  assert     "b4: failed lookup stops" test "$rc" -ne 0
+  assert     "b4: failed lookup says so" grep -q 'cannot read the tag listing' "$LOG"
+  assert_not "b4: failed lookup is not called a missing tag" grep -q 'neither a tag' "$LOG"
+  assert_not "b4: nothing synced" test -f "$spoke/.review/kit-version"
+}
+
 # --local is the opt-in that installs a clone's working tree as-is, so a clone
 # behind its origin still installs — with a warning, and recorded unreleased.
 test_update_warns_on_stale_local_clone() {
@@ -3719,6 +3734,7 @@ run_tests \
   test_bootstrap_block_matches_in_both_docs \
   test_bootstrap_pins_and_refuses_a_branch \
   test_bootstrap_tells_unreachable_from_missing \
+  test_bootstrap_tells_failed_lookup_from_missing \
   test_update_warns_on_stale_local_clone \
   test_update_installs_the_release_over_a_local_clone \
   test_update_unreachable_hub_fails_despite_a_clone \
