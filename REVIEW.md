@@ -144,7 +144,8 @@ synced files whose local edits the sync overwrote, lifts each skipped release's
 `## Upgrading` section to the top, and carries the full release notes.
 
 Every failure fails the job: hub unreachable, no release tag, a failed or empty
-sync, a refused push, a `gh` error. Actions must be allowed to open PRs:
+sync, a release-notes lookup that errors, a refused push, a `gh` error, a run
+from a branch other than the default. Actions must be allowed to open PRs:
 Settings > Actions > General > Workflow permissions > "Allow GitHub Actions to
 create and approve pull requests" (in an organization, the org-level setting
 first). A PR opened with the default token starts no workflows, so CI waits for
@@ -154,6 +155,11 @@ scheduled workflows in a public repo after 60 days without activity. The
 workflow is repo-owned once seeded: syncs never touch it and `--init` keeps an
 edited copy. To opt out, set `KIT_SYNC_ACTION=0` in `.review/config.sh` and
 delete the file if it was already seeded.
+
+A spoke synced by an updater from before v1.3.0 gets neither
+`scripts/review-sync.sh` nor the workflow from that sync, because the old
+updater does not know them. Run `./scripts/review-update.sh --init` once more
+after it.
 
 With or without the workflow, `review.sh` checks the installed release at
 startup. It warns when the installed release is

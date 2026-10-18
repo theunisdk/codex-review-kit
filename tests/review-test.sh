@@ -1797,6 +1797,12 @@ test_init_reseeding_the_sync_workflow() {
   assert "w2: an opted-out --init exits 0" test "$rc" -eq 0
   assert_not "w2: KIT_SYNC_ACTION=0 seeds no workflow" test -e "$o/$WF"
   assert "w2: the opt-out is named" grep -q 'KIT_SYNC_ACTION=0' "$LOG"
+
+  local b="$WORK/w2-broken"
+  make_spoke "$b"; mkdir -p "$b/.review"; printf 'if then\nKIT_SYNC_ACTION=0\n' > "$b/.review/config.sh"
+  run_update_init "$b" REVIEW_KIT_DIR="$KIT"
+  assert_not "w2: an unreadable config seeds no workflow" test -e "$b/$WF"
+  assert "w2: and says it could not read the opt-out" grep -q 'could not be read to check KIT_SYNC_ACTION' "$LOG"
 }
 
 # review-install.sh reports whether new releases arrive on their own.
@@ -1806,12 +1812,16 @@ test_install_reports_the_sync_workflow() {
   assert "w3: install reports the seeded workflow" grep -q 'review-kit-sync workflow present' "$LOG"
   make_synced_spoke "$p"; run_install_check "$p"
   assert "w3: install says how to seed a missing workflow" grep -q 'no .github/workflows/review-kit-sync.yml' "$LOG"
+  rm "$s/scripts/review-sync.sh"; run_install_check "$s"; local rc=$?
+  assert "w3: a workflow without its script fails --check" test "$rc" -ne 0
+  assert "w3: and says every run fails" grep -q 'scripts/review-sync.sh is missing' "$LOG"
 }
 
 # --- review-sync.sh ------------------------------------------------------------
 # gh stub: answers from $GH_STUB — open.json / closed.json for `pr list --state`,
-# commits.json for `pr view`, notes/<tag>.md for `release view`, list.err or
-# create.err to fail `pr list` / `pr create` with that text. --jq is applied
+# commits.json for `pr view`, notes/<tag>.md for `release view` (else
+# release.err, else "release not found"), list.err / create.err / edit.err to
+# fail `pr list` / `pr create` / `pr edit` with that text. --jq is applied
 # with jq -r, as gh does. Every call is logged to calls; a body file is kept
 # as body.md.
 mkdir -p "$WORK/gh-bin"
@@ -1830,11 +1840,16 @@ case "$1 $2" in
     [ ! -f "$GH_STUB/list.err" ] || { cat "$GH_STUB/list.err" >&2; exit 1; }
     f="$GH_STUB/$state.json"; [ -f "$f" ] || f="$GH_STUB/empty.json"
     emit "$f" ;;
-  "pr view") emit "$GH_STUB/commits.json" ;;
+  "pr view")
+    [ ! -f "$GH_STUB/view.err" ] || { cat "$GH_STUB/view.err" >&2; exit 1; }
+    emit "$GH_STUB/commits.json" ;;
+  "repo view") echo '{"defaultBranchRef":{"name":"main"}}' > "$GH_STUB/repo.json"; emit "$GH_STUB/repo.json" ;;
+  "pr edit") [ ! -f "$GH_STUB/edit.err" ] || { cat "$GH_STUB/edit.err" >&2; exit 1; } ;;
   "pr create")
     [ ! -f "$GH_STUB/create.err" ] || { cat "$GH_STUB/create.err" >&2; exit 1; }
     echo "https://github.com/acme/spoke/pull/12" ;;
   "release view")
+    [ ! -f "$GH_STUB/release.err" ] || { cat "$GH_STUB/release.err" >&2; exit 1; }
     [ -f "$GH_STUB/notes/$3.md" ] || { echo "release not found" >&2; exit 1; }
     jq -n --rawfile b "$GH_STUB/notes/$3.md" '{body: $b}' > "$GH_STUB/release.json"
     emit "$GH_STUB/release.json" ;;
@@ -1873,7 +1888,7 @@ sync_world() {
 run_sync() { # run_sync [VAR=val ...] — scripts/review-sync.sh in $SPOKE; output in $LOG
   LOG="$SPOKE.sync.log"
   mkdir -p "$WORK/nohome"
-  ( cd "$SPOKE" && env -i HOME="$WORK/nohome" PATH="$WORK/gh-bin:$PATH" GH_STUB="$GH_STUB" \
+  ( cd "$SPOKE" && env -i HOME="$WORK/nohome" PATH="$WORK/gh-bin:$PATH" GH_STUB="$GH_STUB" GIT_CONFIG_NOSYSTEM=1 \
       REVIEW_KIT_REPO=theunisdk/codex-review-kit "$@" bash scripts/review-sync.sh ) > "$LOG" 2>&1
 }
 origin_has_branch() { git --git-dir="$SORIGIN" rev-parse -q --verify refs/heads/review-kit-sync >/dev/null; }
@@ -1890,13 +1905,20 @@ test_sync_current_succeeds_quietly() {
   assert     "s1: the job summary says so too" grep -q 'current: v0.11.0' "$sum"
   assert_not "s1: no gh call at all" test -s "$GH_STUB/calls"
   assert_not "s1: nothing pushed" origin_has_branch
+
+  ( cd "$SPOKE" && sed 's/^release: .*/release: v0.99.0/' .review/kit-version > kv && mv kv .review/kit-version \
+      && git -c user.email=t@example.invalid -c user.name=t commit -qam ahead )
+  run_sync; rc=$?
+  assert     "s1: a kit ahead of the hub exits 0" test "$rc" -eq 0
+  assert     "s1: and says it is ahead" grep -q 'review kit ahead: v0.99.0 is newer' "$LOG"
+  assert_not "s1: ahead pushes nothing" origin_has_branch
 }
 
 # Behind: exactly one PR, from a pushed branch, carrying the skipped releases'
 # notes, their Upgrading sections, and the local edits the sync overwrote.
 test_sync_behind_opens_one_pr() {
   sync_world s2 v0.9.0
-  ( cd "$SPOKE" && printf 'LOCAL EDIT\n' >> REVIEW.md \
+  ( cd "$SPOKE" && printf 'LOCAL EDIT\n' >> REVIEW.md && git rm -q OPERATING.md \
       && git -c user.email=t@example.invalid -c user.name=t commit -qam 'local edit' && git push -q origin main )
   local main_before; main_before="$(git --git-dir="$SORIGIN" rev-parse main)"
   run_sync; local rc=$?
@@ -1916,6 +1938,9 @@ test_sync_behind_opens_one_pr() {
     sh -c 'git --git-dir="$1" log -1 --format=%an review-kit-sync | grep -qx "github-actions\[bot\]"' _ "$SORIGIN"
   assert     "s2: the spoke is back on main" test "$(git -C "$SPOKE" symbolic-ref --short HEAD)" = main
   assert     "s2: body names the overwritten local edit" grep -qF '`REVIEW.md` — edited here since v0.9.0' "$body"
+  assert     "s2: body names a deleted synced file the sync restores" \
+    grep -qF '`OPERATING.md` — deleted here since v0.9.0; the sync restores it' "$body"
+  assert_not "s2: an unchanged updater raises no callout" grep -q 'changes `scripts/review-update.sh`' "$body"
   assert_not "s2: body does not flag unedited synced files" grep -qF '`scripts/review.sh`' "$body"
   assert     "s2: body lifts v0.10.0's Upgrading section" grep -qF 'New `ten_key` in findings.json.' "$body"
   assert_not "s2: the lifted section stops at the next heading" \
@@ -1934,7 +1959,7 @@ test_sync_updates_the_open_pr() {
   sync_world s3 v0.9.0
   run_sync
   local oid; oid="$(git --git-dir="$SORIGIN" rev-parse review-kit-sync)"
-  printf '[{"number":12,"title":"sync review kit to v0.11.0","url":"https://github.com/acme/spoke/pull/12"}]\n' > "$GH_STUB/open.json"
+  printf '[{"number":12,"title":"sync review kit to v0.11.0","url":"https://github.com/acme/spoke/pull/12","isCrossRepository":false}]\n' > "$GH_STUB/open.json"
   run_sync; local rc=$?
   assert "s3: an open PR for the latest exits 0" test "$rc" -eq 0
   assert "s3: says the release is waiting in it" grep -q 'v0.11.0 is waiting in sync PR #12' "$LOG"
@@ -1942,31 +1967,52 @@ test_sync_updates_the_open_pr() {
   assert "s3: the branch is not re-pushed" test "$(git --git-dir="$SORIGIN" rev-parse review-kit-sync)" = "$oid"
 
   hub_release "$SHUB" v0.12.0
-  printf '{"commits":[{"oid":"%s","messageBody":"Review-Kit-Sync: v0.11.0"}]}\n' "$oid" > "$GH_STUB/commits.json"
+  printf '{"headRefOid":"%s","commits":[{"oid":"%s","messageBody":"Review-Kit-Sync: v0.11.0"}]}\n' "$oid" "$oid" > "$GH_STUB/commits.json"
   run_sync; rc=$?
   assert "s3: a newer release exits 0" test "$rc" -eq 0
-  assert "s3: the open PR is edited" grep -q -- 'pr edit 12 --title sync review kit to v0.12.0' "$GH_STUB/calls"
+  assert "s3: the open PR is edited, base included" grep -q -- 'pr edit 12 --base main --title sync review kit to v0.12.0' "$GH_STUB/calls"
   assert "s3: still one PR" test "$(gh_calls 'pr create')" = 1
   assert "s3: says it updated the PR" grep -q 'updated sync PR #12' "$LOG"
   assert "s3: the branch now carries v0.12.0" test "$(origin_release review-kit-sync)" = v0.12.0
   assert "s3: the new body still counts from the installed release" grep -q 'ten things' "$GH_STUB/body.md"
-  assert "s3: a release without notes says so in the body" \
-    grep -q 'No release notes for v0.12.0: release not found' "$GH_STUB/body.md"
+  assert "s3: a tag with no GitHub release says so in the body" \
+    grep -q 'v0.12.0 is a tag with no GitHub release' "$GH_STUB/body.md"
 
   hub_release "$SHUB" v0.13.0
   oid="$(git --git-dir="$SORIGIN" rev-parse review-kit-sync)"
-  printf '[{"number":12,"title":"sync review kit to v0.12.0","url":"u"}]\n' > "$GH_STUB/open.json"
-  printf '{"commits":[{"oid":"a","messageBody":"Review-Kit-Sync: v0.12.0"},{"oid":"b","messageBody":""}]}\n' > "$GH_STUB/commits.json"
+  printf '[{"number":12,"title":"sync review kit to v0.12.0","url":"u","isCrossRepository":false}]\n' > "$GH_STUB/open.json"
+  printf '{"headRefOid":"%s","commits":[{"oid":"a","messageBody":"Review-Kit-Sync: v0.12.0"},{"oid":"b","messageBody":""}]}\n' "$oid" > "$GH_STUB/commits.json"
   run_sync; rc=$?
   assert "s3: a human commit on the PR fails the run" test "$rc" -ne 0
   assert "s3: and says why" grep -q 'sync PR #12 carries 1 commit(s) this sync did not make' "$LOG"
   assert "s3: the human commit is not force-pushed away" test "$(git --git-dir="$SORIGIN" rev-parse review-kit-sync)" = "$oid"
+
+  # gh vouched for an older head than origin now has: the lease refuses the push.
+  local raced; raced="$(git --git-dir="$SORIGIN" rev-parse review-kit-sync)"
+  ( cd "$SPOKE" && git fetch -q origin review-kit-sync && git checkout -q -b race FETCH_HEAD \
+      && printf 'human\n' > human.txt && git add human.txt \
+      && git -c user.email=t@example.invalid -c user.name=t commit -qm human \
+      && git push -q origin HEAD:refs/heads/review-kit-sync && git checkout -q main && git branch -qD race )
+  oid="$(git --git-dir="$SORIGIN" rev-parse review-kit-sync)"
+  printf '{"headRefOid":"%s","commits":[{"oid":"a","messageBody":"Review-Kit-Sync: v0.12.0"}]}\n' "$raced" > "$GH_STUB/commits.json"
+  run_sync; rc=$?
+  assert "s3: a push racing the check fails the run" test "$rc" -ne 0
+  assert "s3: and quotes the rejection, not the remote's URL" grep -qF '[rejected]' "$LOG"
+  assert "s3: the racing commit survives" test "$(git --git-dir="$SORIGIN" rev-parse review-kit-sync)" = "$oid"
+
+  git -C "$SPOKE" checkout -q -f main
+  printf 'HTTP 422: Validation Failed\n' > "$GH_STUB/edit.err"
+  printf '{"headRefOid":"%s","commits":[{"oid":"a","messageBody":"Review-Kit-Sync: v0.12.0"}]}\n' "$oid" > "$GH_STUB/commits.json"
+  run_sync; rc=$?
+  assert "s3: a failed PR edit fails the run" test "$rc" -ne 0
+  assert "s3: and names the PR" grep -q 'cannot update sync PR #12: HTTP 422' "$LOG"
+  assert_not "s3: no success line after a failed edit" grep -q 'updated sync PR' "$LOG"
 }
 
 # A sync PR closed unmerged for the latest release is a decision, not a gap.
 test_sync_respects_a_declined_pr() {
   sync_world s4 v0.9.0
-  printf '[{"number":9,"title":"sync review kit to v0.11.0","mergedAt":null},{"number":8,"title":"sync review kit to v0.10.0","mergedAt":null}]\n' \
+  printf '[{"number":10,"title":"sync review kit to v0.11.0","mergedAt":"2026-10-01T00:00:00Z"},{"number":9,"title":"sync review kit to v0.11.0","mergedAt":null},{"number":8,"title":"sync review kit to v0.10.0","mergedAt":null}]\n' \
     > "$GH_STUB/closed.json"
   run_sync; local rc=$?
   assert     "s4: declined exits 0" test "$rc" -eq 0
@@ -2005,6 +2051,12 @@ test_sync_failures_fail_visibly() {
   assert "s5: names the exact setting" grep -q "Allow GitHub Actions to create and approve pull requests" "$LOG"
   assert "s5: annotates the run" grep -q '^::error title=review kit sync failed::GitHub Actions may not create pull requests' "$LOG"
   assert "s5: the job summary says it failed" grep -q 'failed' "$sum"
+
+  printf 'pull request create failed: GraphQL: Resource not accessible by integration (createPullRequest)\n' \
+    > "$GH_STUB/create.err"
+  run_sync; rc=$?
+  assert "s5: a token without pull-requests write fails" test "$rc" -ne 0
+  assert "s5: names the permission" grep -q "the job needs 'permissions: pull-requests: write'" "$LOG"
   rm -f "$GH_STUB/create.err"
 
   git -C "$SPOKE" remote set-url origin "file://$WORK/s5-gone.git"
@@ -2021,7 +2073,14 @@ test_sync_failures_fail_visibly() {
   run_sync; rc=$?
   assert "s5: a refused push fails" test "$rc" -ne 0
   assert "s5: names the permission it needs" grep -q "push to review-kit-sync refused — the job needs 'permissions: contents: write'" "$LOG"
-  assert "s5: no PR without a branch" test "$(gh_calls 'pr create')" = 1
+  assert "s5: no PR without a branch" test "$(gh_calls 'pr create')" = 2
+
+  printf '#!/bin/sh\necho "refusing to allow a GitHub App to create or update workflow \\`.github/workflows/ci.yml\\` without \\`workflows\\` permission" >&2\nexit 1\n' \
+    > "$SORIGIN/hooks/pre-receive"
+  git -C "$SPOKE" checkout -q -f main
+  run_sync; rc=$?
+  assert "s5: a push refused for a workflow change fails" test "$rc" -ne 0
+  assert "s5: names the workflows permission" grep -q 'give REVIEW_KIT_SYNC_TOKEN Workflows write' "$LOG"
 }
 
 # A sync that fails, or exits 0 without installing the release, fails the job.
@@ -2050,7 +2109,96 @@ test_sync_failed_or_empty_update_fails() {
   git -C "$SPOKE" -c user.email=t@example.invalid -c user.name=t commit -qm 'no kit-version'
   run_sync; rc=$?
   assert "s6: a missing kit-version fails" test "$rc" -ne 0
-  assert "s6: says it was never synced" grep -q 'kit-version is missing' "$LOG"
+  assert "s6: says it was never synced" grep -q '^error: .review/kit-version is missing — this repo was never synced' "$LOG"
+}
+
+# The sync overwrites review-sync.sh while it runs. A release whose copy differs
+# must not run a byte of it before the PR is reviewed.
+test_sync_never_runs_the_incoming_script() {
+  sync_world s7 v0.11.0
+  (
+    cd "$SHUB" || exit 1
+    { echo '#!/usr/bin/env bash'
+      i=0; while [ $i -lt 400 ]; do echo "touch '$WORK/s7-pwned'; exit 0 # padding padding"; i=$((i + 1)); done
+    } > scripts/review-sync.sh
+    echo "touch '$WORK/s7-pwned'" >> scripts/review-update.sh
+    git commit -aqm payload && git -c tag.gpgSign=false tag -a -m v0.12.0 v0.12.0
+  )
+  run_sync; local rc=$?
+  assert     "s7: the sync completes" test "$rc" -eq 0
+  assert     "s7: and opens the PR" grep -q 'opened sync PR' "$LOG"
+  assert_not "s7: the incoming script never ran" test -e "$WORK/s7-pwned"
+  assert     "s7: the PR carries the incoming script for review" \
+    sh -c 'git --git-dir="$1" show review-kit-sync:scripts/review-sync.sh | grep -q s7-pwned' _ "$SORIGIN"
+  assert     "s7: the PR says the release changes the updater" \
+    grep -qF '**v0.12.0 changes `scripts/review-update.sh`.**' "$GH_STUB/body.md"
+}
+
+# Only this repo's own review-kit-sync branch is the sync PR; a fork's is not.
+test_sync_ignores_fork_prs() {
+  sync_world s8 v0.9.0
+  printf '[{"number":5,"title":"sync review kit to v0.11.0","url":"u","isCrossRepository":true}]\n' > "$GH_STUB/open.json"
+  printf '[{"number":4,"title":"sync review kit to v0.11.0","mergedAt":null,"isCrossRepository":true}]\n' > "$GH_STUB/closed.json"
+  run_sync; local rc=$?
+  assert     "s8: a fork's same-named PR exits 0" test "$rc" -eq 0
+  assert     "s8: opens the real sync PR" test "$(gh_calls 'pr create')" = 1
+  assert_not "s8: never edits the fork's PR" grep -q 'pr edit 5' "$GH_STUB/calls"
+  assert_not "s8: never reads the fork's PR" grep -q 'pr view 5' "$GH_STUB/calls"
+}
+
+# Lookups whose failure would leave a PR broken for good fail the run before
+# anything is pushed; so does a run from the wrong branch or over a foreign branch.
+test_sync_refuses_before_pushing() {
+  local rc
+  sync_world s9 v0.9.0
+  printf 'x\n' > "$SPOKE/dirty.txt"
+  run_sync; rc=$?
+  assert     "s9: a dirty tree is refused" test "$rc" -ne 0
+  assert     "s9: and says why" grep -q 'the working tree has changes' "$LOG"
+  assert_not "s9: the dirty file is not committed anywhere" origin_has_branch
+  rm -f "$SPOKE/dirty.txt"
+
+  printf 'HTTP 403: API rate limit exceeded\n' > "$GH_STUB/release.err"
+  run_sync; rc=$?
+  assert     "s9: a failed release-notes lookup fails" test "$rc" -ne 0
+  assert     "s9: names the release" grep -q 'cannot read the release notes for v0.11.0' "$LOG"
+  assert_not "s9: nothing pushed" origin_has_branch
+  rm -f "$GH_STUB/release.err"; git -C "$SPOKE" checkout -q -f main
+
+  git -C "$SPOKE" checkout -q -b feature
+  run_sync; rc=$?
+  assert     "s9: a feature branch is refused" test "$rc" -ne 0
+  assert     "s9: names the default branch" grep -q 'run from the default branch main, not feature' "$LOG"
+  git -C "$SPOKE" checkout -q main
+
+  ( cd "$SPOKE" && git checkout -q -b mine && printf 'x\n' > mine.txt && git add mine.txt \
+      && git -c user.email=t@example.invalid -c user.name=t commit -qm mine \
+      && git push -q origin HEAD:refs/heads/review-kit-sync && git checkout -q main )
+  local oid; oid="$(git --git-dir="$SORIGIN" rev-parse review-kit-sync)"
+  run_sync; rc=$?
+  assert     "s9: a foreign branch of that name fails" test "$rc" -ne 0
+  assert     "s9: says its tip is not a sync commit" grep -q 'its tip is not a sync commit' "$LOG"
+  assert     "s9: the foreign branch is untouched" test "$(git --git-dir="$SORIGIN" rev-parse review-kit-sync)" = "$oid"
+
+  git -C "$SPOKE" checkout -q -f main
+  printf '[{"number":7,"title":"sync review kit to v0.10.0","url":"u","isCrossRepository":false}]\n' > "$GH_STUB/open.json"
+  printf 'HTTP 502: Bad Gateway\n' > "$GH_STUB/view.err"
+  run_sync; rc=$?
+  assert     "s9: a failed read of the open PR fails" test "$rc" -ne 0
+  assert     "s9: and is not taken as zero foreign commits" grep -q 'cannot read the commits of sync PR #7: HTTP 502' "$LOG"
+  assert     "s9: the branch is untouched" test "$(git --git-dir="$SORIGIN" rev-parse review-kit-sync)" = "$oid"
+}
+
+# A pin to a release from before review-sync.sh existed still installs.
+test_update_pins_a_release_without_the_sync_script() {
+  local hub="$WORK/u21-hub" spoke="$WORK/u21-spoke"
+  make_hub "$hub"
+  ( cd "$hub" && git rm -q scripts/review-sync.sh && git commit -qm old && git tag v0.9.0 )
+  make_spoke "$spoke"
+  run_update "$spoke" REVIEW_KIT_URL="file://$hub" REVIEW_KIT_REF=v0.9.0; local rc=$?
+  assert     "u21: the pin installs" test "$rc" -eq 0
+  assert     "u21: kit-version records it" grep -qx 'release: v0.9.0' "$spoke/.review/kit-version"
+  assert_not "u21: no sync script appears" test -e "$spoke/scripts/review-sync.sh"
 }
 
 # --- installer fixtures ----------------------------------------------------
@@ -3250,6 +3398,10 @@ run_tests \
   test_sync_respects_a_declined_pr \
   test_sync_failures_fail_visibly \
   test_sync_failed_or_empty_update_fails \
+  test_sync_never_runs_the_incoming_script \
+  test_sync_ignores_fork_prs \
+  test_sync_refuses_before_pushing \
+  test_update_pins_a_release_without_the_sync_script \
   test_install_check_reports_gate_state \
   test_install_check_fails_on_unwired_gate \
   test_install_check_foreign_hooks_path \

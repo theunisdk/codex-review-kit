@@ -197,8 +197,11 @@ mkdir -p scripts/lib .review/prompts .claude/commands .claude/skills \
          .codex/skills .githooks .claude-plugin
 
 cp "$KIT"/scripts/review.sh "$KIT"/scripts/review-install.sh \
-   "$KIT"/scripts/review-update.sh "$KIT"/scripts/review-sync.sh \
-   "$KIT"/scripts/make-plugin.sh scripts/
+   "$KIT"/scripts/review-update.sh "$KIT"/scripts/make-plugin.sh scripts/
+# releases before v1.3.0 have no review-sync.sh, and a pin may name one
+if [ -f "$KIT"/scripts/review-sync.sh ]; then
+  cp "$KIT"/scripts/review-sync.sh scripts/ && chmod +x scripts/review-sync.sh
+fi
 cp "$KIT"/scripts/lib/*.sh scripts/lib/
 cp "$KIT"/.review/prompts/*.md .review/prompts/
 cp "$KIT"/.review/schema.json "$KIT"/.review/adjudication.md \
@@ -211,7 +214,7 @@ cp "$KIT"/.githooks/pre-push .githooks/
 cp "$KIT"/.claude-plugin/*.json .claude-plugin/
 cp "$KIT"/REVIEW.md "$KIT"/OPERATING.md .
 chmod +x scripts/review.sh scripts/review-install.sh scripts/review-update.sh \
-         scripts/review-sync.sh scripts/make-plugin.sh .githooks/pre-push
+         scripts/make-plugin.sh .githooks/pre-push
 
 # --- seed repo-owned files on --init ---------------------------------------
 if [ "$INIT" = 1 ]; then
@@ -237,7 +240,7 @@ if [ "$INIT" = 1 ]; then
   # The weekly job that opens a PR for each new release. The schedule is spread
   # by repo name, so one release does not open every spoke's PR at once.
   wf=.github/workflows/review-kit-sync.yml
-  sync_opt="$( (set +eu; . ./.review/config.sh >/dev/null 2>&1; printf '%s' "${KIT_SYNC_ACTION:-1}") )"
+  sync_opt="$( (set +eu; . ./.review/config.sh >/dev/null 2>&1 || exit 1; printf '%s' "${KIT_SYNC_ACTION:-1}") )" || sync_opt=""
   slug="$(git remote get-url origin 2>/dev/null \
     | sed -E 's#/+$##; s#\.git$##; s#^.*[:/]([^/:]+/[^/:]+)$#\1#')" || slug=""
   [ -n "$slug" ] || slug="$(basename "$REPO_ROOT")"
