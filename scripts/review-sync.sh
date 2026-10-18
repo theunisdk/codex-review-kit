@@ -138,7 +138,8 @@ else
   LEASE="$(git ls-remote origin "refs/heads/$BRANCH" 2> "$TMP/git.err")" \
     || fail "cannot read branch $BRANCH on origin: $(first_line "$TMP/git.err")"
   if [ -n "$LEASE" ]; then
-    git fetch -q --depth 1 origin "refs/heads/$BRANCH" 2> "$TMP/git.err" \
+    DEPTH=(); [ "$(git rev-parse --is-shallow-repository)" != true ] || DEPTH=(--depth 1)
+    git fetch -q ${DEPTH[@]+"${DEPTH[@]}"} origin "refs/heads/$BRANCH" 2> "$TMP/git.err" \
       || fail "cannot fetch branch $BRANCH from origin: $(first_line "$TMP/git.err")"
     LEASE="$(git rev-parse FETCH_HEAD)" || fail "fetched $BRANCH but cannot resolve it"
     git log -1 --format=%B FETCH_HEAD | grep -q "^$TRAILER: " \
@@ -159,7 +160,8 @@ STATUS="$(git status --porcelain --untracked-files=all)" || fail "git status fai
   || fail "the sync to $LATEST changed nothing, though .review/kit-version said ${INSTALLED:-${REF:-unknown}}"
 # The updater that ran is this repo's older copy, which knows only the files it copies.
 UPDATER_CHANGED=0
-git diff --quiet -- scripts/review-update.sh || UPDATER_CHANGED=1
+NEW_UPDATER="$(git hash-object scripts/review-update.sh)" || fail "cannot hash scripts/review-update.sh after the sync"
+[ "$NEW_UPDATER" = "$(git rev-parse -q --verify HEAD:scripts/review-update.sh)" ] || UPDATER_CHANGED=1
 
 # A lookup that fails now would leave a PR missing its notes for good: the next
 # run finds it open under the latest title and leaves it be. So they fail.

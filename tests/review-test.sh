@@ -1803,6 +1803,11 @@ test_init_reseeding_the_sync_workflow() {
   run_update_init "$b" REVIEW_KIT_DIR="$KIT"
   assert_not "w2: an unreadable config seeds no workflow" test -e "$b/$WF"
   assert "w2: and says it could not read the opt-out" grep -q 'could not be read to check KIT_SYNC_ACTION' "$LOG"
+
+  local f="$WORK/w2-false"
+  make_spoke "$f"; mkdir -p "$f/.review"; printf 'BASE=main\ncommand -v no-such-tool >/dev/null && SED=x\n' > "$f/.review/config.sh"
+  run_update_init "$f" REVIEW_KIT_DIR="$KIT"
+  assert "w2: a valid config ending in a false test still seeds" test -e "$f/$WF"
 }
 
 # review-install.sh reports whether new releases arrive on their own.
@@ -1812,7 +1817,9 @@ test_install_reports_the_sync_workflow() {
   assert "w3: install reports the seeded workflow" grep -q 'review-kit-sync workflow present' "$LOG"
   make_synced_spoke "$p"; run_install_check "$p"
   assert "w3: install says how to seed a missing workflow" grep -q 'no .github/workflows/review-kit-sync.yml' "$LOG"
-  rm "$s/scripts/review-sync.sh"; run_install_check "$s"; local rc=$?
+  run_install_full "$s"; run_install_check "$s"; local rc=$?
+  assert "w3: a fully installed spoke passes --check" test "$rc" -eq 0
+  rm "$s/scripts/review-sync.sh"; run_install_check "$s"; rc=$?
   assert "w3: a workflow without its script fails --check" test "$rc" -ne 0
   assert "w3: and says every run fails" grep -q 'scripts/review-sync.sh is missing' "$LOG"
 }
