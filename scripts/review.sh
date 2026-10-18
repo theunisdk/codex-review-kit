@@ -48,7 +48,7 @@ LENSES_FLAG=0
 # Any failed exit before a report is written must not leave the previous run's
 # report — and its complete:true — standing in for this one.
 STARTED=0; REPORT_WRITTEN=0; HOOK_WARNING=""
-ANALYZERS_JSON='{"status":"not_run","reason":"the run stopped before the analyzers ran","tools":[]}'
+ANALYZERS_JSON='{"status":"not_run","reason":"the run stopped before the analyzer pass finished","tools":[]}'
 SECRET_FINDINGS="[]"; SECRETS_SCAN="not_scanned"; GITLEAKS_LEAKED=0; CHANGED_COUNT=""
 finish_report() {
   local rc=$?

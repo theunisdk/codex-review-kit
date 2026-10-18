@@ -1402,7 +1402,9 @@ _run_analyzer shapeless '' bash -c 'echo "3 problems"; exit 1'
 _section legacy-banner; printf 'tsc rc=1\n%s\n' "This is not the tsc command you are looking for" >> "$report"
 _section legacy-plain; echo "lint: clean" >> "$report"
 _section legacy-empty
-_run_analyzer flood ':[0-9]+: ' sh -c 'i=0; while [ $i -lt 30000 ]; do echo "f.sh:$i: noisy"; i=$((i + 1)); done; exit 1'
+_run_analyzer flood ':[0-9]+: ' sh -c 'yes "f.sh:1: noisy" | head -c 3000000; exit 3'
+_run_analyzer nogo ':[0-9]+: ' sh -c 'echo "exec: \"go\": executable file not found in \$PATH"; exit 1'
+ANALYZER_UNRESOLVED_RE='(' _run_analyzer badre ':[0-9]+: ' sh -c 'echo "a.py:1: error: x"; exit 1'
 EOF
   ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
   run_review_analyzers "$AREPO" "$ASTUB" main
@@ -1426,15 +1428,17 @@ EOF
   assert "al1: an empty section is unknown, not clean" \
     bash -c 'status_of "$1" legacy-empty | grep -qF "analyzer status: unknown — the section is empty"' _ "$r"
   assert "al1: a flood of output is capped, and still labelled" \
-    bash -c '[ "$(status_of "$1" flood)" = "analyzer status: ran — findings above (rc=1)" ] && [ "$(section_body "$1" flood | wc -l)" -le 201 ] \
+    bash -c '[ "$(status_of "$1" flood)" = "analyzer status: ran — findings above (rc=3)" ] && [ "$(section_body "$1" flood | grep -c .)" -le 201 ] \
       && ! ls "$1".run' _ "$r"
+  assert "al1: a bad unresolved-import pattern is unknown, not findings" \
+    bash -c 'status_of "$1" badre | grep -qF "could not resolve an import" && status_of "$1" badre | grep -qF "is not a valid pattern"' _ "$r"
   assert "al1: every section has exactly one status line" \
     bash -c '[ "$(awk "/^### /{ if (n) print c; n = 1; c = 0 } /^analyzer status: /{ c++ } END { print c }" "$1" | sort -u)" = 1 ]' _ "$r"
   assert "al1: findings.json carries each tool's status" \
     jq -e '.analyzers.status == "ran" and (.analyzers.tools | map(select(.name | test("^(semgrep|shellcheck)") | not) | {(.name): .status}) | add) == {
       "gitleaks (secrets)": "ran", tsc: "failed", vitest: "failed", banner0: "failed", clean: "ran", lint: "ran",
       crash: "unknown", shapeless: "unknown", "legacy-banner": "failed", "legacy-plain": "unknown", "legacy-empty": "unknown",
-      flood: "ran"}
+      flood: "ran", nogo: "failed", badre: "unknown"}
       and (.analyzers.tools[] | select(.name == "tsc") | .reason | startswith("tsc could not run"))' "$json"
   assert "al1: a tool that did not run leaves complete alone" jq -e '.complete == true' "$json"
   assert "al1: the lens prompt names each tool that produced no results" \
@@ -4168,6 +4172,17 @@ test_replay_sum_across_spokes() {
   bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$WORK/r13-runs/norecords" > "$WORK/r13.pub" 2>&1; rc=$?
   assert "r13: … and so does jq's own error on a malformed run" \
     sh -c '[ "$2" -eq 1 ] && grep -qF "cannot read argument 1" "$1" && ! grep -qF "$3" "$1"' _ "$WORK/r13.pub" "$rc" "$WORK"
+  jq '.records = ["see src.txt in o/r"]' "$b/aggregate.json" > "$WORK/r13-runs/norecords/aggregate.json"
+  bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$WORK/r13-runs/norecords" > "$WORK/r13.pub" 2>&1; rc=$?
+  assert "r13: … and jq quotes nothing it choked on" \
+    sh -c '[ "$2" -eq 1 ] && grep -qF "cannot read argument 1" "$1" && ! grep -qF "src.txt" "$1" && ! grep -qiF "o/r" "$1"' _ "$WORK/r13.pub" "$rc"
+  if [ "$(id -u)" != 0 ]; then
+    chmod 000 "$WORK/r13-runs/norecords/aggregate.json"
+    bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$WORK/r13-runs/norecords" > "$WORK/r13.pub" 2>&1; rc=$?
+    assert "r13: … nor does an unreadable run's path" \
+      sh -c '[ "$2" -eq 1 ] && grep -qF "argument 1 cannot be read" "$1" && ! grep -qF "$3" "$1"' _ "$WORK/r13.pub" "$rc" "$WORK"
+    chmod 644 "$WORK/r13-runs/norecords/aggregate.json"
+  fi
   mkdir -p "$WORK/r13-runs/dup"; jq '.run = "dup-run"' "$b/aggregate.json" > "$WORK/r13-runs/dup/aggregate.json"
   bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$b" "$WORK/r13-runs/dup" > "$WORK/r13.pub" 2>&1; rc=$?
   assert "r13: … and a PR scored twice by alias" \

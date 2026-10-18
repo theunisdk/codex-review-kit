@@ -17,7 +17,7 @@
 # Output that says the tool never ran, whatever its exit status: npx fetching an
 # unrelated package named like the tool, a missing binary or dependency, a crash.
 # No backslashes: _label_sections hands it to awk.
-ANALYZER_CANNOT_RUN_RE='This is not the tsc command you are looking for|command not found|: not found$|could not determine executable to run|Command "[^"]*" not found|ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL|will be installed:|Need to install the following packages|MODULE_NOT_FOUND|Cannot find package|failed to load config from|Failed to load url|ModuleNotFoundError|Traceback [(]most recent call last[)]|^panic: |Segmentation fault|cannot find main module|missing go[.]sum entry|no required module provides package|could not find .Cargo[.]toml.|spawn [^ ]* ENOENT'
+ANALYZER_CANNOT_RUN_RE='This is not the tsc command you are looking for|command not found|: not found$|could not determine executable to run|Command "[^"]*" not found|ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL|will be installed:|Need to install the following packages|MODULE_NOT_FOUND|Cannot find package|failed to load config from|Failed to load url|ModuleNotFoundError|Traceback [(]most recent call last[)]|^panic: |Segmentation fault|cannot find main module|missing go[.]sum entry|no required module provides package|could not find .Cargo[.]toml.|spawn [^ ]* ENOENT|executable file not found'
 
 _analyzer_status() { printf 'analyzer status: %s\n' "$*" >> "$report"; }
 
@@ -34,13 +34,16 @@ _cannot_run_line() {
 # for the call, findings that include a line it matches (an import the tool
 # could not resolve) are unknown too: they may be missing dependencies, not code.
 _run_analyzer() {
-  local title="$1" re="$2" raw="$report.run" out rc why; shift 2
+  local title="$1" re="$2" raw="$report.run" out="" rc kept why; shift 2
   _section "$title"
   # the first 1 MB, and the rest drained unkept, so the tool keeps its own exit status
-  "$@" < /dev/null 2>&1 | { head -c 1000000 > "$raw"; cat > /dev/null; }; rc=${PIPESTATUS[0]}
-  out="$(cat "$raw")"; rm -f "$raw"
+  "$@" < /dev/null 2>&1 | { head -c 1000000 > "$raw"; kept=$?; cat > /dev/null; exit "$kept"; }
+  rc=${PIPESTATUS[0]} kept=${PIPESTATUS[1]}
+  [ "$kept" -eq 0 ] && out="$(cat "$raw")" || kept=1; rm -f "$raw"
   why="$(_cannot_run_line "$out")"
-  if [ -n "$why" ]; then
+  if [ "$kept" -ne 0 ]; then
+    _analyzer_status "unknown — $title exited rc=$rc, but its output could not be kept"
+  elif [ -n "$why" ]; then
     printf '%s\n' "$out" | head -20 >> "$report"
     _analyzer_status "failed — $title could not run (rc=$rc): $why"
   elif [ "$rc" -eq 0 ] && [ -z "$out" ]; then
@@ -49,7 +52,8 @@ _run_analyzer() {
     printf '%s\n' "$out" | head -200 >> "$report"
     why=""
     if [ -n "${ANALYZER_UNRESOLVED_RE:-}" ]; then
-      why="$(printf '%s\n' "$out" | grep -m 1 -E -- "$ANALYZER_UNRESOLVED_RE" | sed 's/^[[:space:]]*//' | cut -c 1-200)"
+      why="$(printf '%s\n' "$out" | grep -m 1 -E -- "$ANALYZER_UNRESOLVED_RE")"
+      case $? in 0) why="$(printf '%s\n' "$why" | sed 's/^[[:space:]]*//' | cut -c 1-200)" ;; 1) ;; *) why="ANALYZER_UNRESOLVED_RE is not a valid pattern" ;; esac
     fi
     if [ -n "$why" ]; then
       _analyzer_status "unknown — $title could not resolve an import, so its findings may be missing dependencies, not code (rc=$rc): $why"
@@ -430,7 +434,7 @@ collect_analyzer_output() {
   local py; py="$(_files_matching '*.py')"
   if [ -n "$py" ]; then
     _run_on_files ruff ':[0-9]+:[0-9]+: ' "$py" ruff check --output-format concise
-    ANALYZER_UNRESOLVED_RE='Cannot find implementation or library stub|\[import-not-found\]' \
+    ANALYZER_UNRESOLVED_RE='Cannot find implementation or library stub|Library stubs not installed|\[import-(not-found|untyped)\]' \
       _run_on_files mypy ':[0-9]+: (error|warning|note): ' "$py" mypy --no-error-summary
     _run_on_files bandit ':[0-9]+: B[0-9]+' "$py" bandit -q -f custom
   fi

@@ -44,6 +44,8 @@ need_cmd jq
 
 TMP="$(mktemp -d)" || die "no temp dir"
 trap 'rm -rf "$TMP"' EXIT
+# jq's own errors quote the values they choke on, which may be spoke code
+if [ -n "$ALIASES" ]; then jqq() { jq "$@" 2> /dev/null; }; else jqq() { jq "$@"; }; fi
 
 # {"owner/repo" (lower case): alias}; the alias must not be able to carry a repo name
 if [ -n "$ALIASES" ]; then
@@ -71,37 +73,38 @@ for r in "${RUNS[@]}"; do
       && die "$rl has no aggregate.json: the run stopped before its scorecard (see its summary.txt)"
     die "$lbl does not exist"
   fi
-  jq -e 'type == "object" and (.schema | type) == "string"' < "$f" > /dev/null 2>&1 || die "$lbl is not a replay run's aggregate"
-  schema="$(jq -r .schema < "$f")"
+  [ -f "$f" ] && [ -r "$f" ] || die "$lbl cannot be read"
+  jqq -e 'type == "object" and (.schema | type) == "string"' < "$f" > /dev/null 2>&1 || die "$lbl is not a replay run's aggregate"
+  schema="$(jqq -r .schema < "$f")"
   [ "$schema" = review-replay-run/v2 ] \
     || die "$lbl is $schema, not review-replay-run/v2: an older review-replay.sh wrote it, without its incomplete PRs and denied commands — re-run it"
-  jq -e '(.spoke | type) == "string" and (.run | type) == "string"' < "$f" > /dev/null || die "$lbl names no spoke or run, so it cannot be told apart from another run"
-  jq -c --arg path "$lbl" '{path: $path, run, spoke, repo, kit, prs, cost, denials, records: [.repo as $r | .records[] | . + {repo: $r}]}' \
+  jqq -e '(.spoke | type) == "string" and (.run | type) == "string"' < "$f" > /dev/null || die "$lbl names no spoke or run, so it cannot be told apart from another run"
+  jqq -c --arg path "$lbl" '{path: $path, run, spoke, repo, kit, prs, cost, denials, records: [.repo as $r | .records[] | . + {repo: $r}]}' \
     < "$f" >> "$TMP/runs.all" \
     || die "cannot read $lbl"
 done
-jq -s . "$TMP/runs.all" > "$TMP/runs.json" || die "cannot read the runs back"
+jqq -s . "$TMP/runs.all" > "$TMP/runs.json" || die "cannot read the runs back"
 
 # before the refusals below, which name repos
 if [ -n "$ALIASES" ]; then
-  jq -r --slurpfile a "$TMP/aliases.json" '[.[].repo | select(($a[0][ascii_downcase] // null) == null)] | unique | .[]' \
+  jqq -r --slurpfile a "$TMP/aliases.json" '[.[].repo | select(($a[0][ascii_downcase] // null) == null)] | unique | .[]' \
     "$TMP/runs.json" > "$TMP/unaliased" || die "cannot check the runs against the alias file"
   [ ! -s "$TMP/unaliased" ] \
     || die "the alias file covers no alias for $(grep -c . < "$TMP/unaliased") repo(s) in these runs; run without --aliases to see which"
-  jq --slurpfile a "$TMP/aliases.json" 'map(.repo = $a[0][.repo | ascii_downcase] | .records |= map(.repo = $a[0][.repo | ascii_downcase]))' \
+  jqq --slurpfile a "$TMP/aliases.json" 'map(.repo = $a[0][.repo | ascii_downcase] | .records |= map(.repo = $a[0][.repo | ascii_downcase]))' \
     "$TMP/runs.json" > "$TMP/runs.aliased" && mv "$TMP/runs.aliased" "$TMP/runs.json" || die "cannot alias the runs"
 fi
 
 # what would be counted twice, or mixes kits
 # a run is its spoke's; GitHub names are case-insensitive
-jq -r '(group_by("\(.spoke) \(.run)") | map(select(length > 1)) | .[] | "the same run twice: \(map(.path) | join(", "))"),
+jqq -r '(group_by("\(.spoke) \(.run)") | map(select(length > 1)) | .[] | "the same run twice: \(map(.path) | join(", "))"),
   ([.[] | .run as $run | .records[] | {key: "\(.repo | ascii_downcase)#\(.pr)", run: $run}] | group_by(.key) | map(select(length > 1)) | .[]
     | "\(.[0].key) is scored in more than one run (\(map(.run) | join(", "))): pass one of them"),
   (map(.kit.sha) | unique | select(length > 1) | "runs of different kits (\(map(.[0:7]) | join(", "))) do not sum to one kit'"'"'s scorecard")' \
   "$TMP/runs.json" > "$TMP/refused" || die "cannot check the runs"
 [ ! -s "$TMP/refused" ] || die "$(head -n1 "$TMP/refused")"
 
-SCORE=(jq -L "$HUB/scripts/lib")
+SCORE=(jqq -L "$HUB/scripts/lib")
 "${SCORE[@]}" 'include "replay-scorecard";
   def total(p): map(p) | add;
   {schema: "review-replay-sum/v1", kit: .[0].kit,
@@ -129,7 +132,7 @@ if [ -n "$JSON" ]; then cat "$TMP/sum.json"; exit 0; fi
   "review-replay-sum: aggregate — \(.prs | prs_text) — \(counts_text)",
   if has("lessons") then (.lessons[] | "lessons — \(.cause) (\(.missed) missed, \(.proposals) proposal(s)): \(.prs | join(", "))")
   else (.records | lessons("\(.repo)#\(.pr)")) end' "$TMP/sum.json" || die "cannot print the scorecard"
-cost="$(jq -r '.cost | [.claude_usd, .claude_calls_of_unknown_cost, .codex_tokens, .prs_of_unknown_codex_tokens] | @tsv' "$TMP/sum.json")" \
+cost="$(jqq -r '.cost | [.claude_usd, .claude_calls_of_unknown_cost, .codex_tokens, .prs_of_unknown_codex_tokens] | @tsv' "$TMP/sum.json")" \
   && read -r usd cu tokens tu <<< "$cost" || die "cannot print the cost"
 printf 'review-replay-sum: cost — claude $%.2f' "$usd"
 [ "$cu" = 0 ] || printf ' + unknown for %s call(s)' "$cu"
