@@ -16,7 +16,10 @@ at the end, which posts nothing.
 
 Begin your report with one status line, so a caller can tell the outcomes apart:
 
-- `review-postmortem: scored — PR #<n>: caught N / missed M / rejected-wrongly R / noise X / unscored U`
+- `review-postmortem: scored — PR #<n>: caught N / missed M / rejected-wrongly R / noise X / unscored U (compare_failed F)`.
+  `F` counts the unscored findings whose compare in step 2 failed or was
+  denied, so a run that could not compare does not read as one that found
+  the code changed. Print it even when it is 0.
 - `review-postmortem: no-local-verdict — PR #<n>: <why>`. Recorded, never scored:
   this is not `missed 0`.
 - `review-postmortem: skipped — <reason>` when there is nothing to record yet:
@@ -24,6 +27,9 @@ Begin your report with one status line, so a caller can tell the outcomes apart:
   or CodeRabbit skipped it.
 - `review-postmortem: failed — <step>: <error>` when a command failed. A failed
   read is never reported as an empty result. Nothing is recorded.
+
+A command that was denied permission did not run. Its result is unknown, not
+empty, and is handled as a failure of that command.
 
 After `scored` or `no-local-verdict`, the second line says whether the record
 was saved:
@@ -160,12 +166,36 @@ reports its own update of the record on a third line,
      PR through its base, or one a rebase dropped from the PR. A missing review-history directory is no
      history in this clone, not a failure.
 
-   Score a finding only if its file is unchanged between the verdict's commit
-   and the finding's commit: `git diff --quiet <verdict-sha> <finding-commit> -- <file>`.
-   Exit 1 means the code changed after the local review, so mark the finding
-   **unscored** with `unscored_reason` `changed`. Other exits mean git could
-   not compare: mark it unscored with `compare_failed: <error>`. One rule covers an ancestor verdict and findings raised on
-   later heads.
+   Score a finding only if the code it cites was already there at the
+   verdict's commit. Decide that per finding, never per file: on a PR with
+   several review rounds, nearly every file changed after the first. One rule
+   covers an ancestor verdict and findings raised on later heads. Record the
+   basis in the finding's `presence`:
+   - **The finding's commit is the verdict's commit**: `same_commit`.
+   - **Otherwise, blame the cited lines** over the commits since the verdict:
+     `git blame -s -l --ignore-revs-file= -L <start>,<end> <verdict-sha>..<finding-commit> -- <file>`.
+     An inline comment cites `original_start_line` (or `original_line` alone)
+     to `original_line`, on its `original_commit_id`. A review-body item cites
+     the lines its text names. A line whose SHA is marked `^` or blank existed
+     at the verdict's commit. Any other SHA is a commit after the review that
+     wrote that line. If every cited line existed: `lines_unchanged`.
+   - **If the blame shows a later commit, or the finding cites no lines** (a
+     file-level comment, or a `LEFT`-side comment on removed lines), read the
+     verdict's version, `git show <verdict-sha>:<file>`, and what changed since,
+     `git diff <verdict-sha> <finding-commit> -- <file>`. Then decide whether
+     the defect CodeRabbit describes is already in the verdict's code, even
+     where the lines were rewritten since. If it is, score it, with
+     `flaw_at_compared: <file>:<line>` naming where it is in the verdict's
+     version. If the later commit brought the defect in, the finding is
+     **unscored**, `unscored_reason` `changed`, with
+     `added_after: <short sha>` naming that commit.
+
+   A class comes only from a compare that ran. If the finding's commit is not
+   in this clone, or a compare command fails or is denied, the finding is
+   unscored with `compare_failed: <error>`, quoting the command. A blame that
+   says the file has fewer lines, or names no such path, has failed: it is not
+   evidence that the code changed. Do not fall back to a guess, to a whole-file
+   test, or to a cheaper command that answers a different question.
 
 3. **Classify each scored finding** against the verdict's findings table and
    its Rejected section:
@@ -183,24 +213,49 @@ reports its own update of the record on a third line,
    A review-body finding is answered in a PR comment. `/review-tune` reads these
    rejections.
 
-4. **Diagnose why each Missed finding was missed.** Give each one a cause:
-   - **Wrong lens** (`wrong_lens`) → propose a specific "hunt specifically
+4. **Diagnose why each Missed finding was missed**, from what the lenses did,
+   not from the verdict alone. A lens that never surfaced a defect can still
+   have read that code and reasoned about it. The evidence is in `.review/raw/`:
+   `out-<lens>.json` holds what each lens returned, before the merge filter,
+   and `log-<lens>.txt` holds what it ran and read. They belong to the last
+   review run, so they are evidence only for a verdict on that run's commit:
+   `jq -r '.head, .mode' .review/findings.json` must print a prefix of the
+   verdict's SHA, then `branch`. For each miss, search every lens's output
+   and log for the finding's file (`grep -n -F <file> .review/raw/log-<lens>.txt`),
+   then read the matching parts of the log.
+
+   Set `cause_evidence` to one line naming the file and what it shows, such as
+   ``log-correctness.txt: read src/a.ts:40-90 and checked the retry order; out-correctness.json: nothing on it``.
+   If the files are missing, or `findings.json` does not name the verdict's
+   commit (an older kit leaves `head` out), the cause
+   is `unverified`, and `cause_evidence` says which file was missing or
+   stale. Never pick a cause without the evidence. Give each miss one cause:
+   - **Wrong lens** (`wrong_lens`): no lens whose scope covers this defect
+     class read the code. The lenses that did read it were hunting other
+     classes. → Propose a specific "hunt specifically
      for" addition. A hazard specific to this repo goes in
      `.review/prompts.local/<lens>.md` (repo-owned overlay). One that would
      hold in any repo, or any repo on this stack, is a hub lesson for
      `.review/prompts/<lens>.md` (step 6). Never edit `.review/prompts/` in
      this repo: the next sync overwrites it.
-   - **Insufficient tracing** (`tracing`, right lens) → propose a `## WATCH`
+   - **Insufficient tracing** (`tracing`): the right lens read the cited code,
+     or worked on the question the finding raises, and reported nothing on
+     it. → Propose a `## WATCH`
      line, dated, naming the defect class concretely. It goes in
      `.review/learnings.md` if repo-specific, or is a hub lesson for
      `learnings-shared.md` if it generalises.
-   - **Threshold** (`threshold`) → check whether it was below
-     `CONFIDENCE_MIN` in `.review/raw/out-*.json`; if so, tell me the
+   - **Threshold** (`threshold`): a lens returned it in `out-<lens>.json`
+     with a confidence below the run's minimum (`min confidence` in
+     `.review/findings.md`), so the merge dropped it. → Tell me the
      threshold is too aggressive.
    - **Structural limit** (`structural`: needs a repo-wide index, cross-PR
      history, or a tool we do not run) → say so plainly. That is CodeRabbit
      earning its cost, and the right answer is to keep paying for it, not to
      bolt on more prompt.
+   - **Unverified** (`unverified`): there is no lens evidence for this
+     verdict. Propose nothing for it. `missed_by_cause` counts only the four
+     causes above, so its total falls short of `missed` by the unverified
+     misses.
 
 5. **Record the scorecard**, before proposing edits, so the record exists even
    if no edit is approved. Write one body and use it twice:
@@ -210,7 +265,7 @@ reports its own update of the record on a third line,
    ## Review postmortem — PR #<n>
 
    **scored** · compared commit `<first, short>` · local verdict `<sha>` (same | ancestor, K commits uncovered)
-   caught N / missed M (wrong lens a / tracing b / threshold c / structural d) / rejected-wrongly R / noise X / unscored U
+   caught N / missed M (wrong lens a / tracing b / threshold c / structural d / unverified e) / rejected-wrongly R / noise X / unscored U (compare_failed F)
 
    | CodeRabbit finding | File | Class | Cause | Local ID | Author |
    |--------------------|------|-------|-------|----------|--------|
@@ -226,7 +281,9 @@ reports its own update of the record on a third line,
     "missed_by_cause": {"wrong_lens": 0, "tracing": 0, "threshold": 0, "structural": 0},
     "findings": [{"url": "", "commit": "", "file": "", "summary": "",
                   "class": "caught | missed | rejected-wrongly | noise | unscored",
-                  "cause": "wrong_lens | tracing | threshold | structural | null", "local_id": null,
+                  "presence": "same_commit | lines_unchanged | flaw_at_compared: <file>:<line> | added_after: <sha> | null",
+                  "cause": "wrong_lens | tracing | threshold | structural | unverified | null",
+                  "cause_evidence": null, "local_id": null,
                   "unscored_reason": "changed | compare_failed: <error> | no_local_verdict | null",
                   "author": "fixed | logged | rejected | open", "author_reason": null}],
     "proposals": [{"route": "repo | hub", "file": "", "lines": "", "cause": ""}],
@@ -307,19 +364,31 @@ this command with `<n> --replay <dir>`. A replay scores today's kit, not the
 review that ran on the PR. It must not reach the PR, because a comment
 notifies everyone on it. The steps above apply, with these changes:
 
+- **One plain command per Bash call.** The replay allows only read-only
+  commands, matched by their first words, such as `git show`, `git diff`,
+  `git blame`, `git log`, `git cat-file`, `jq`, `grep` and `wc`, run from the
+  worktree's root. It denies everything else: `git -C`, `cd`, `&&`, `;`,
+  pipes, loops, redirection, `$(…)`, and interpreters such as `python3`.
+  Read a file with the Read tool, and JSON with `jq <filter> <file>`, one file
+  per call. A denied command follows the rule above: a denied step-2 compare
+  is `compare_failed: denied: <command>`, and a value you could not read is
+  `null` in the record, never an estimate.
 - **Call no `gh`.** `<dir>` holds what step 1 fetches: `pr.json` (the
   `gh pr view` fields, plus `headRefName` and `state`), `pull.json`
   (`…/pulls/<n>`), `reviews.json`, `comments.json` and
   `issue-comments.json` (every page, as one array), `statuses.json`
   (`[{"sha": …, "statuses": […]}]` for every PR commit) and
-  `pr-commits.txt`. If a file is missing or does not parse, report
-  `failed — read: <file>`.
+  `pr-commits.txt`. Check each JSON file with `jq -e type <file>`. If a file
+  is missing or does not parse, report `failed — read: <file>`.
 - **Fetch nothing.** The caller fetched the PR's commits. A finding whose
   commit is still missing is unscored with `compare_failed`.
 - **The verdict is this worktree's `.review/verdict.md`**, relation `same`.
   Do not list other worktrees or the review history. They hold verdicts from
   the kit that ran then, which a replay does not measure. If its header does
   not name the comparison commit, report `failed — verdict: <why>`.
+- **The lens evidence for step 4 is this worktree's `.review/raw/`**, from
+  the run that the verdict adjudicated. The caller keeps a copy in the record,
+  at `<record>/raw/log-<lens>.txt` and `<record>/raw/out-<lens>.json`.
 - **Save nothing.** In step 5, print the record instead: the status line,
   then `review-postmortem: record — replay: comment not posted; local copy written by the caller`,
   then the body from its `<!-- review-postmortem:v1 -->` line to the end. The

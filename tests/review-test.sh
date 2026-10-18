@@ -2939,6 +2939,79 @@ test_postmortem_finds_the_verdict_for_the_reviewed_commit() {
   fi
 }
 
+# A finding raised on a later head was unscored whenever its *file* had changed since
+# the verdict, which hid misses and catches on every multi-round PR (#59). The
+# postmortem now blames the cited lines over the commits after the verdict.
+postmortem_blame() { # postmortem_blame <verdict-sha> <finding-commit> <file> <start> <end> — the doc's per-finding compare, run
+  local cmd words
+  cmd="$(grep -o 'git blame [^`]*' "$KIT/.claude/commands/review-postmortem.md" | head -n1)"
+  cmd="${cmd//<verdict-sha>/$1}"; cmd="${cmd//<finding-commit>/$2}"; cmd="${cmd//<file>/$3}"
+  cmd="${cmd//<start>/$4}"; cmd="${cmd//<end>/$5}"
+  read -ra words <<< "$cmd"
+  "${words[@]}"
+}
+
+test_postmortem_scores_code_present_at_the_verdict() {
+  local repo="$WORK/pp" out="$WORK/pp.out" v c1 c2 rc
+  git init -q "$repo"
+  git -C "$repo" config user.email review-test@example.invalid
+  git -C "$repo" config user.name review-test
+  for i in 1 2 3 4 5 6 7 8 9 10; do printf 'value = %s;\n' "$i"; done > "$repo/f.txt"
+  git -C "$repo" add f.txt && git -C "$repo" commit -qm verdict
+  v=$(git -C "$repo" rev-parse HEAD)
+  { printf 'new a\nnew b\n'; sed 's/^value = 8;$/value = 80;/' "$repo/f.txt"; } > "$repo/f.tmp" && mv "$repo/f.tmp" "$repo/f.txt"
+  git -C "$repo" commit -qam 'round 1'
+  c1=$(git -C "$repo" rev-parse HEAD)
+  printf 'tail\n' >> "$repo/f.txt" && git -C "$repo" commit -qam 'round 2'
+  c2=$(git -C "$repo" rev-parse HEAD)
+  assert "pp1: the postmortem names a per-finding blame" test -n "$(grep -o 'git blame [^`]*' "$KIT/.claude/commands/review-postmortem.md")"
+
+  ( cd "$repo" && postmortem_blame "$v" "$c2" f.txt 3 9 ) > "$out" 2>&1; rc=$?
+  assert "pp1: lines a later commit only moved existed at the verdict" \
+    sh -c '[ "$1" -eq 0 ] && [ "$(grep -c . "$2")" -eq 7 ] && ! grep -q "^[0-9a-f]" "$2"' _ "$rc" "$out"
+  ( cd "$repo" && postmortem_blame "$v" "$c2" f.txt 9 10 ) > "$out" 2>&1; rc=$?
+  assert "pp1: a line a later commit rewrote is blamed on that commit" \
+    sh -c '[ "$1" -eq 0 ] && grep -q "^$2 " "$3"' _ "$rc" "$c1" "$out"
+  ( cd "$repo" && postmortem_blame "$v" "$c2" f.txt 13 13 ) > "$out" 2>&1; rc=$?
+  assert "pp1: … and so is one it appended" sh -c '[ "$1" -eq 0 ] && grep -q "^$2 " "$3"' _ "$rc" "$c2" "$out"
+
+  git -C "$repo" config blame.blankBoundary true
+  printf '%s\n' "$c1" > "$repo/.ignore-revs"
+  git -C "$repo" config blame.ignoreRevsFile .ignore-revs
+  ( cd "$repo" && postmortem_blame "$v" "$c2" f.txt 10 10 ) > "$out" 2>&1; rc=$?
+  assert "pp1: a configured ignore-revs file cannot hide an edit" \
+    sh -c '[ "$1" -eq 0 ] && grep -q "^$2 " "$3"' _ "$rc" "$c1" "$out"
+  ( cd "$repo" && postmortem_blame "$v" "$c2" f.txt 3 4 ) > "$out" 2>&1; rc=$?
+  assert "pp1: with blankBoundary, a line at the verdict is blank, not a SHA" \
+    sh -c '[ "$1" -eq 0 ] && [ "$(grep -c "^ " "$2")" -eq 2 ]' _ "$rc" "$out"
+
+  ( cd "$repo" && postmortem_blame "$v" "$c2" f.txt 40 41 ) > "$out" 2>&1; rc=$?
+  assert "pp1: lines past the end fail, not read as unchanged" test "$rc" -ne 0
+  ( cd "$repo" && postmortem_blame "$v" "$c2" gone.txt 1 1 ) > "$out" 2>&1; rc=$?
+  assert "pp1: … and so does a path the commit lacks" test "$rc" -ne 0
+  ( cd "$repo" && postmortem_blame "$v" 0123456789abcdef0123456789abcdef01234567 f.txt 1 1 ) > "$out" 2>&1; rc=$?
+  assert "pp1: … and a finding commit this clone lacks" test "$rc" -ne 0
+}
+
+test_postmortem_docs_score_per_finding_and_cite_lens_evidence() {
+  local pm="$KIT/.claude/commands/review-postmortem.md"
+  assert_not "pp2: no whole-file compare decides a finding" grep -qF 'git diff --quiet <verdict-sha>' "$pm"
+  assert "pp2: presence is decided per finding, never per file" grep -qF 'Decide that per finding, never per file' "$pm"
+  assert "pp2: … reading the verdict's code where the lines were rewritten" grep -qF 'flaw_at_compared: <file>:<line>' "$pm"
+  assert "pp2: … and naming the commit that brought a defect in" grep -qF 'added_after: <short sha>' "$pm"
+  assert "pp2: a failed or denied compare is never a guessed class" grep -qF 'A class comes only from a compare that ran' "$pm"
+  assert "pp2: the status line counts failed compares" grep -qF 'unscored U (compare_failed F)`' "$pm"
+  assert "pp2: a denied command is unknown, not empty" grep -qF 'Its result is unknown, not' "$pm"
+  assert "pp2: replay mode allows only one plain command per call" grep -qF '**One plain command per Bash call.**' "$pm"
+  assert "pp2: … and a denied compare says so" grep -qF '`compare_failed: denied: <command>`' "$pm"
+  assert "pp2: causes come from the lens logs" grep -qF '`log-<lens>.txt` holds what it ran and read' "$pm"
+  assert "pp2: … only when they belong to the verdict's run" grep -qF "jq -r '.head, .mode' .review/findings.json" "$pm"
+  assert "pp2: … and are cited in the record" grep -qF '"cause_evidence": null' "$pm"
+  assert "pp2: without them the cause is unverified" grep -qF 'is `unverified`, and `cause_evidence` says which file' "$pm"
+  assert "pp2: … counted apart from the four causes" grep -qF '/ structural d / unverified e)' "$pm"
+  assert "pp2: replay mode names its lens evidence" grep -qF '`<record>/raw/log-<lens>.txt`' "$pm"
+}
+
 # Claude writes the verdict header, so the marker lives in the procedure it follows (#53).
 test_uncommitted_marker_docs() {
   local pm="$KIT/.claude/commands/review-postmortem.md"
@@ -2973,7 +3046,7 @@ test_postmortem_docs_record_and_route() {
   local pm="$KIT/.claude/commands/review-postmortem.md" tune="$KIT/.claude/commands/review-tune.md"
   assert "p2: compares against the first head CodeRabbit reviewed" grep -qF '**first head CodeRabbit reviewed**' "$pm"
   assert "p2: … handles a verdict for an ancestor of it" grep -qF '**No `same`, but an `ancestor`**' "$pm"
-  assert "p2: … and leaves code changed since the verdict unscored" grep -qF 'git diff --quiet <verdict-sha> <finding-commit> -- <file>' "$pm"
+  assert "p2: … and leaves code brought in after the verdict unscored" grep -qF '`unscored_reason` `changed`' "$pm"
   assert "p2: no local verdict is its own status" grep -qF 'review-postmortem: no-local-verdict' "$pm"
   assert "p2: … recorded with null counts, never zeros" grep -qF '`missed_by_cause` to `null`, never zeros' "$pm"
   assert "p2: a failed read is not an empty one" grep -qF 'read is never reported as an empty result' "$pm"
@@ -3885,6 +3958,8 @@ run_tests \
   test_prepush_archives_the_verdict \
   test_review_tune_docs_name_legacy_archive \
   test_postmortem_finds_the_verdict_for_the_reviewed_commit \
+  test_postmortem_scores_code_present_at_the_verdict \
+  test_postmortem_docs_score_per_finding_and_cite_lens_evidence \
   test_uncommitted_marker_docs \
   test_expanded_files_hold_no_positional_refs \
   test_postmortem_docs_record_and_route \
