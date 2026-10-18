@@ -3590,6 +3590,10 @@ reach $m"
   assert "r11: a partial clone is refused, since the checkout fetches from it" \
     sh -c 'grep -qF "is a partial clone, so it lacks objects a replay reads" "$1" && ! grep -q "^review-replay: replayed" "$1"' _ "$LOG"
   git -C "$RS" config --unset remote.origin.promisor; git -C "$RS" config --unset remote.origin.partialclonefilter
+  git -C "$RS" config remote.origin.promisor false
+  run_replay 1
+  assert "r11: … but a remote marked promisor=false is no partial clone" grep -qE '^review-replay: replayed — PR #1 ' "$LOG"
+  git -C "$RS" config --unset remote.origin.promisor
 
   REPLAY_OBJECT_FORMAT=sha256 replay_fixture r15
   run_replay 1
