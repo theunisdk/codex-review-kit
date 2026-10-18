@@ -50,6 +50,7 @@ for r in "${RUNS[@]}"; do
   schema="$(jq -r .schema "$f")"
   [ "$schema" = review-replay-run/v2 ] \
     || die "$f is $schema, not review-replay-run/v2: an older review-replay.sh wrote it, without its incomplete PRs and denied commands — re-run it"
+  jq -e '(.spoke | type) == "string" and (.run | type) == "string"' "$f" > /dev/null || die "$f names no spoke or run, so it cannot be told apart from another run"
   jq -c --arg path "$f" '{path: $path, run, spoke, repo, kit, prs, cost, denials, records: [.repo as $r | .records[] | . + {repo: $r}]}' \
     "$f" >> "$TMP/runs.all" \
     || die "cannot read $f"

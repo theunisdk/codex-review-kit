@@ -3709,6 +3709,10 @@ test_replay_sum_across_spokes() {
   bash "$hub/scripts/review-replay-sum.sh" "$a" "$WORK/r13-runs/v1" > "$out" 2>&1; rc=$?
   assert "r13: an older run's aggregate is refused, since it has no incomplete or denial counts" \
     sh -c '[ "$2" -eq 1 ] && grep -qF "is review-replay-run/v1, not review-replay-run/v2" "$1"' _ "$out" "$rc"
+  mkdir -p "$WORK/r13-runs/nospoke"; jq 'del(.spoke)' "$b/aggregate.json" > "$WORK/r13-runs/nospoke/aggregate.json"
+  bash "$hub/scripts/review-replay-sum.sh" "$a" "$WORK/r13-runs/nospoke" > "$out" 2>&1; rc=$?
+  assert "r13: a run that names no spoke is refused, not merged with another" \
+    sh -c '[ "$2" -eq 1 ] && grep -qF "names no spoke or run" "$1"' _ "$out" "$rc"
   jq '.kit.sha = "0000000000000000000000000000000000000000"' "$b/aggregate.json" > "$WORK/r13-runs/kit/aggregate.json"
   bash "$hub/scripts/review-replay-sum.sh" "$a" "$WORK/r13-runs/kit" > "$out" 2>&1; rc=$?
   assert "r13: runs of different kits are refused" sh -c '[ "$2" -eq 1 ] && grep -qF "runs of different kits" "$1"' _ "$out" "$rc"
