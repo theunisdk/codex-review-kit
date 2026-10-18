@@ -3056,7 +3056,8 @@ review-postmortem: record — replay: comment not posted; local copy written by 
 {"schema": "review-postmortem/v1", "pr": @PR@, "status": "scored", "compared_commit": "@SHA@",
  "counts": {"caught": 1, "missed": 1, "rejected_wrongly": 0, "noise": 0, "unscored": 0},
  "missed_by_cause": {"wrong_lens": 1, "tracing": 0, "threshold": 0, "structural": 0},
- "findings": [{"file": "src.txt", "summary": "off by one", "class": "missed", "cause": "wrong_lens"}],
+ "findings": [{"file": "src.txt", "summary": "replayed finding", "class": "caught", "cause": null},
+              {"file": "src.txt", "summary": "off by one", "class": "missed", "cause": "wrong_lens"}],
  "proposals": [{"route": "hub", "file": ".review/prompts/correctness.md", "lines": "hunt for off-by-one", "cause": "wrong_lens"}],
  "lessons": []}
 ```
@@ -3162,6 +3163,12 @@ test_replay_failure_is_reported_and_cleaned_up() {
   assert "r2: … and its worktree is removed" no_replay_worktrees "$RS"
 
   rm "$RCX/correctness.rc"
+  cp "$RCL/postmortem.txt" "$RCL/postmortem.good"
+  sed 's/"counts": {"caught": 1, /"counts": {"caught": 2, /' "$RCL/postmortem.good" > "$RCL/postmortem.txt"
+  run_replay 3
+  assert "r2: a record whose counts do not tally its findings is a failure" \
+    grep -qE "^review-replay: failed — PR #3: postmortem: the record's counts or missed_by_cause do not tally its findings" "$LOG"
+  cp "$RCL/postmortem.good" "$RCL/postmortem.txt"
   sed 's/"counts": {"caught": 1, /"counts": {/' "$RCL/postmortem.txt" > "$RCL/postmortem.bad" && mv "$RCL/postmortem.bad" "$RCL/postmortem.txt"
   run_replay 3
   assert "r2: a scored record without its counts is a failure" \

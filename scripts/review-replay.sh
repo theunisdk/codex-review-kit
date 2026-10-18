@@ -421,6 +421,13 @@ Its \"Replay mode\" section says what changes: the GitHub data is already in .re
       and ([.counts.caught, .counts.missed, .counts.rejected_wrongly, .counts.noise, .counts.unscored] | all(type == "number"))' \
     "$json" > /dev/null 2>&1 \
     || { fail_at postmortem "the record's JSON is missing, unparseable, or not a scored record of PR #$n at $short"; return; }
+  jq -e 'def n($k): [.findings[] | select(.class == $k)] | length;
+      def m($c): [.findings[] | select(.class == "missed" and .cause == $c)] | length;
+      (.findings | type == "array" and all(.[]; .class as $k | ["caught", "missed", "rejected-wrongly", "noise", "unscored"] | index($k)))
+      and .counts == {caught: n("caught"), missed: n("missed"), rejected_wrongly: n("rejected-wrongly"), noise: n("noise"), unscored: n("unscored")}
+      and .missed_by_cause == {wrong_lens: m("wrong_lens"), tracing: m("tracing"), threshold: m("threshold"), structural: m("structural")}' \
+    "$json" > /dev/null 2>&1 \
+    || { fail_at postmortem "the record's counts or missed_by_cause do not tally its findings: $(jq -c '{counts, missed_by_cause}' "$json" 2>/dev/null)"; return; }
 
   # --- record: the replay's own facts merged into the postmortem's JSON
   jq --arg ref "$KIT_REF" --arg sha "$KIT_SHA" --arg desc "$KIT_DESC" --arg base "$base" \
