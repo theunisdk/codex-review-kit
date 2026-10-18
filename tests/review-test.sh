@@ -2661,6 +2661,45 @@ test_prepush_rejects_an_uncommitted_verdict() {
   assert "um1: the same header without the marker still clears it" test "$rc" -eq 0
 }
 
+# Adjudication reads the mode to mark the verdict, and may still write one from an
+# incomplete run, so every findings.json writer carries it. HEAD is the one the
+# change set was built on, not wherever HEAD is when the lenses finish.
+test_findings_name_mode_and_head_on_every_path() {
+  local repo="$WORK/um5" stub="$WORK/um5-stub" short
+  make_repo "$repo"; mkdir -p "$stub"
+  short=$(git -C "$repo" rev-parse --short HEAD)
+  printf 'new\n' > "$repo/new.txt"
+  printf '42\n' > "$stub/correctness.rc"
+  run_review "$repo" "$stub" --uncommitted --lenses correctness
+  assert "um5: every lens failed" grep -qF 'every lens failed' "$LOG"
+  assert "um5: … and findings.json still names the mode and HEAD" \
+    jq -e --arg h "$short" '.complete == false and .mode == "uncommitted" and .head == $h' "$repo/.review/findings.json"
+
+  rm "$repo/new.txt"
+  run_review "$repo" "$stub" --uncommitted --lenses correctness
+  assert "um5: a zero-change run names them too" \
+    sh -c 'grep -qF "no changes to review" "$1" && jq -e --arg h "$3" ".mode == \"uncommitted\" and .head == \$h" "$2"' \
+    _ "$LOG" "$repo/.review/findings.json" "$short"
+
+  ( cd "$repo" && PATH="$WORK/bin:$PATH" CODEX_STUB_DIR="$stub" REVIEW_SKIP_AUTH_CHECK=1 \
+      bash scripts/review.sh --no-analyzers --lenses correctness no-such-ref ) > "$WORK/um5.log" 2>&1
+  assert "um5: so does a run that dies before its report" \
+    sh -c 'grep -qF "base ref not found" "$1" && jq -e --arg h "$3" ".complete == false and .mode == \"branch\" and .head == \$h" "$2"' \
+    _ "$WORK/um5.log" "$repo/.review/findings.json" "$short"
+
+  mkdir -p "$WORK/um5-bin"
+  printf '#!/usr/bin/env bash\n[ "${1:-}" = exec ] && git -C "%s" commit -q --allow-empty -m moved\nexec "%s" "$@"\n' \
+    "$repo" "$WORK/bin/codex" > "$WORK/um5-bin/codex"
+  chmod +x "$WORK/um5-bin/codex"
+  rm "$stub/correctness.rc"; printf '{"findings":[]}' > "$stub/correctness.json"
+  printf 'new\n' > "$repo/new.txt"
+  ( cd "$repo" && PATH="$WORK/um5-bin:$WORK/bin:$PATH" CODEX_STUB_DIR="$stub" REVIEW_SKIP_AUTH_CHECK=1 \
+      bash scripts/review.sh --no-analyzers --uncommitted --lenses correctness ) > "$WORK/um5.log" 2>&1
+  assert "um5: HEAD moved during the run" test "$(git -C "$repo" rev-parse --short HEAD)" != "$short"
+  assert "um5: … and head is still the commit the change set was built on" \
+    jq -e --arg h "$short" '.complete == true and .head == $h' "$repo/.review/findings.json"
+}
+
 # Verdicts are gitignored and overwritten each run, so /review-tune had no history
 # to mine. Regression for #28: each run archives the verdicts it is about to
 # supersede into the clone's git common dir, which every worktree shares and
@@ -3822,6 +3861,7 @@ run_tests \
   test_prepush_rejects_a_spec_verdict \
   test_prepush_skips_a_sha256_deletion \
   test_prepush_rejects_an_uncommitted_verdict \
+  test_findings_name_mode_and_head_on_every_path \
   test_review_archives_the_previous_verdicts \
   test_verdict_archive_is_shared_across_worktrees \
   test_verdict_archive_failure_warns_without_failing \

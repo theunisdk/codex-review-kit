@@ -51,8 +51,9 @@ finish_report() {
   local rc=$?
   [ "$STARTED" = 1 ] || return
   if [ "$REPORT_WRITTEN" = 0 ]; then
-    printf '{"findings":%s,"lenses_failed":[],"complete":false%s,"secrets_scan":"%s"}\n' "$SECRET_FINDINGS" \
-      "${CHANGED_COUNT:+,\"changed_files\":$CHANGED_COUNT}" "$SECRETS_SCAN" > .review/findings.json
+    printf '{"findings":%s,"lenses_failed":[],"complete":false%s,"secrets_scan":"%s","mode":"%s","head":%s}\n' \
+      "$SECRET_FINDINGS" "${CHANGED_COUNT:+,\"changed_files\":$CHANGED_COUNT}" "$SECRETS_SCAN" "$MODE" "$HEAD_JSON" \
+      > .review/findings.json
     printf '# Codex pre-PR review\n\n> **INCOMPLETE — the run stopped (rc=%s) before producing a report.** Nothing was reviewed.\n' \
       "$rc" > .review/findings.md
     [ "$SECRET_FINDINGS" = "[]" ] || printf '\n> **gitleaks found a secret** — see `.review/findings.json` and `.review/raw/analyzers.txt`.\n' \
@@ -105,6 +106,8 @@ archive_verdicts
 OUT=".review/raw"
 rm -rf "$OUT"; mkdir -p "$OUT"
 rm -f .review/findings.json .review/findings.md
+HEAD_SHORT="$(git rev-parse --short -q --verify HEAD)" || HEAD_SHORT=""   # empty only on an unborn branch
+HEAD_JSON=null; [ -z "$HEAD_SHORT" ] || HEAD_JSON="\"$HEAD_SHORT\""
 STARTED=1
 
 # --- preflight -------------------------------------------------------------
@@ -275,8 +278,10 @@ if [ "${CHANGED_COUNT:-0}" -eq 0 ]; then
     "The net diff is empty, but commits in ${MERGE_BASE:-}..HEAD still carry it, and pushing them publishes it.")" \
     || die "could not build the gitleaks finding"
   SECRET_FINDINGS="$sf"; SECRETS_SCAN="${HISTORY:-not_scanned}"
-  jq -n --arg h "$HISTORY" --argjson n "$COMMITS" --argjson secrets "$SECRET_FINDINGS" --arg scan "$SECRETS_SCAN" '
-    { findings: $secrets, lenses_failed: [], complete: false, changed_files: 0, secrets_scan: $scan }
+  jq -n --arg h "$HISTORY" --argjson n "$COMMITS" --argjson secrets "$SECRET_FINDINGS" --arg scan "$SECRETS_SCAN" \
+    --arg mode "$MODE" --argjson head "$HEAD_JSON" '
+    { findings: $secrets, lenses_failed: [], complete: false, changed_files: 0, secrets_scan: $scan,
+      mode: $mode, head: $head }
     + (if $h == "" then {} else { history_scan: { commits: $n, result: $h } } end)
   ' > .review/findings.json || die "could not write findings.json"
   {
@@ -492,9 +497,9 @@ if [ "$ok_lenses" -eq 0 ]; then
   # stale pass against the current branch without anything saying so.
   failed_lenses="$failed_lenses${missing_lenses:-}"
   jq -n --arg failed "$(printf '%s' "${failed_lenses# }")" --argjson secrets "$SECRET_FINDINGS" \
-    --argjson n "$CHANGED_COUNT" --arg scan "$SECRETS_SCAN" \
+    --argjson n "$CHANGED_COUNT" --arg scan "$SECRETS_SCAN" --arg mode "$MODE" --argjson head "$HEAD_JSON" \
     '{findings: $secrets, lenses_failed: ($failed | if . == "" then [] else split(" ") end), complete: false,
-      changed_files: $n, secrets_scan: $scan}' \
+      changed_files: $n, secrets_scan: $scan, mode: $mode, head: $head}' \
     > .review/findings.json
   {
     printf '# Codex pre-PR review\n\n> **INCOMPLETE — every lens failed.** No area of this diff was reviewed.\n> Check `%s/log-*.txt`.\n\n' "$OUT"
@@ -532,16 +537,15 @@ failed_lenses="$failed_lenses${missing_lenses:-}"
 FAILED_LIST="$(printf '%s' "${failed_lenses# }")"
 UNREADABLE_COUNT=0
 [ -s "$OUT/unreadable.txt" ] && UNREADABLE_COUNT="$(grep -c . < "$OUT/unreadable.txt")"
-HEAD_SHORT="$(git rev-parse --short -q --verify HEAD)" || HEAD_SHORT=""   # empty only on an unborn branch
 jq --arg failed "$FAILED_LIST" --arg unreadable "$(cat "$OUT/unreadable.txt" 2>/dev/null)" \
   --argjson secrets "$SECRET_FINDINGS" --argjson scan_failed "$SECRETS_FAILED" --argjson n "$CHANGED_COUNT" \
-  --arg scan "$SECRETS_SCAN" --arg mode "$MODE" --arg head "$HEAD_SHORT" '
+  --arg scan "$SECRETS_SCAN" --arg mode "$MODE" --argjson head "$HEAD_JSON" '
   .findings = ($secrets + .findings | to_entries | map(.value + {id: ("F" + ((.key + 1)|tostring))}))
   | . + { lenses_failed: ($failed | if . == "" then [] else split(" ") end),
         unreadable_paths: ($unreadable | split("\n") | map(select(. != ""))) }
   | . + { complete: ((.lenses_failed | length) == 0 and (.unreadable_paths | length) == 0 and $scan_failed == 0),
           changed_files: $n, secrets_scan: $scan,
-          mode: $mode, head: (if $head == "" then null else $head end) }
+          mode: $mode, head: $head }
 ' .review/findings.json > .review/findings.json.tmp \
   && mv .review/findings.json.tmp .review/findings.json || die "could not finalise findings.json"
 
