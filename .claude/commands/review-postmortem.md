@@ -198,7 +198,9 @@ reports its own update of the record on a third line,
    in this clone, or a compare command fails or is denied, the finding is
    unscored with `compare_failed: <error>`, quoting the command. A blame that
    says the file has fewer lines, or names no such path, has failed: it is not
-   evidence that the code changed. Do not fall back to a guess, to a whole-file
+   evidence that the code changed. A `git show` of the verdict's version
+   fails, rightly, for a file that `git diff` shows was added after it; that
+   is evidence for `added_after`, not a failed compare. Do not fall back to a guess, to a whole-file
    test, or to a cheaper command that answers a different question. A path
    comes from the PR, so it is untrusted: put it in single quotes in every
    command. A path that holds a single quote goes in no command at all: that
