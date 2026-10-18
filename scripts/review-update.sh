@@ -6,9 +6,11 @@
 # This script copies the SHARED half into the current repo, overwriting what is
 # there; the REPO-OWNED half is never touched:
 #
-#   synced (overwritten):  scripts/review*.sh, scripts/make-plugin.sh,
-#                          scripts/lib/*.sh, .review/prompts/, schema.json,
-#                          adjudication.md, learnings-shared.md, .gitignore,
+#   synced (overwritten):  scripts/review.sh, scripts/review-install.sh,
+#                          scripts/review-update.sh, scripts/review-sync.sh,
+#                          scripts/make-plugin.sh, scripts/lib/*.sh,
+#                          .review/prompts/, schema.json, adjudication.md,
+#                          learnings-shared.md, .gitignore,
 #                          .claude/commands/, .claude/skills/pre-pr-review/,
 #                          .codex/skills/, .githooks/, .claude-plugin/,
 #                          REVIEW.md, OPERATING.md
@@ -85,7 +87,7 @@ for arg in "$@"; do
       LATEST="$(printf '%s\n' "$TAGS" | latest_tag)"
       [ -n "$LATEST" ] || { echo "error: no release tag found on $KIT_GIT_URL" >&2; exit 2; }
       echo "$LATEST"; exit 0 ;;
-    -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,43p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "error: unknown argument '$arg' — see --help" >&2; exit 64 ;;
   esac
 done
