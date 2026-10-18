@@ -2920,7 +2920,7 @@ test_postmortem_plateau_is_a_hypothesis() {
 # a bare remote that serves refs/pull/<n>/head, and stubs for gh and claude that
 # log every call. The claude stub answers from per-call fixtures, with the
 # worktree's HEAD substituted for @SHA@ / @SHORT@, and reports no cost when
-# $CLAUDE_STUB_DIR/no-cost exists.
+# $CLAUDE_STUB_DIR/no-cost exists. $CLAUDE_STUB_DIR/on-<kind>-<PR> runs first.
 mkdir -p "$WORK/bin-replay"
 cat > "$WORK/bin-replay/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -2947,6 +2947,7 @@ esac
 [ ! -e .review/replay ] || touch "$CLAUDE_STUB_DIR/$kind.saw-github-data"
 [ -z "${CLAUDE_STUB_SLEEP:-}" ] || { echo "$$" > "$CLAUDE_STUB_DIR/started"; sleep "$CLAUDE_STUB_SLEEP"; }
 pr="$(printf '%s\n' "$2" | sed -n '1s/.* PR #\([0-9]*\).*/\1/p')"
+[ ! -x "$CLAUDE_STUB_DIR/on-$kind-$pr" ] || "$CLAUDE_STUB_DIR/on-$kind-$pr"
 sed -e "s/@SHA@/$(git rev-parse HEAD)/g" -e "s/@SHORT@/$(git rev-parse --short HEAD)/g" -e "s/@PR@/$pr/g" \
   "$CLAUDE_STUB_DIR/$kind.txt" > "$CLAUDE_STUB_DIR/$kind.reply"
 jq -n --rawfile r "$CLAUDE_STUB_DIR/$kind.reply" --argjson cost "$([ -e "$CLAUDE_STUB_DIR/no-cost" ] && echo null || echo 0.25)" \
@@ -3241,10 +3242,13 @@ test_replay_interrupt_removes_the_worktree() {
 test_replay_recent_and_limit() {
   local rc
   replay_fixture r4
-  run_replay --recent 2 --limit 1
+  run_replay --recent 3 --limit 1
   assert "r4: --recent passes over a PR CodeRabbit never reviewed" grep -qF '(1 merged PR(s) CodeRabbit never reviewed passed over)' "$LOG"
   assert "r4: … replays the most recent reviewed one" grep -qE '^review-replay: replayed — PR #1 ' "$LOG"
   assert "r4: … and skips the rest past --limit" grep -qxF 'review-replay: skipped — PR #3: --limit 1 reached' "$LOG"
+  assert "r4: a short scan is noted in the run's record" \
+    sh -c 'grep -qxF "review-replay: note — found 2 CodeRabbit-reviewed PR(s) among the 100 most recent merged PRs, not 3" "$1"/.git/review-replay/runs/*/summary.txt \
+      && jq -e ".recent == {asked: 3, found: 2, scanned: 100}" "$1"/.git/review-replay/runs/*/aggregate.json' _ "$RS"
   gh_json "$RGH" pr-list '{"message":"Bad credentials"}'
   run_replay --recent 2
   assert "r4: a PR list that is not a list is an error, not an empty run" \
@@ -3291,6 +3295,12 @@ test_replay_silent_failures_are_failures() {
   assert "r6: … in the record too" jq -e '.replay.cost == {claude_usd: null, codex_tokens: null}' "$rec/record.json"
   assert "r6: … and in the run's aggregate" \
     sh -c 'f="$(grep -lF "unknown for 2 call(s)" "$1"/review-replay/runs/*/summary.txt)" && jq -e ".cost == {claude_usd: 0, claude_calls_of_unknown_cost: 2, codex_tokens: 0, prs_of_unknown_codex_tokens: 1}" "${f%/summary.txt}/aggregate.json"' _ "$common"
+  # another run replaces PR 1's record while this one replays PR 3
+  printf '#!/bin/sh\njq ".counts.caught = 99" "%s/record.json" > "%s/r.tmp" && mv "%s/r.tmp" "%s/record.json"\n' "$rec" "$rec" "$rec" "$rec" > "$RCL/on-postmortem-3"
+  chmod +x "$RCL/on-postmortem-3"
+  run_replay 1 3; rc=$?
+  assert "r6: the run's scorecard counts the records it scored, not what replaced them since" \
+    sh -c '[ "$2" -eq 0 ] && jq -e ".counts.caught == 99" "$3/record.json" && grep -qF "aggregate — replayed 2 / skipped 0 / failed 0 — caught 2 / " "$1"' _ "$LOG" "$rc" "$rec"
 }
 
 # A hub clone behind its remote must not replay its old kit as today's.
@@ -3313,7 +3323,11 @@ test_replay_refuses_a_stale_kit() {
   git -C "$RHUB" update-ref refs/remotes/gone/main main
   run_replay --kit-ref gone/main 1; rc=$?
   assert "r7: a tracking ref whose remote is gone is refused" \
-    sh -c '[ "$2" -ne 0 ] && grep -qF "which the hub no longer has as a remote" "$1"' _ "$LOG" "$rc"
+    sh -c '[ "$2" -ne 0 ] && grep -qF "is a tracking ref of no remote the hub still has" "$1"' _ "$LOG" "$rc"
+  git -C "$RHUB" remote add team/hub "$up" && git -C "$RHUB" update-ref refs/remotes/team/hub/main main
+  run_replay --kit-ref team/hub/main 1; rc=$?
+  assert "r7: … but one of a remote whose name has a slash is checked against it" \
+    sh -c '[ "$2" -ne 0 ] && grep -qF "is behind refs/heads/main on team/hub" "$1"' _ "$LOG" "$rc"
   git -C "$RHUB" remote set-url origin "$WORK/r7-nowhere.git"
   run_replay 1; rc=$?
   assert "r7: a remote that cannot be read is refused, not taken as current" \

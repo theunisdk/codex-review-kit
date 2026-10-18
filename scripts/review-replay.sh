@@ -168,7 +168,7 @@ exit_why() {
 # A clone behind its remote would replay an old kit and score it as today's. A branch or
 # remote-tracking ref is checked against the remote itself; a tag or a SHA names one commit.
 kit_is_current() {
-  local full remote rref up
+  local full remote rref up r
   full="$(git -C "$HUB" rev-parse --symbolic-full-name "$KIT_REF" 2>/dev/null)"
   case "$full" in
     refs/heads/*)
@@ -177,10 +177,15 @@ kit_is_current() {
       [ -n "$remote" ] && [ -n "$rref" ] \
         || { KIT_CHECK="unchecked: tracks no remote branch"; warn "--kit-ref $KIT_REF $KIT_CHECK, so the replay cannot check that it is current"; return 0; } ;;
     refs/remotes/*)
-      remote="${full#refs/remotes/}"; remote="${remote%%/*}"; rref="refs/heads/${full#refs/remotes/"$remote"/}"
-      [ "$rref" != refs/heads/HEAD ] || rref=HEAD
-      git -C "$HUB" config "remote.$remote.url" > /dev/null \
-        || die "--kit-ref $KIT_REF is a tracking ref of $remote, which the hub no longer has as a remote, so the replay cannot check that it is current — pass a tag or SHA" ;;
+      # a remote name can hold a slash: the longest configured one that prefixes the ref owns it
+      remote=""
+      for r in $(git -C "$HUB" remote); do
+        case "$full" in "refs/remotes/$r/"*) [ "${#r}" -le "${#remote}" ] || remote="$r" ;; esac
+      done
+      [ -n "$remote" ] \
+        || die "--kit-ref $KIT_REF is a tracking ref of no remote the hub still has, so the replay cannot check that it is current — pass a tag or SHA"
+      rref="refs/heads/${full#refs/remotes/"$remote"/}"
+      [ "$rref" != refs/heads/HEAD ] || rref=HEAD ;;
     *) KIT_CHECK="names one commit"; return 0 ;;
   esac
   run_with_timeout "$NET_TIMEOUT" git -C "$HUB" ls-remote "$remote" "$rref" < /dev/null > "$RUN_TMP/kit-remote" 2> "$RUN_TMP/kit-remote.err" \
