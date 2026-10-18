@@ -3242,7 +3242,9 @@ test_replay_interrupt_removes_the_worktree() {
 test_replay_recent_and_limit() {
   local rc
   replay_fixture r4
-  run_replay --recent 3 --limit 1
+  run_replay --limit 00 1; rc=$?
+  assert "r4: --limit 00 is not a positive number" test "$rc" -eq 64
+  run_replay --recent 03 --limit 01
   assert "r4: --recent passes over a PR CodeRabbit never reviewed" grep -qF '(1 merged PR(s) CodeRabbit never reviewed passed over)' "$LOG"
   assert "r4: … replays the most recent reviewed one" grep -qE '^review-replay: replayed — PR #1 ' "$LOG"
   assert "r4: … and skips the rest past --limit" grep -qxF 'review-replay: skipped — PR #3: --limit 1 reached' "$LOG"

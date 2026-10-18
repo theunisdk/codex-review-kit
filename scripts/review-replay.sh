@@ -57,8 +57,11 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$SPOKE" ] || usage
 for v in "$LIMIT" ${RECENT:+"$RECENT"}; do
-  case "$v" in ''|*[!0-9]*|0) echo "error: --limit and --recent take a positive number" >&2; exit 64 ;; esac
+  case "$v" in ''|*[!0-9]*) echo "error: --limit and --recent take a positive number" >&2; exit 64 ;; esac
+  [ "$((10#$v))" -gt 0 ] || { echo "error: --limit and --recent take a positive number" >&2; exit 64; }
 done
+# 07 is not a JSON number, and the aggregate embeds them
+LIMIT=$((10#$LIMIT)); [ -z "$RECENT" ] || RECENT=$((10#$RECENT))
 case "$BUDGET" in ''|*[!0-9.]*) echo "error: --claude-budget takes a dollar amount" >&2; exit 64 ;; esac
 if [ -n "$RECENT" ] && [ -n "$PRS" ]; then echo "error: name PRs or pass --recent, not both" >&2; exit 64; fi
 if [ -z "$RECENT" ] && [ -z "$PRS" ]; then echo "error: name at least one PR, or pass --recent N" >&2; exit 64; fi
