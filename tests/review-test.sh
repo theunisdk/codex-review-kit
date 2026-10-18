@@ -3214,14 +3214,14 @@ gh_pr_fixture() { # gh_pr_fixture <stubdir> <n> <first-reviewed sha> <head sha> 
 # PR 3: PR 1's commits again · PR 4: a GitHub read fails · PR 5: CodeRabbit never reviewed it
 # PR 6: merged with a merge commit, reviewed only by a status · PR 7: still open · PR 8: a symlinked REVIEW.md
 # PR 9: its reviewed commit has a .review/config.sh that never merged
-replay_fixture() { # replay_fixture <id>
+replay_fixture() { # replay_fixture <id> — the spoke in $REPLAY_OBJECT_FORMAT when set
   local id="$1" m a b s p c6 m6 l8 c9
   RS="$WORK/$id-spoke"; RREMOTE="$WORK/$id-remote.git"; RHUB="$WORK/$id-hub"
   RGH="$WORK/$id-gh"; RCL="$WORK/$id-claude"; RCX="$WORK/$id-codex"
   mkdir -p "$RGH" "$RCL" "$RCX"
   replay_hub "$RHUB"
   local src="$WORK/$id-src"
-  git init -q -b main "$src"
+  git init -q -b main ${REPLAY_OBJECT_FORMAT:+--object-format="$REPLAY_OBJECT_FORMAT"} "$src"
   (
     cd "$src" || exit 1
     git config user.email review-test@example.invalid; git config user.name review-test
@@ -3341,7 +3341,7 @@ test_replay_scores_reports_and_writes_nothing_else() {
   rec="$common/review-replay/pr1-$kit"
   assert "r1: a failed PR fails the run" test "$rc" -eq 1
   assert "r1: PR 1 is replayed against the first commit CodeRabbit reviewed" \
-    grep -qF "review-replay: replayed — PR #1 ($short, kit $kit): caught 1 / missed 1 / rejected-wrongly 0 / noise 0 / unscored 0" "$LOG"
+    grep -qF "review-replay: replayed — PR #1 ($short, kit $kit): caught 1 / missed 1 (wrong lens 1 / tracing 0 / threshold 0 / structural 0 / unverified 0) / rejected-wrongly 0 / noise 0 / unscored 0 (compare_failed 0)" "$LOG"
   assert "r1: a pre-hub kit is skipped with its reason" \
     grep -qE '^review-replay: skipped — PR #2: pre-hub review kit at [0-9a-f]{7} \(https://github.com/theunisdk/ai-dev\)' "$LOG"
   assert "r1: a failed GitHub read is a failure, not a skip" \
@@ -3359,7 +3359,7 @@ test_replay_scores_reports_and_writes_nothing_else() {
   assert "r1: a reviewed commit whose config.sh never merged is skipped" \
     grep -qE '^review-replay: skipped — PR #9: .review/config.sh at [0-9a-f]{7} differs from the merged one' "$LOG"
   assert "r1: the aggregate sums the scorecards" \
-    grep -qxF 'review-replay: aggregate — replayed 2 / incomplete 0 / skipped 5 / failed 1 — caught 2 / missed 2 (wrong lens 2 / tracing 0 / threshold 0 / structural 0) / rejected-wrongly 0 / noise 0 / unscored 0 (compare failed 0)' "$LOG"
+    grep -qxF 'review-replay: aggregate — replayed 2 / incomplete 0 / skipped 5 / failed 1 — caught 2 / missed 2 (wrong lens 2 / tracing 0 / threshold 0 / structural 0 / unverified 0) / rejected-wrongly 0 / noise 0 / unscored 0 (compare_failed 0)' "$LOG"
   assert "r1: … and groups lessons by cause" \
     sh -c 'grep -qxF "lessons — wrong_lens (2 missed):" "$1" && grep -qF "PR #1 propose (hub) .review/prompts/correctness.md" "$1"' _ "$LOG"
   assert "r1: … and the cost line covers every PR" grep -qxF 'review-replay: cost — claude $1.00, codex 2468 tokens, failed and skipped PRs included' "$LOG"
@@ -3572,19 +3572,29 @@ reach $m"
 
   # the clone has no LFS config or storage, so a reviewed commit that sets a filter is skipped
   git -C "$RS" worktree add -q --detach "$WORK/r11-lfs" "$RA"
-  ( cd "$WORK/r11-lfs" && printf '*.bin filter=lfs diff=lfs merge=lfs -text\n' > .gitattributes \
-      && git add .gitattributes && git -c user.email=t@example.invalid -c user.name=t commit -qm lfs \
+  ( cd "$WORK/r11-lfs" && printf '# keep this out of filter=lfs\n*.txt text\n' > .gitattributes \
+      && git add .gitattributes && git -c user.email=t@example.invalid -c user.name=t commit -qm attrs \
+      && git push -q "$RREMOTE" HEAD:refs/pull/11/head \
+      && mkdir -p sub && printf '*.bin filter=lfs diff=lfs merge=lfs -text\n' > sub/.gitattributes \
+      && git add sub && git -c user.email=t@example.invalid -c user.name=t commit -qm lfs \
       && git push -q "$RREMOTE" HEAD:refs/pull/10/head )
+  gh_pr_fixture "$RGH" 11 "$(git -C "$WORK/r11-lfs" rev-parse HEAD~1)" "$(git -C "$WORK/r11-lfs" rev-parse HEAD~1)" "$m"
   gh_pr_fixture "$RGH" 10 "$(git -C "$WORK/r11-lfs" rev-parse HEAD)" "$(git -C "$WORK/r11-lfs" rev-parse HEAD)" "$m"
   git -C "$RS" worktree remove --force "$WORK/r11-lfs"
-  run_replay 10
+  run_replay 10 11
   assert "r11: a reviewed commit that sets a git filter is skipped, not reviewed as pointers" \
-    grep -qE "^review-replay: skipped — PR #10: .gitattributes at [0-9a-f]{7} sets a git filter" "$LOG"
-  git -C "$RS" config extensions.partialClone origin
+    grep -qE "^review-replay: skipped — PR #10: sub/.gitattributes at [0-9a-f]{7} sets a git filter" "$LOG"
+  assert "r11: … but a filter named only in a comment is no filter" grep -qE "^review-replay: replayed — PR #11 " "$LOG"
+  git -C "$RS" config remote.origin.promisor true; git -C "$RS" config remote.origin.partialclonefilter blob:none
   run_replay 1
   assert "r11: a partial clone is refused, since the checkout fetches from it" \
     sh -c 'grep -qF "is a partial clone, so it lacks objects a replay reads" "$1" && ! grep -q "^review-replay: replayed" "$1"' _ "$LOG"
-  git -C "$RS" config --unset extensions.partialClone
+  git -C "$RS" config --unset remote.origin.promisor; git -C "$RS" config --unset remote.origin.partialclonefilter
+
+  REPLAY_OBJECT_FORMAT=sha256 replay_fixture r15
+  run_replay 1
+  assert "r15: a SHA-256 spoke is replayed in a checkout of its own format" \
+    sh -c 'grep -qE "^review-replay: replayed — PR #1 " "$1" && [ "$(git -C "$2" rev-parse --show-object-format)" = sha256 ]' _ "$LOG" "$RS"
 }
 
 # The claude calls kept only their last message, so nobody could check what the adjudicator
@@ -3597,7 +3607,7 @@ test_replay_keeps_transcripts_and_denials() {
   run_replay 1; rc=$?
   assert "r12: a PR with a denied command is still replayed" test "$rc" -eq 0
   assert "r12: … and its line says what was denied" \
-    grep -qE '^review-replay: replayed — PR #1 .* / unscored 0 · commands denied: postmortem 1 · cost ' "$LOG"
+    grep -qE '^review-replay: replayed — PR #1 .* / unscored 0 \(compare_failed 0\) · commands denied: postmortem 1 · cost ' "$LOG"
   assert "r12: each claude call keeps its whole transcript, tool calls and results included" \
     sh -c 'for k in adjudicate postmortem; do f="$1/transcript-$k.jsonl"
       jq -e "select(.type == \"user\") | .message.content[0].content == \"stub $k history\"" "$f" > /dev/null \
@@ -3625,19 +3635,38 @@ test_replay_keeps_transcripts_and_denials() {
     sh -c 'grep -qF "stub postmortem history" "$1.last-unscored/transcript-postmortem.jsonl"' _ "$rec"
   rm "$RCL/postmortem.no-result"
 
-  sed -e 's/"unscored": 0}/"unscored": 1}/' -e 's/"caught": 1, "missed": 1,/"caught": 1, "missed": 0,/' -e 's/"wrong_lens": 1,/"wrong_lens": 0,/' \
-    -e 's/"class": "missed", "cause": "wrong_lens"}/"class": "unscored", "cause": null, "unscored_reason": "compare_failed: git diff was denied"}/' \
-    "$RCL/postmortem.txt" > "$RCL/postmortem.cf" && mv "$RCL/postmortem.cf" "$RCL/postmortem.txt"
+  # #65: a compare that failed and a miss no lens evidence could diagnose
+  cat > "$RCL/postmortem.txt" <<'EOP'
+review-postmortem: scored — PR #@PR@: caught 1 / missed 1 (wrong lens 0 / tracing 0 / threshold 0 / structural 0 / unverified 1) / rejected-wrongly 0 / noise 0 / unscored 1 (compare_failed 1)
+review-postmortem: record — replay: comment not posted; local copy written by the caller
+
+<!-- review-postmortem:v1 -->
+## Review postmortem — PR #@PR@
+
+```json
+{"schema": "review-postmortem/v1", "pr": @PR@, "status": "scored", "compared_commit": "@SHA@",
+ "counts": {"caught": 1, "missed": 1, "rejected_wrongly": 0, "noise": 0, "unscored": 1},
+ "missed_by_cause": {"wrong_lens": 0, "tracing": 0, "threshold": 0, "structural": 0},
+ "findings": [{"file": "src.txt", "summary": "replayed finding", "class": "caught", "cause": null},
+              {"file": "src.txt", "summary": "off by one", "class": "missed", "cause": "unverified", "cause_evidence": "raw/log-correctness.txt missing"},
+              {"file": "src.txt", "summary": "later head", "class": "unscored", "cause": null, "unscored_reason": "compare_failed: denied: git diff a b"}],
+ "proposals": [], "lessons": []}
+```
+EOP
   run_replay 1; rc=$?
   run="$(last_run)"
   assert "r12: a finding the postmortem could not compare makes the PR incomplete, not replayed" \
-    sh -c '[ "$2" -eq 1 ] && grep -qE "^review-replay: incomplete — PR #1 \([0-9a-f]{7}, kit [0-9a-f]+\): caught 1 / missed 0 / rejected-wrongly 0 / noise 0 / unscored 1 · 1 finding\(s\) unscored because a compare failed \(compare_failed: git diff was denied\) · cost " "$1" \
+    sh -c '[ "$2" -eq 1 ] && grep -qE "^review-replay: incomplete — PR #1 \([0-9a-f]{7}, kit [0-9a-f]+\): caught 1 / missed 1 \(wrong lens 0 / tracing 0 / threshold 0 / structural 0 / unverified 1\) / rejected-wrongly 0 / noise 0 / unscored 1 \(compare_failed 1\) · 1 finding\(s\) unscored because a compare failed \(compare_failed: denied: git diff a b\) · cost " "$1" \
       && ! grep -q "review-replay: replayed — PR #1" "$1"' _ "$LOG" "$rc"
   assert "r12: … counted as incomplete in the run's scorecard" \
-    sh -c 'grep -qxF "review-replay: aggregate — replayed 0 / incomplete 1 / skipped 0 / failed 0 — caught 1 / missed 0 (wrong lens 0 / tracing 0 / threshold 0 / structural 0) / rejected-wrongly 0 / noise 0 / unscored 1 (compare failed 1)" "$1/summary.txt" \
-      && jq -e ".prs.incomplete == 1 and .prs.replayed == 0 and .counts.compare_failed == 1 and (.records | length) == 1" "$1/aggregate.json"' _ "$run"
+    sh -c 'grep -qxF "review-replay: aggregate — replayed 0 / incomplete 1 / skipped 0 / failed 0 — caught 1 / missed 1 (wrong lens 0 / tracing 0 / threshold 0 / structural 0 / unverified 1) / rejected-wrongly 0 / noise 0 / unscored 1 (compare_failed 1)" "$1/summary.txt" \
+      && jq -e ".prs.incomplete == 1 and .prs.replayed == 0 and .counts.compare_failed == 1 and .missed_by_cause.unverified == 1 and .missed_by_cause.unattributed == 0 and (.records | length) == 1" "$1/aggregate.json"' _ "$run"
   assert "r12: … with its record kept" \
     sh -c 'grep -q "^review-replay: incomplete — PR #1" "$1/outcome.txt" && grep -qxF "<!-- review-replay:v1 -->" "$1/postmortem.md"' _ "$rec"
+  sed -e 's/"cause": "unverified"/"cause": "guessed"/' "$RCL/postmortem.txt" > "$RCL/postmortem.nc" && mv "$RCL/postmortem.nc" "$RCL/postmortem.txt"
+  run_replay 1
+  assert "r12: a miss of no known cause shows as a gap in the causes" \
+    grep -qE "^review-replay: incomplete — PR #1 .*: caught 1 / missed 1 \(wrong lens 0 / tracing 0 / threshold 0 / structural 0 / unverified 0 / no cause 1\) / " "$LOG"
 }
 
 # One invocation takes one spoke, so the pilot's totals were summed by hand.
@@ -3646,10 +3675,14 @@ test_replay_sum_across_spokes() {
   replay_fixture r13; run_replay 1; a="$(last_run)"
   local hub="$RHUB"
   replay_fixture r14; RHUB="$hub"; run_replay 6; b="$(last_run)"
+  # two spokes can share a run's name: one kit, the same second
+  mkdir -p "$WORK/r13-runs/twin"; jq --arg r "$(jq -r .run "$a/aggregate.json")" '.run = $r' "$b/aggregate.json" > "$WORK/r13-runs/twin/aggregate.json"
+  bash "$hub/scripts/review-replay-sum.sh" "$a" "$WORK/r13-runs/twin" > "$WORK/r13.twin" 2>&1
+  assert "r13: two spokes' runs of the same name are two runs" grep -qF "review-replay-sum: aggregate — replayed 2 " "$WORK/r13.twin"
   out="$WORK/r13.sum"
   bash "$hub/scripts/review-replay-sum.sh" "$a" "$b/aggregate.json" > "$out" 2>&1; rc=$?
   assert "r13: two runs sum to one scorecard" \
-    sh -c '[ "$2" -eq 0 ] && grep -qxF "review-replay-sum: aggregate — replayed 2 / incomplete 0 / skipped 0 / failed 0 — caught 2 / missed 2 (wrong lens 2 / tracing 0 / threshold 0 / structural 0) / rejected-wrongly 0 / noise 0 / unscored 0 (compare failed 0)" "$1"' _ "$out" "$rc"
+    sh -c '[ "$2" -eq 0 ] && grep -qxF "review-replay-sum: aggregate — replayed 2 / incomplete 0 / skipped 0 / failed 0 — caught 2 / missed 2 (wrong lens 2 / tracing 0 / threshold 0 / structural 0 / unverified 0) / rejected-wrongly 0 / noise 0 / unscored 0 (compare_failed 0)" "$1"' _ "$out" "$rc"
   assert "r13: … naming each run, and each lesson by repo and PR" \
     sh -c 'grep -qE "^review-replay-sum: runs — 2 run\(s\) of kit .* across 1 repo\(s\)$" "$1" && [ "$(grep -c "^  o/r .*: replayed 1 / " "$1")" -eq 2 ] \
       && grep -qxF "lessons — wrong_lens (2 missed):" "$1" && grep -qF "  o/r#1 missed: src.txt" "$1" && grep -qF "  o/r#6 missed: src.txt" "$1"' _ "$out"
@@ -3663,6 +3696,10 @@ test_replay_sum_across_spokes() {
   assert "r13: no run is a usage error, not an empty scorecard" test "$rc" -eq 64
   bash "$hub/scripts/review-replay-sum.sh" "$a" "$a/aggregate.json" > "$out" 2>&1; rc=$?
   assert "r13: the same run twice is refused" sh -c '[ "$2" -eq 1 ] && grep -qF "the same run twice" "$1" && ! grep -q "aggregate —" "$1"' _ "$out" "$rc"
+  mkdir -p "$WORK/r13-runs/upper"; jq '.repo = "O/R" | .records = []' "$a/aggregate.json" > "$WORK/r13-runs/upper/aggregate.json"
+  jq '.records = []' "$a/aggregate.json" > "$WORK/r13-runs/lower.json"
+  bash "$hub/scripts/review-replay-sum.sh" "$WORK/r13-runs/lower.json" "$WORK/r13-runs/upper" > "$out" 2>&1; rc=$?
+  assert "r13: … also when its copy names the repo in another case" sh -c '[ "$2" -eq 1 ] && grep -qF "the same run twice" "$1"' _ "$out" "$rc"
   mkdir -p "$WORK/r13-runs/stopped" "$WORK/r13-runs/v1" "$WORK/r13-runs/kit"
   printf 'review-replay: incomplete — the run exited 130 before it finished, so it has no scorecard\n' > "$WORK/r13-runs/stopped/summary.txt"
   bash "$hub/scripts/review-replay-sum.sh" "$a" "$WORK/r13-runs/stopped" > "$out" 2>&1; rc=$?

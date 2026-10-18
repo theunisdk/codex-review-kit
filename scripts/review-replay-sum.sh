@@ -50,15 +50,15 @@ for r in "${RUNS[@]}"; do
   schema="$(jq -r .schema "$f")"
   [ "$schema" = review-replay-run/v2 ] \
     || die "$f is $schema, not review-replay-run/v2: an older review-replay.sh wrote it, without its incomplete PRs and denied commands — re-run it"
-  jq -c --arg path "$f" '{path: $path, run, repo, kit, prs, cost, denials, records: [.repo as $r | .records[] | . + {repo: $r}]}' \
+  jq -c --arg path "$f" '{path: $path, run, spoke, repo, kit, prs, cost, denials, records: [.repo as $r | .records[] | . + {repo: $r}]}' \
     "$f" >> "$TMP/runs.all" \
     || die "cannot read $f"
 done
 jq -s . "$TMP/runs.all" > "$TMP/runs.json" || die "cannot read the runs back"
 
 # what would be counted twice, or mixes kits
-# GitHub names are case-insensitive
-jq -r '(group_by("\(.repo | ascii_downcase) \(.run)") | map(select(length > 1)) | .[] | "the same run twice: \(map(.path) | join(", "))"),
+# a run is its spoke's; GitHub names are case-insensitive
+jq -r '(group_by("\(.spoke) \(.run)") | map(select(length > 1)) | .[] | "the same run twice: \(map(.path) | join(", "))"),
   ([.[] | .run as $run | .records[] | {key: "\(.repo | ascii_downcase)#\(.pr)", run: $run}] | group_by(.key) | map(select(length > 1)) | .[]
     | "\(.[0].key) is scored in more than one run (\(map(.run) | join(", "))): pass one of them"),
   (map(.kit.sha) | unique | select(length > 1) | "runs of different kits (\(map(.[0:7]) | join(", "))) do not sum to one kit'"'"'s scorecard")' \
@@ -69,7 +69,7 @@ SCORE=(jq -L "$HUB/scripts/lib")
 "${SCORE[@]}" 'include "replay-scorecard";
   def total(p): map(p) | add;
   {schema: "review-replay-sum/v1", kit: .[0].kit,
-   runs: map({run, repo, path, prs}),
+   runs: map({run, spoke, repo, path, prs}),
    prs: {replayed: total(.prs.replayed), incomplete: total(.prs.incomplete), skipped: total(.prs.skipped),
          failed: total(.prs.failed), unreviewed_passed_over: total(.prs.unreviewed_passed_over)}}
   + (map(.records[]) | tally)

@@ -72,6 +72,7 @@ if [ -n "$RECENT" ] && [ -n "$PRS" ]; then echo "error: name PRs or pass --recen
 if [ -z "$RECENT" ] && [ -z "$PRS" ]; then echo "error: name at least one PR, or pass --recent N" >&2; exit 64; fi
 
 need_cmd git; need_cmd jq; need_cmd gh; need_cmd claude; need_cmd codex; need_cmd tar
+SCORE=(jq -L "$HUB/scripts/lib")
 
 # --- the spoke -------------------------------------------------------------
 SPOKE="$(git -C "$SPOKE" rev-parse --show-toplevel 2>/dev/null)" || die "not a git repository: $SPOKE"
@@ -83,8 +84,8 @@ COMMON="$(git -C "$SPOKE" rev-parse --git-common-dir)" && COMMON="$(cd "$SPOKE" 
 [ "$(git -C "$SPOKE" rev-parse --is-shallow-repository)" = false ] \
   || die "$SPOKE is a shallow clone, so ancestry checks would be wrong — run 'git -C $SPOKE fetch --unshallow' first"
 # the replay's checkout fetches from the spoke, which cannot serve objects it only promises
-[ -z "$(git -C "$SPOKE" config --get extensions.partialClone)" ] \
-  || die "$SPOKE is a partial clone, so it lacks objects a replay reads — run 'git -C $SPOKE fetch --refetch --no-filter origin' first"
+[ -z "$(git -C "$SPOKE" config --get-regexp '^(extensions\.partialclone|remote\..*\.(promisor|partialclonefilter))$')" ] \
+  || die "$SPOKE is a partial clone, so it lacks objects a replay reads — replay a full clone, made without --filter"
 FORMAT="$(git -C "$SPOKE" rev-parse --show-object-format)" || die "cannot read the spoke's object format"
 if [ -z "$REPO" ]; then
   url="$(git -C "$SPOKE" remote get-url origin 2>/dev/null)" || die "the spoke has no origin remote — pass --repo OWNER/NAME"
@@ -479,7 +480,7 @@ replay_pr() {
   while IFS= read -r -d '' f; do
     case "$f" in .gitattributes|*/.gitattributes) ;; *) continue ;; esac
     git -C "$wt" show "$FIRST:$f" > "$REC_TMP/attrs.txt" || { fail_at checkout "cannot read $f at $short"; return; }
-    ! grep -qE '(^|[[:space:]])filter=' "$REC_TMP/attrs.txt" \
+    ! grep -vE '^[[:space:]]*#' "$REC_TMP/attrs.txt" | grep -qE '(^|[[:space:]])filter=' \
       || { skip_as "$f at $short sets a git filter (such as git lfs), which the replay's checkout does not apply"; return; }
   done < "$REC_TMP/tree.txt"
   git -C "$wt" -c advice.detachedHead=false checkout --quiet --detach "$FIRST" > "$REC_TMP/wt.err" 2>&1 \
@@ -580,7 +581,8 @@ Its \"Replay mode\" section says what changes: the GitHub data is already in .re
     awk -v f="$json" '/^```json[[:space:]]*$/ && !done { print; while ((getline l < f) > 0) print l; skip = 1; next }
       skip && /^```[[:space:]]*$/ { skip = 0; done = 1 } !skip' "$body"
   } > "$REC_TMP/postmortem.md" || { fail_at record "cannot write postmortem.md"; return; }
-  R_COUNTS="$(jq -r '"caught \(.counts.caught) / missed \(.counts.missed) / rejected-wrongly \(.counts.rejected_wrongly) / noise \(.counts.noise) / unscored \(.counts.unscored)"' "$json")"
+  R_COUNTS="$("${SCORE[@]}" -r 'include "replay-scorecard"; [.] | tally | counts_text' "$json")" \
+    || { fail_at record "cannot read the record's counts"; return; }
   [ -z "$gaps" ] || { R_MSG="$gaps"; return 3; }
 }
 
@@ -695,7 +697,6 @@ fi
 
 # --- aggregate -------------------------------------------------------------
 AGG="$RUN_DIR/aggregate.json"
-SCORE=(jq -L "$HUB/scripts/lib")
 N_SCORED=$((N_REPLAYED + N_INCOMPLETE))
 i=0; : > "$RUN_TMP/records.all" || die_run "cannot read the records back"
 while [ "$i" -lt "$N_SCORED" ]; do
@@ -715,10 +716,10 @@ printf 'review-replay: cost — %s, failed and skipped PRs included\n' \
 "${SCORE[@]}" -rn --argjson d "$DENIALS_JSON" 'include "replay-scorecard"; "review-replay: denials — \($d | denials_text), failed PRs included"' \
   >> "$RUN_TMP/scorecard.txt" || die_run "cannot sum the denials"
 while IFS= read -r l; do say "$l"; done < "$RUN_TMP/scorecard.txt"
-"${SCORE[@]}" --arg run "$RUN_ID" --arg repo "$REPO" --arg ref "$KIT_REF" --arg sha "$KIT_SHA" --arg desc "$KIT_DESC" \
+"${SCORE[@]}" --arg run "$RUN_ID" --arg spoke "$SPOKE" --arg repo "$REPO" --arg ref "$KIT_REF" --arg sha "$KIT_SHA" --arg desc "$KIT_DESC" \
    --argjson prs "$PRS_JSON" --argjson recent "$RECENT_JSON" --argjson cost "$COST_JSON" --argjson denials "$DENIALS_JSON" --arg check "$KIT_CHECK" \
    --rawfile summary "$SUMMARY" 'include "replay-scorecard";
-  {schema: "review-replay-run/v2", run: $run, repo: $repo, kit: {ref: $ref, sha: $sha, describe: $desc, check: $check}, recent: $recent,
+  {schema: "review-replay-run/v2", run: $run, spoke: $spoke, repo: $repo, kit: {ref: $ref, sha: $sha, describe: $desc, check: $check}, recent: $recent,
    prs: $prs} + tally + {cost: $cost, denials: $denials,
    summary: ($summary | split("\n") | map(select(. != ""))),
    records: .}' "$RUN_TMP/records.json" > "$AGG.tmp" && mv "$AGG.tmp" "$AGG" || die_run "cannot write $AGG"

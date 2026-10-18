@@ -86,6 +86,12 @@ Read a replay differently from a live postmortem:
   CodeRabbit commented on that cannot be fetched fails the PR, rather than
   leaving its findings unscored. A re-run that fails keeps the scored record
   and writes its logs to `<record>.last-unscored`.
+- **Each PR's line and the scorecard carry the same counts:**
+  `caught / missed (wrong lens / tracing / threshold / structural / unverified) / rejected-wrongly / noise / unscored (compare_failed)`.
+  A miss no lens evidence could diagnose is `unverified`, which the
+  record's four-key `missed_by_cause` leaves out; a miss of any other
+  unknown cause shows as `no cause <n>`, so the causes always add up to
+  `missed`. Both come from the record's findings.
 - **A finding the postmortem could not compare makes the PR `incomplete`**,
   not `replayed`: its line reads
   `incomplete — … · <k> finding(s) unscored because a compare failed (<reason>)`.
