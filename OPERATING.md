@@ -46,8 +46,10 @@ missed" is a data point, and skipping it silently stops the learning loop.
 to bound the spend) runs from the hub. It scores PRs that never had a local
 verdict, so the scorecard does not have to wait for new PRs. Each PR is
 replayed on the commit CodeRabbit first reviewed: today's kit (`--kit-ref`,
-default the hub's `main`) over that commit's repo-owned files. Missing files
-come from the spoke's default branch. The record names the source of each.
+default the hub's `main`) over that commit's repo-owned files. A `--kit-ref`
+branch behind its remote is refused, so a stale hub clone cannot replay an
+old kit as today's. Missing files come from the spoke's default branch. The
+record names the source of each.
 
 Read a replay differently from a live postmortem:
 
@@ -67,15 +69,21 @@ Read a replay differently from a live postmortem:
 - **It skips what it cannot replay faithfully,** with a stated reason: a
   pre-hub kit, a PR CodeRabbit never reviewed, an unmerged PR, a symlink in
   the kit's paths, and `--limit` reached. A failed step reads
-  `failed — <step>: <error>`, never a skip or `missed 0`. A re-run that
-  fails keeps the scored record and writes its logs to
-  `<record>.last-unscored`.
+  `failed — <step>: <error>`, never a skip or `missed 0`. A commit
+  CodeRabbit commented on that cannot be fetched fails the PR, rather than
+  leaving its findings unscored. A re-run that fails keeps the scored record
+  and writes its logs to `<record>.last-unscored`.
+- **Each run keeps its own record** in `review-replay/runs/<time>-<kit>/`:
+  `summary.txt` holds every line the run printed, and `aggregate.json` the
+  scorecard with each PR's record. A run that stopped early says so in
+  `summary.txt` and has no `aggregate.json`.
 
 Each PR costs one full `review.sh` run (six Codex lenses at the configured
 effort) plus two headless `claude -p` calls, capped by `--claude-budget`.
 On an 11-file PR at `high` effort, the first replay took 6 minutes, about
 840k Codex tokens and $1.10 of Claude. The per-PR line and the closing
-`cost` line print both totals.
+`cost` line print both totals. A count the replay cannot read prints as
+unknown, never as 0.
 
 ### Fire drills (the stronger, faster proof)
 
