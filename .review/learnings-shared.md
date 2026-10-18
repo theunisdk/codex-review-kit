@@ -45,6 +45,11 @@ before this file dilutes the prompts it feeds.
   different unparseable values compared equal and a reset could overwrite the
   wrong one. A guard deciding whether data changed must compare the raw bytes
   or a version/ETag, not a lossy parse.
+- 2026-10-18: an update's affected-row count was discarded, so a write that
+  matched zero rows still redirected as saved; a recovery restart's exit status
+  went unread under "started again". At every write, restart or rollback call,
+  find the line that reads what it returned (count, exit status, flag); none
+  before the success message, redirect or next step is a finding.
 - 2026-10-18: a confirmation gating a destructive action showed "none pending"
   for a count whose source failed to parse. At every count, list or "none" a
   user sees, trace its source through each state (absent, unreadable,
