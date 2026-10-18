@@ -57,8 +57,9 @@ done
 jq -s . "$TMP/runs.all" > "$TMP/runs.json" || die "cannot read the runs back"
 
 # what would be counted twice, or mixes kits
-jq -r '(group_by("\(.repo) \(.run)") | map(select(length > 1)) | .[] | "the same run twice: \(map(.path) | join(", "))"),
-  ([.[] | .run as $run | .records[] | {key: "\(.repo)#\(.pr)", run: $run}] | group_by(.key) | map(select(length > 1)) | .[]
+# GitHub names are case-insensitive
+jq -r '(group_by("\(.repo | ascii_downcase) \(.run)") | map(select(length > 1)) | .[] | "the same run twice: \(map(.path) | join(", "))"),
+  ([.[] | .run as $run | .records[] | {key: "\(.repo | ascii_downcase)#\(.pr)", run: $run}] | group_by(.key) | map(select(length > 1)) | .[]
     | "\(.[0].key) is scored in more than one run (\(map(.run) | join(", "))): pass one of them"),
   (map(.kit.sha) | unique | select(length > 1) | "runs of different kits (\(map(.[0:7]) | join(", "))) do not sum to one kit'"'"'s scorecard")' \
   "$TMP/runs.json" > "$TMP/refused" || die "cannot check the runs"
@@ -80,7 +81,7 @@ SCORE=(jq -L "$HUB/scripts/lib")
 
 if [ -n "$JSON" ]; then cat "$TMP/sum.json"; exit 0; fi
 "${SCORE[@]}" -r 'include "replay-scorecard";
-  "review-replay-sum: runs — \(.runs | length) run(s) of kit \(.kit.describe) (\(.kit.sha[0:7])) across \(.runs | map(.repo) | unique | length) repo(s)",
+  "review-replay-sum: runs — \(.runs | length) run(s) of kit \(.kit.describe) (\(.kit.sha[0:7])) across \(.runs | map(.repo | ascii_downcase) | unique | length) repo(s)",
   (.runs[] | "  \(.repo) \(.run): \(.prs | prs_text)"),
   "review-replay-sum: aggregate — \(.prs | prs_text) — \(counts_text)",
   (.records | lessons("\(.repo)#\(.pr)"))' "$TMP/sum.json" || die "cannot print the scorecard"

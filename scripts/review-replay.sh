@@ -82,6 +82,10 @@ COMMON="$(git -C "$SPOKE" rev-parse --git-common-dir)" && COMMON="$(cd "$SPOKE" 
   || die "cannot resolve the spoke's git common dir"
 [ "$(git -C "$SPOKE" rev-parse --is-shallow-repository)" = false ] \
   || die "$SPOKE is a shallow clone, so ancestry checks would be wrong — run 'git -C $SPOKE fetch --unshallow' first"
+# the replay's checkout fetches from the spoke, which cannot serve objects it only promises
+[ -z "$(git -C "$SPOKE" config --get extensions.partialClone)" ] \
+  || die "$SPOKE is a partial clone, so it lacks objects a replay reads — run 'git -C $SPOKE fetch --refetch --no-filter origin' first"
+FORMAT="$(git -C "$SPOKE" rev-parse --show-object-format)" || die "cannot read the spoke's object format"
 if [ -z "$REPO" ]; then
   url="$(git -C "$SPOKE" remote get-url origin 2>/dev/null)" || die "the spoke has no origin remote — pass --repo OWNER/NAME"
   REPO="$(printf '%s\n' "$url" | sed -nE 's#^(https://|ssh://)?(git@)?github\.com[:/]([^/]+/[^/]+)$#\3#p' | sed 's/\.git$//')"
@@ -464,13 +468,22 @@ replay_pr() {
 
   # --- checkout: the reviewed commit's history and nothing else, no ref or object past it,
   # so no lens and no adjudicator can read a later fix (a worktree shares every ref)
-  wt="$CHECKOUTS/replay-pr$n"
-  git init -q "$wt" > "$REC_TMP/wt.err" 2>&1 && CUR_WT="$wt" \
-    && GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_1=uploadpack.allowAnySHA1InWant GIT_CONFIG_VALUE_1=true \
+  wt="$CHECKOUTS/replay-pr$n"; CUR_WT="$wt"
+  git init -q --object-format="$FORMAT" "$wt" > "$REC_TMP/wt.err" 2>&1 \
+    && run_with_timeout "$REVIEW_TIMEOUT" env GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_1=uploadpack.allowAnySHA1InWant GIT_CONFIG_VALUE_1=true \
       git -C "$wt" -c gc.auto=0 -c maintenance.auto=false fetch --quiet --no-tags --no-write-fetch-head "$SPOKE" "$FIRST" \
       < /dev/null >> "$REC_TMP/wt.err" 2>&1 \
-    && git -C "$wt" -c advice.detachedHead=false checkout --quiet --detach "$FIRST" >> "$REC_TMP/wt.err" 2>&1 \
+    && git -C "$wt" ls-tree -r -z --name-only "$FIRST" > "$REC_TMP/tree.txt" 2>> "$REC_TMP/wt.err" \
     || { fail_at checkout "cannot clone ${FIRST:0:7} alone: $(err_of "$REC_TMP/wt.err")"; return; }
+  # a filter such as git lfs needs config and storage this clone lacks: the lenses would read pointers
+  while IFS= read -r -d '' f; do
+    case "$f" in .gitattributes|*/.gitattributes) ;; *) continue ;; esac
+    git -C "$wt" show "$FIRST:$f" > "$REC_TMP/attrs.txt" || { fail_at checkout "cannot read $f at $short"; return; }
+    ! grep -qE '(^|[[:space:]])filter=' "$REC_TMP/attrs.txt" \
+      || { skip_as "$f at $short sets a git filter (such as git lfs), which the replay's checkout does not apply"; return; }
+  done < "$REC_TMP/tree.txt"
+  git -C "$wt" -c advice.detachedHead=false checkout --quiet --detach "$FIRST" > "$REC_TMP/wt.err" 2>&1 \
+    || { fail_at checkout "cannot check out $short: $(err_of "$REC_TMP/wt.err")"; return; }
 
   # --- kit: today's shared half over the PR's repo-owned half
   overlay "$wt" || return

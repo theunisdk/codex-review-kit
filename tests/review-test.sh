@@ -3569,6 +3569,22 @@ reach $b
 reach $(git -C "$RS" rev-parse "$m^1")
 reach $m"
   assert "r11: the spoke's refs are untouched" test "$(git -C "$RS" rev-parse origin/main)" = "$m"
+
+  # the clone has no LFS config or storage, so a reviewed commit that sets a filter is skipped
+  git -C "$RS" worktree add -q --detach "$WORK/r11-lfs" "$RA"
+  ( cd "$WORK/r11-lfs" && printf '*.bin filter=lfs diff=lfs merge=lfs -text\n' > .gitattributes \
+      && git add .gitattributes && git -c user.email=t@example.invalid -c user.name=t commit -qm lfs \
+      && git push -q "$RREMOTE" HEAD:refs/pull/10/head )
+  gh_pr_fixture "$RGH" 10 "$(git -C "$WORK/r11-lfs" rev-parse HEAD)" "$(git -C "$WORK/r11-lfs" rev-parse HEAD)" "$m"
+  git -C "$RS" worktree remove --force "$WORK/r11-lfs"
+  run_replay 10
+  assert "r11: a reviewed commit that sets a git filter is skipped, not reviewed as pointers" \
+    grep -qE "^review-replay: skipped — PR #10: .gitattributes at [0-9a-f]{7} sets a git filter" "$LOG"
+  git -C "$RS" config extensions.partialClone origin
+  run_replay 1
+  assert "r11: a partial clone is refused, since the checkout fetches from it" \
+    sh -c 'grep -qF "is a partial clone, so it lacks objects a replay reads" "$1" && ! grep -q "^review-replay: replayed" "$1"' _ "$LOG"
+  git -C "$RS" config --unset extensions.partialClone
 }
 
 # The claude calls kept only their last message, so nobody could check what the adjudicator
@@ -3632,7 +3648,7 @@ test_replay_sum_across_spokes() {
   replay_fixture r14; RHUB="$hub"; run_replay 6; b="$(last_run)"
   out="$WORK/r13.sum"
   bash "$hub/scripts/review-replay-sum.sh" "$a" "$b/aggregate.json" > "$out" 2>&1; rc=$?
-  assert "r13: two spokes' runs sum to one scorecard" \
+  assert "r13: two runs sum to one scorecard" \
     sh -c '[ "$2" -eq 0 ] && grep -qxF "review-replay-sum: aggregate — replayed 2 / incomplete 0 / skipped 0 / failed 0 — caught 2 / missed 2 (wrong lens 2 / tracing 0 / threshold 0 / structural 0) / rejected-wrongly 0 / noise 0 / unscored 0 (compare failed 0)" "$1"' _ "$out" "$rc"
   assert "r13: … naming each run, and each lesson by repo and PR" \
     sh -c 'grep -qE "^review-replay-sum: runs — 2 run\(s\) of kit .* across 1 repo\(s\)$" "$1" && [ "$(grep -c "^  o/r .*: replayed 1 / " "$1")" -eq 2 ] \
@@ -3663,6 +3679,24 @@ test_replay_sum_across_spokes() {
   bash "$hub/scripts/review-replay-sum.sh" "$b" "$(last_run)" > "$out" 2>&1; rc=$?
   assert "r13: a PR scored in two runs is refused, not counted twice" \
     sh -c '[ "$2" -eq 1 ] && grep -qF "o/r#6 is scored in more than one run" "$1"' _ "$out" "$rc"
+
+  # another repo's PR #1, with a failure, skips, an incomplete PR, unknown costs and denials
+  mkdir -p "$WORK/r13-runs/other" "$WORK/r13-runs/case"
+  jq '.repo = "x/y" | .run = "other-run" | .records[0].pr = 1
+      | .prs = {replayed: 0, incomplete: 1, skipped: 2, failed: 1, unreviewed_passed_over: 3}
+      | .cost = {claude_usd: 0.25, claude_calls_of_unknown_cost: 1, codex_tokens: 10, prs_of_unknown_codex_tokens: 1}
+      | .denials = {commands: 3, prs_with_denials: 1, prs_of_unknown_denials: 1}' "$b/aggregate.json" > "$WORK/r13-runs/other/aggregate.json"
+  bash "$hub/scripts/review-replay-sum.sh" "$a" "$WORK/r13-runs/other" > "$out" 2>&1; rc=$?
+  assert "r13: two repos' PR #1 both count" \
+    sh -c '[ "$2" -eq 0 ] && grep -qE "across 2 repo\(s\)$" "$1" && grep -qF "  o/r#1 missed: " "$1" && grep -qF "  x/y#1 missed: " "$1"' _ "$out" "$rc"
+  assert "r13: … and every counter, not only the scored ones, is summed" \
+    sh -c 'grep -qF "review-replay-sum: aggregate — replayed 1 / incomplete 1 / skipped 2 / failed 1 (3 merged PR(s) CodeRabbit never reviewed passed over) — " "$1" \
+      && grep -qxF "review-replay-sum: cost — claude \$0.75 + unknown for 1 call(s), codex 1244 tokens + unknown for 1 PR(s), failed and skipped PRs included" "$1" \
+      && grep -qxF "review-replay-sum: denials — 3 command(s) denied in 1 PR(s) + unknown for 1 PR(s), failed PRs included" "$1"' _ "$out"
+  jq '.repo = "O/R" | .run = "case-run"' "$b/aggregate.json" | jq '.records[0].pr = 1' > "$WORK/r13-runs/case/aggregate.json"
+  bash "$hub/scripts/review-replay-sum.sh" "$a" "$WORK/r13-runs/case" > "$out" 2>&1; rc=$?
+  assert "r13: a repo named in another case is the same repo" \
+    sh -c '[ "$2" -eq 1 ] && grep -qF "#1 is scored in more than one run" "$1"' _ "$out" "$rc"
 }
 
 test_replay_refuses_a_stale_kit() {

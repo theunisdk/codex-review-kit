@@ -79,7 +79,9 @@ Read a replay differently from a live postmortem:
   user's allow rules would let it write to the spoke.
 - **It skips what it cannot replay faithfully,** with a stated reason: a
   pre-hub kit, a PR CodeRabbit never reviewed, an unmerged PR, a symlink in
-  the kit's paths, and `--limit` reached. A failed step reads
+  the kit's paths, a `.gitattributes` that sets a filter such as git lfs
+  (the checkout cannot apply it), and `--limit` reached. A shallow or
+  partial spoke clone is refused before any PR. A failed step reads
   `failed — <step>: <error>`, never a skip or `missed 0`. A commit
   CodeRabbit commented on that cannot be fetched fails the PR, rather than
   leaving its findings unscored. A re-run that fails keeps the scored record
