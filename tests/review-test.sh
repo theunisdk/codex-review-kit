@@ -1232,6 +1232,8 @@ test_semgrep_failure_is_named() {
 
   semgrep_case sg5 0 '{"results":[],"errors":[{"type":"Syntax error","message":"src.txt: parse failure"}]}'
   assert "sg5: per-file errors are named" grep -qF 'some files or rules were NOT scanned' "$SG_REPORT"
+  assert "sg5: … and the scan is unknown, not ran" \
+    grep -qxF 'analyzer status: unknown — some files or rules were NOT scanned; the rest: ran — clean' "$SG_REPORT"
 }
 
 # --- analyzer tests: JS / TS ----------------------------------------------
@@ -1400,6 +1402,7 @@ _run_analyzer shapeless '' bash -c 'echo "3 problems"; exit 1'
 _section legacy-banner; printf 'tsc rc=1\n%s\n' "This is not the tsc command you are looking for" >> "$report"
 _section legacy-plain; echo "lint: clean" >> "$report"
 _section legacy-empty
+_run_analyzer flood ':[0-9]+: ' sh -c 'i=0; while [ $i -lt 30000 ]; do echo "f.sh:$i: noisy"; i=$((i + 1)); done; exit 1'
 EOF
   ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
   run_review_analyzers "$AREPO" "$ASTUB" main
@@ -1422,12 +1425,16 @@ EOF
     bash -c 'status_of "$1" legacy-plain | grep -qF "analyzer status: unknown — no exit status was recorded"' _ "$r"
   assert "al1: an empty section is unknown, not clean" \
     bash -c 'status_of "$1" legacy-empty | grep -qF "analyzer status: unknown — the section is empty"' _ "$r"
+  assert "al1: a flood of output is capped, and still labelled" \
+    bash -c '[ "$(status_of "$1" flood)" = "analyzer status: ran — findings above (rc=1)" ] && [ "$(section_body "$1" flood | wc -l)" -le 201 ] \
+      && ! ls "$1".run' _ "$r"
   assert "al1: every section has exactly one status line" \
     bash -c '[ "$(awk "/^### /{ if (n) print c; n = 1; c = 0 } /^analyzer status: /{ c++ } END { print c }" "$1" | sort -u)" = 1 ]' _ "$r"
   assert "al1: findings.json carries each tool's status" \
     jq -e '.analyzers.status == "ran" and (.analyzers.tools | map(select(.name | test("^(semgrep|shellcheck)") | not) | {(.name): .status}) | add) == {
       "gitleaks (secrets)": "ran", tsc: "failed", vitest: "failed", banner0: "failed", clean: "ran", lint: "ran",
-      crash: "unknown", shapeless: "unknown", "legacy-banner": "failed", "legacy-plain": "unknown", "legacy-empty": "unknown"}
+      crash: "unknown", shapeless: "unknown", "legacy-banner": "failed", "legacy-plain": "unknown", "legacy-empty": "unknown",
+      flood: "ran"}
       and (.analyzers.tools[] | select(.name == "tsc") | .reason | startswith("tsc could not run"))' "$json"
   assert "al1: a tool that did not run leaves complete alone" jq -e '.complete == true' "$json"
   assert "al1: the lens prompt names each tool that produced no results" \
@@ -1515,6 +1522,22 @@ test_missing_language_tool_is_skipped() {
     bash -c '[ "$(status_of "$1" tflint)" = "analyzer status: skipped — tflint is not installed" ]' _ "$AREPO/.review/raw/analyzers.txt"
   assert "al3: … that findings.json carries" \
     jq -e '.analyzers.tools[] | select(.name == "tflint") | .status == "skipped"' "$AREPO/.review/findings.json"
+}
+
+# Without its dependencies, mypy reports each unresolved import as a located
+# error: findings in shape, the environment in substance.
+test_mypy_unresolved_imports_are_unknown() {
+  analyzer_repo al4
+  mkdir -p "$WORK/al4-bin"
+  printf '#!/bin/sh\necho "app.py:1: error: Cannot find implementation or library stub for module named \"requests\"  [import-not-found]"\necho "app.py:3: error: Incompatible types"\nexit 1\n' > "$WORK/al4-bin/mypy"
+  chmod +x "$WORK/al4-bin/mypy"
+  ( cd "$AREPO" && printf 'import requests\n' > app.py && git add -A && git commit -qm py )
+  ( cd "$AREPO" && PATH="$WORK/al4-bin:$WORK/abin:$WORK/bin:$PATH" CODEX_STUB_DIR="$ASTUB" ANALYZER_STUB_DIR="$ASTUB" \
+      REVIEW_SKIP_AUTH_CHECK=1 bash scripts/review.sh --lenses correctness main ) > "$AREPO.log" 2>&1
+  assert "al4: mypy findings that include an unresolved import are unknown, not results" \
+    bash -c 'status_of "$1" mypy | grep -qF "analyzer status: unknown — mypy could not resolve an import, so its findings may be missing dependencies, not code (rc=1): app.py:1: error: Cannot find implementation"' \
+    _ "$AREPO/.review/raw/analyzers.txt"
+  assert "al4: … and both lines are still shown" grep -qF 'app.py:3: error: Incompatible types' "$AREPO/.review/raw/analyzers.txt"
 }
 
 # --- updater fixtures ------------------------------------------------------
@@ -3117,13 +3140,15 @@ test_findings_name_mode_and_head_on_every_path() {
   rm "$repo/new.txt"
   run_review "$repo" "$stub" --uncommitted --lenses correctness
   assert "um5: a zero-change run names them too" \
-    sh -c 'grep -qF "no changes to review" "$1" && jq -e --arg h "$3" ".mode == \"uncommitted\" and .head == \$h" "$2"' \
+    sh -c 'grep -qF "no changes to review" "$1" && jq -e --arg h "$3" ".mode == \"uncommitted\" and .head == \$h
+      and .analyzers == {status: \"not_run\", reason: \"nothing to review\", tools: []}" "$2"' \
     _ "$LOG" "$repo/.review/findings.json" "$short"
 
   ( cd "$repo" && PATH="$WORK/bin:$PATH" CODEX_STUB_DIR="$stub" REVIEW_SKIP_AUTH_CHECK=1 \
       bash scripts/review.sh --no-analyzers --lenses correctness no-such-ref ) > "$WORK/um5.log" 2>&1
   assert "um5: so does a run that dies before its report" \
-    sh -c 'grep -qF "base ref not found" "$1" && jq -e --arg h "$3" ".complete == false and .mode == \"branch\" and .head == \$h" "$2"' \
+    sh -c 'grep -qF "base ref not found" "$1" && jq -e --arg h "$3" ".complete == false and .mode == \"branch\" and .head == \$h
+      and .analyzers.status == \"not_run\" and (.analyzers.reason | test(\"stopped before\"))" "$2"' \
     _ "$WORK/um5.log" "$repo/.review/findings.json" "$short"
 
   mkdir -p "$WORK/um5-bin"
@@ -4124,22 +4149,29 @@ test_replay_sum_across_spokes() {
   bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$a" "$b" > "$WORK/r13.pub" 2>&1; rc=$?
   assert "r13: --aliases prints the same scorecard, by alias" \
     sh -c '[ "$2" -eq 0 ] && grep -qxF "$(grep "^review-replay-sum: aggregate — " "$3")" "$1" && [ "$(grep -c "^  S1 .*: replayed 1 / " "$1")" -eq 2 ] \
-      && grep -qE "^lessons — wrong_lens \(2 missed, [0-9]+ proposal\(s\)\): S1 #1, S1 #6$" "$1" && grep -qF "review-replay-sum: cost — " "$1"' _ "$WORK/r13.pub" "$rc" "$out"
+      && grep -qxF "lessons — wrong_lens (2 missed, 2 proposal(s)): S1 #1, S1 #6" "$1" && grep -qF "review-replay-sum: cost — " "$1"' _ "$WORK/r13.pub" "$rc" "$out"
   assert "r13: … and names no repo, path or finding" \
     sh -c '! grep -qiF "o/r" "$1" && ! grep -qF "src.txt" "$1" && ! grep -qF "$2" "$1" && ! grep -qF " missed: " "$1"' _ "$WORK/r13.pub" "$WORK"
   bash "$hub/scripts/review-replay-sum.sh" --json --aliases "$WORK/r13.aliases" "$a" "$b" > "$WORK/r13.pub.json" 2>&1
   assert "r13: --json --aliases carries counts and aliases only" \
     sh -c 'jq -e "(has(\"records\") | not) and .counts.caught == 2 and (.runs | map(.repo) | unique) == [\"S1\"] and all(.runs[]; has(\"spoke\") or has(\"path\") | not)
-      and .lessons == [{cause: \"wrong_lens\", missed: 2, proposals: .lessons[0].proposals, prs: [\"S1 #1\", \"S1 #6\"]}]" "$1" \
+      and .lessons == [{cause: \"wrong_lens\", missed: 2, proposals: 2, prs: [\"S1 #1\", \"S1 #6\"]}]" "$1" \
       && ! grep -qiF "o/r" "$1" && ! grep -qF "src.txt" "$1" && ! grep -qF "$2" "$1"' _ "$WORK/r13.pub.json" "$WORK"
   mkdir -p "$WORK/r13-runs/freecause"; jq '.run = "free-run" | .records[0].pr = 7 | .records[0].findings |= map(.cause = "see src.txt line 3")' "$b/aggregate.json" > "$WORK/r13-runs/freecause/aggregate.json"
   bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$a" "$WORK/r13-runs/freecause" > "$WORK/r13.pub" 2>&1; rc=$?
   assert "r13: … and a free-text cause is printed as other, never quoted" \
     sh -c '[ "$2" -eq 0 ] && grep -qE "^lessons — other \(1 missed, " "$1" && ! grep -qF "src.txt" "$1"' _ "$WORK/r13.pub" "$rc"
+  bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$a" "$a" > "$WORK/r13.pub" 2>&1; rc=$?
+  assert "r13: an aliased refusal names runs by argument, not path" \
+    sh -c '[ "$2" -eq 1 ] && grep -qF "the same run twice: argument 1, argument 2" "$1" && ! grep -qF "$3" "$1"' _ "$WORK/r13.pub" "$rc" "$WORK"
+  mkdir -p "$WORK/r13-runs/dup"; jq '.run = "dup-run"' "$b/aggregate.json" > "$WORK/r13-runs/dup/aggregate.json"
+  bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$b" "$WORK/r13-runs/dup" > "$WORK/r13.pub" 2>&1; rc=$?
+  assert "r13: … and a PR scored twice by alias" \
+    sh -c '[ "$2" -eq 1 ] && grep -qF "s1#6 is scored in more than one run" "$1" && ! grep -qiF "o/r" "$1"' _ "$WORK/r13.pub" "$rc"
   printf 'x/y S2\n' > "$WORK/r13.aliases2"
   bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases2" "$a" > "$WORK/r13.pub" 2>&1; rc=$?
   assert "r13: a repo the alias file does not cover is refused, not printed by name" \
-    sh -c '[ "$2" -eq 1 ] && grep -qF "the alias file covers no alias for o/r" "$1" && ! grep -q "aggregate —" "$1"' _ "$WORK/r13.pub" "$rc"
+    sh -c '[ "$2" -eq 1 ] && grep -qF "the alias file covers no alias for 1 repo(s)" "$1" && ! grep -qiF "o/r" "$1" && ! grep -q "aggregate —" "$1"' _ "$WORK/r13.pub" "$rc"
   for bad in 'o/r' 'o/r S 1' 'o/r S1\nO/R S2' 'o/r S1\nx/y s1' '# nothing'; do
     printf "$bad\n" > "$WORK/r13.aliases2"
     bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases2" "$a" > "$WORK/r13.pub" 2>&1; rc=$?
@@ -4734,6 +4766,7 @@ run_tests \
   test_analyzers_not_run_or_broken_are_said \
   test_js_without_deps_and_tsc_evidence \
   test_missing_language_tool_is_skipped \
+  test_mypy_unresolved_imports_are_unknown \
   test_update_reports_source_and_revision \
   test_update_marks_a_dirty_local_hub \
   test_update_marks_an_untracked_hub_file \

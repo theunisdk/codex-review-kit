@@ -12,7 +12,8 @@
 #     --aliases <file>  name each repo by its alias, and print lessons as counts
 #                       only, so the output is safe to paste into the public hub.
 #                       One "<owner/repo> <alias>" per line; # starts a comment.
-#                       A repo the file does not cover is refused.
+#                       A repo the file does not cover is refused, and errors
+#                       name each run by its argument number, not its path.
 #
 # Refuses, rather than sums: a run that stopped before its scorecard, one made
 # by an older review-replay.sh, the same run twice, a PR scored in two runs,
@@ -59,24 +60,37 @@ if [ -n "$ALIASES" ]; then
     || die "bad alias file $ALIASES: $(sed 's/^jq: error[^:]*: //' "$TMP/aliases.err" | head -n1)"
 fi
 
-: > "$TMP/runs.all"
+: > "$TMP/runs.all"; i=0
 for r in "${RUNS[@]}"; do
+  i=$((i + 1))
   f="$r"; [ ! -d "$r" ] || f="$r/aggregate.json"
+  # a spoke's path names it, so aliased output never prints one
+  lbl="$f" rl="$r"; [ -z "$ALIASES" ] || { lbl="argument $i"; rl="$lbl"; }
   if [ ! -e "$f" ]; then
     [ -d "$r" ] && [ -e "$r/summary.txt" ] \
-      && die "$r has no aggregate.json: the run stopped before its scorecard (see its summary.txt)"
-    die "$f does not exist"
+      && die "$rl has no aggregate.json: the run stopped before its scorecard (see its summary.txt)"
+    die "$lbl does not exist"
   fi
-  jq -e 'type == "object" and (.schema | type) == "string"' "$f" > /dev/null 2>&1 || die "$f is not a replay run's aggregate"
+  jq -e 'type == "object" and (.schema | type) == "string"' "$f" > /dev/null 2>&1 || die "$lbl is not a replay run's aggregate"
   schema="$(jq -r .schema "$f")"
   [ "$schema" = review-replay-run/v2 ] \
-    || die "$f is $schema, not review-replay-run/v2: an older review-replay.sh wrote it, without its incomplete PRs and denied commands — re-run it"
-  jq -e '(.spoke | type) == "string" and (.run | type) == "string"' "$f" > /dev/null || die "$f names no spoke or run, so it cannot be told apart from another run"
-  jq -c --arg path "$f" '{path: $path, run, spoke, repo, kit, prs, cost, denials, records: [.repo as $r | .records[] | . + {repo: $r}]}' \
+    || die "$lbl is $schema, not review-replay-run/v2: an older review-replay.sh wrote it, without its incomplete PRs and denied commands — re-run it"
+  jq -e '(.spoke | type) == "string" and (.run | type) == "string"' "$f" > /dev/null || die "$lbl names no spoke or run, so it cannot be told apart from another run"
+  jq -c --arg path "$lbl" '{path: $path, run, spoke, repo, kit, prs, cost, denials, records: [.repo as $r | .records[] | . + {repo: $r}]}' \
     "$f" >> "$TMP/runs.all" \
-    || die "cannot read $f"
+    || die "cannot read $lbl"
 done
 jq -s . "$TMP/runs.all" > "$TMP/runs.json" || die "cannot read the runs back"
+
+# before the refusals below, which name repos
+if [ -n "$ALIASES" ]; then
+  jq -r --slurpfile a "$TMP/aliases.json" '[.[].repo | select(($a[0][ascii_downcase] // null) == null)] | unique | .[]' \
+    "$TMP/runs.json" > "$TMP/unaliased" || die "cannot check the runs against the alias file"
+  [ ! -s "$TMP/unaliased" ] \
+    || die "the alias file covers no alias for $(grep -c . < "$TMP/unaliased") repo(s) in these runs; run without --aliases to see which"
+  jq --slurpfile a "$TMP/aliases.json" 'map(.repo = $a[0][.repo | ascii_downcase] | .records |= map(.repo = $a[0][.repo | ascii_downcase]))' \
+    "$TMP/runs.json" > "$TMP/runs.aliased" && mv "$TMP/runs.aliased" "$TMP/runs.json" || die "cannot alias the runs"
+fi
 
 # what would be counted twice, or mixes kits
 # a run is its spoke's; GitHub names are case-insensitive
@@ -86,14 +100,6 @@ jq -r '(group_by("\(.spoke) \(.run)") | map(select(length > 1)) | .[] | "the sam
   (map(.kit.sha) | unique | select(length > 1) | "runs of different kits (\(map(.[0:7]) | join(", "))) do not sum to one kit'"'"'s scorecard")' \
   "$TMP/runs.json" > "$TMP/refused" || die "cannot check the runs"
 [ ! -s "$TMP/refused" ] || die "$(head -n1 "$TMP/refused")"
-
-if [ -n "$ALIASES" ]; then
-  jq -r --slurpfile a "$TMP/aliases.json" '[.[].repo | select(($a[0][ascii_downcase] // null) == null)] | unique | .[]' \
-    "$TMP/runs.json" > "$TMP/unaliased" || die "cannot check the runs against the alias file"
-  [ ! -s "$TMP/unaliased" ] || die "the alias file covers no alias for $(head -n1 "$TMP/unaliased") (and $(($(grep -c . < "$TMP/unaliased") - 1)) more repo(s))"
-  jq --slurpfile a "$TMP/aliases.json" 'map(.repo = $a[0][.repo | ascii_downcase] | .records |= map(.repo = $a[0][.repo | ascii_downcase]))' \
-    "$TMP/runs.json" > "$TMP/runs.aliased" && mv "$TMP/runs.aliased" "$TMP/runs.json" || die "cannot alias the runs"
-fi
 
 SCORE=(jq -L "$HUB/scripts/lib")
 "${SCORE[@]}" 'include "replay-scorecard";

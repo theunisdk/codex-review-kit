@@ -30,11 +30,15 @@ _cannot_run_line() {
 # section of its own and labels it from its exit status and output.
 # <findings-ERE> matches a line of a real finding, such as '\.ts:[0-9]+'; pass ''
 # when the tool has no fixed shape. A non-zero exit with no such line is unknown,
-# never clean: a crash and a finding exit alike.
+# never clean: a crash and a finding exit alike. With ANALYZER_UNRESOLVED_RE set
+# for the call, findings that include a line it matches (an import the tool
+# could not resolve) are unknown too: they may be missing dependencies, not code.
 _run_analyzer() {
-  local title="$1" re="$2" out rc why; shift 2
+  local title="$1" re="$2" raw="$report.run" out rc why; shift 2
   _section "$title"
-  out="$("$@" < /dev/null 2>&1)"; rc=$?
+  # through a file, so a flood of diagnostics never sits whole in memory
+  "$@" < /dev/null > "$raw" 2>&1; rc=$?
+  out="$(head -c 1000000 "$raw")"; rm -f "$raw"
   why="$(_cannot_run_line "$out")"
   if [ -n "$why" ]; then
     printf '%s\n' "$out" | head -20 >> "$report"
@@ -43,7 +47,15 @@ _run_analyzer() {
     _analyzer_status "ran — clean (rc=0, no output)"
   elif [ -n "$re" ] && grep -qE -- "$re" <<< "$out"; then
     printf '%s\n' "$out" | head -200 >> "$report"
-    _analyzer_status "ran — findings above (rc=$rc)"
+    why=""
+    if [ -n "${ANALYZER_UNRESOLVED_RE:-}" ]; then
+      why="$(printf '%s\n' "$out" | grep -m 1 -E -- "$ANALYZER_UNRESOLVED_RE" | sed 's/^[[:space:]]*//' | cut -c 1-200)"
+    fi
+    if [ -n "$why" ]; then
+      _analyzer_status "unknown — $title could not resolve an import, so its findings may be missing dependencies, not code (rc=$rc): $why"
+    else
+      _analyzer_status "ran — findings above (rc=$rc)"
+    fi
   elif [ "$rc" -eq 0 ]; then
     printf '%s\n' "$out" | head -200 >> "$report"
     _analyzer_status "ran — rc=0, output above"
@@ -228,7 +240,7 @@ collect_analyzer_output() {
       if [ -n "$sg_errs" ]; then
         printf 'semgrep reported errors — some files or rules were NOT scanned:\n%s\n' \
           "$(printf '%s\n' "$sg_errs" | head -10)" >> "$report"
-        sg_status="$sg_status; some files or rules were NOT scanned"
+        sg_status="unknown — some files or rules were NOT scanned; the rest: $sg_status"
       fi
       _analyzer_status "$sg_status"
     else
@@ -418,7 +430,8 @@ collect_analyzer_output() {
   local py; py="$(_files_matching '*.py')"
   if [ -n "$py" ]; then
     _run_on_files ruff ':[0-9]+:[0-9]+: ' "$py" ruff check --output-format concise
-    _run_on_files mypy ':[0-9]+: (error|warning|note): ' "$py" mypy --no-error-summary
+    ANALYZER_UNRESOLVED_RE='Cannot find implementation or library stub|\[import-not-found\]' \
+      _run_on_files mypy ':[0-9]+: (error|warning|note): ' "$py" mypy --no-error-summary
     _run_on_files bandit ':[0-9]+: B[0-9]+' "$py" bandit -q -f custom
   fi
 
@@ -431,7 +444,7 @@ collect_analyzer_output() {
   }
   if [ -n "$(_files_matching '*.go')" ]; then
     _run_module "go vet" '\.go:[0-9]+:[0-9]+: ' go vet ./...
-    _have go && _run_module staticcheck '\.go:[0-9]+:[0-9]+: ' staticcheck ./...
+    _run_module staticcheck '\.go:[0-9]+:[0-9]+: ' staticcheck ./...
   fi
 
   # --- Rust ---------------------------------------------------------------

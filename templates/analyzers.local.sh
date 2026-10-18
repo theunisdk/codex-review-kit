@@ -8,7 +8,9 @@
 #   _files_matching '<glob>|<glob>' — changed files that exist, by extension
 #   _run_analyzer <title> <findings-ERE> <command> [args...]
 #                      — runs a tool in its own section and ends the section
-#                        with its status line: ran, failed or unknown
+#                        with its status line: ran, failed or unknown.
+#                        Set ANALYZER_UNRESOLVED_RE for the call to make
+#                        findings that include an unresolved import unknown.
 #   _analyzer_status <ran|skipped|failed|unknown> — <why>
 #                      — the status line, for a section you write yourself
 #   _node_deps_missing — true when package.json declares dependencies and

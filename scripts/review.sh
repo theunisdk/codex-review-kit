@@ -48,13 +48,14 @@ LENSES_FLAG=0
 # Any failed exit before a report is written must not leave the previous run's
 # report — and its complete:true — standing in for this one.
 STARTED=0; REPORT_WRITTEN=0; HOOK_WARNING=""
+ANALYZERS_JSON='{"status":"not_run","reason":"the run stopped before the analyzers ran","tools":[]}'
 SECRET_FINDINGS="[]"; SECRETS_SCAN="not_scanned"; GITLEAKS_LEAKED=0; CHANGED_COUNT=""
 finish_report() {
   local rc=$?
   [ "$STARTED" = 1 ] || return
   if [ "$REPORT_WRITTEN" = 0 ]; then
-    printf '{"findings":%s,"lenses_failed":[],"complete":false%s,"secrets_scan":"%s","mode":"%s","head":%s}\n' \
-      "$SECRET_FINDINGS" "${CHANGED_COUNT:+,\"changed_files\":$CHANGED_COUNT}" "$SECRETS_SCAN" "$MODE" "$HEAD_JSON" \
+    printf '{"findings":%s,"lenses_failed":[],"complete":false%s,"secrets_scan":"%s","analyzers":%s,"mode":"%s","head":%s}\n' \
+      "$SECRET_FINDINGS" "${CHANGED_COUNT:+,\"changed_files\":$CHANGED_COUNT}" "$SECRETS_SCAN" "$ANALYZERS_JSON" "$MODE" "$HEAD_JSON" \
       > .review/findings.json
     printf '# Codex pre-PR review\n\n> **INCOMPLETE — the run stopped (rc=%s) before producing a report.** Nothing was reviewed.\n' \
       "$rc" > .review/findings.md
@@ -283,7 +284,7 @@ if [ "${CHANGED_COUNT:-0}" -eq 0 ]; then
   jq -n --arg h "$HISTORY" --argjson n "$COMMITS" --argjson secrets "$SECRET_FINDINGS" --arg scan "$SECRETS_SCAN" \
     --arg mode "$MODE" --argjson head "$HEAD_JSON" '
     { findings: $secrets, lenses_failed: [], complete: false, changed_files: 0, secrets_scan: $scan,
-      mode: $mode, head: $head }
+      analyzers: {status: "not_run", reason: "nothing to review", tools: []}, mode: $mode, head: $head }
     + (if $h == "" then {} else { history_scan: { commits: $n, result: $h } } end)
   ' > .review/findings.json || die "could not write findings.json"
   {
