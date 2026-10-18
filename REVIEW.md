@@ -214,6 +214,8 @@ In Claude Code:
 | `changed_files` | how many paths were reviewed; `0` means nothing was, and no verdict may be written from it |
 | `secrets_scan` | `clean`, `leaks` (a critical `gitleaks` finding carries it), `failed` (forces `complete: false`), or `not_scanned` (gitleaks not installed, `--no-analyzers`, or nothing to scan) |
 | `history_scan` | zero-change runs on a branch with commits only: `{commits, result}` for the history scan |
+| `mode` | `branch`, `uncommitted` or `spec`. An `uncommitted` verdict names its commit as `<head>+uncommitted`, which clears no push |
+| `head` | HEAD's short SHA when the run started; `null` on a branch with no commits |
 
 Both the skill and the command delegate to `.review/adjudication.md`, so the
 behaviour is identical however the review started. Edit that file to change what
@@ -280,7 +282,9 @@ and counts a verdict found in more than one store once.
 **Coverage up** (`/review-postmortem <PR>`): CodeRabbit's findings are scored
 against the local verdict for the **first commit CodeRabbit reviewed**. It is
 matched by the SHA in the verdict header; `.review/verdict.md` is used only
-when its header names that commit. A verdict for an earlier commit on the
+when its header names that commit. A `<sha>+uncommitted` verdict from
+`--uncommitted` is never used: it may have been written after reading
+CodeRabbit, and the postmortem names each one it skips. A verdict for an earlier commit on the
 PR's branch still scores the files the later commits did not touch. With no
 verdict for that commit or such an ancestor, the PR is recorded as `no-local-verdict` and not scored, which is
 not the same as `missed 0`. Every missed finding is diagnosed by cause —

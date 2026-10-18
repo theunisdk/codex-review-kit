@@ -37,12 +37,16 @@ while read -r _local_ref local_sha remote_ref _remote_sha; do
     # Only the header's third field names the judged commit (adjudication.md),
     # at whatever length git abbreviated it; a SHA elsewhere is not a verdict, and
     # file mtime says when the file was written, not which commit it judged.
+    # A `<sha>+uncommitted` field is a --uncommitted run: changes on top of <sha>.
     judged=$(awk -F ' — ' 'NR == 1 {
-      if (NF == 4 && $1 == "# Review verdict" && $3 ~ /^[0-9a-f]+$/ && length($3) >= 4 && length($3) <= 64) print $3
+      sha = $3; sub(/[+]uncommitted$/, "", sha)
+      if (NF == 4 && $1 == "# Review verdict" && $3 ~ /^[0-9a-f]+([+]uncommitted)?$/ && length(sha) >= 4 && length(sha) <= 64) print $3
       exit
     }' .review/verdict.md)
     if [ -z "$judged" ] && head -n 1 .review/verdict.md | grep -q '^# Spec verdict'; then
       stale_refs="$stale_refs\n  $branch — spec-mode verdict, not a code review — run /review"
+    elif [ "${judged%+uncommitted}" != "$judged" ]; then
+      stale_refs="$stale_refs\n  $branch — verdict reviewed uncommitted changes on ${judged%+uncommitted}, not a commit — commit them and run /review"
     elif [ -z "$judged" ] || [ "${local_sha#"$judged"}" = "$local_sha" ]; then
       stale_refs="$stale_refs\n  $branch — verdict does not cover ${local_sha:0:10}"
     fi

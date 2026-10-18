@@ -120,7 +120,8 @@ hook_wiring() {
 
 # Copy the verdicts into the clone's review history: under the git common dir, so
 # every worktree shares it, it outlives worktree removal, and it is never committed.
-# Keyed <mode>-<date>-<sha>-<cksum>.md: a re-run never duplicates a verdict, and a
+# Keyed <mode>-<date>-<sha>-<cksum>.md, <sha> keeping a code verdict's +uncommitted
+# marker: a re-run never duplicates a verdict, and a
 # second verdict on the same commit never replaces the first. Run from the repo
 # root. Warns on failure; never fails the caller.
 archive_verdicts() {
@@ -133,8 +134,9 @@ archive_verdicts() {
         || { warn "verdict archive ${dir:-<git common dir>/review-history} is not writable — rejection history for /review-tune is not being kept"; return 0; }
     fi
     key="$(awk -F ' — ' 'NR == 1 {
-      if (NF == 4 && ($1 == "# Review verdict" || $1 == "# Spec verdict") && $3 ~ /^[0-9a-f]+$/ \
-          && length($3) >= 4 && length($3) <= 64 && $4 != "") {
+      sha = $3; sub(/[+]uncommitted$/, "", sha)
+      if (NF == 4 && ($1 == "# Review verdict" || $1 == "# Spec verdict") && sha ~ /^[0-9a-f]+$/ \
+          && ($3 == sha || $1 == "# Review verdict") && length(sha) >= 4 && length(sha) <= 64 && $4 != "") {
         gsub(/[^A-Za-z0-9-]/, "_", $4)
         print ($1 == "# Spec verdict" ? "spec" : "code") "-" $4 "-" $3
       }

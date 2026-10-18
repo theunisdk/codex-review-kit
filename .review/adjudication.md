@@ -125,7 +125,12 @@ Write `.review/verdict.md`. Include the HEAD short SHA — after the fix
 commits — in the header so the pre-push hook can tell whether the verdict is
 current. In `--spec` mode, write `.review/spec-verdict.md` instead, with the
 header `# Spec verdict — <branch> — <short-sha> — <date>`: a spec review is not
-a code review, and the hook must not read it as one.
+a code review, and the hook must not read it as one. In `--uncommitted` mode
+(`mode` is `uncommitted` in `findings.json`), the third field is
+`<head>+uncommitted`, with `<head>` copied from `findings.json`: the run
+reviewed changes on top of that commit, not the commit. The pre-push hook does
+not accept it for any push, and `/review-postmortem` never scores it as a
+pre-PR catch.
 
 ```markdown
 # Review verdict — <branch> — <short-sha> — <date>
