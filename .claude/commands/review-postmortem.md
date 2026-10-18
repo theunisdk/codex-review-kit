@@ -230,14 +230,20 @@ reports its own update of the record on a third line,
    not from the verdict alone. A lens that never surfaced a defect can still
    have read that code and reasoned about it. The evidence is in `.review/raw/`:
    `out-<lens>.json` holds what each lens returned, before the merge filter,
-   and `log-<lens>.txt` holds what it ran and read. They belong to the last
-   review run, so they are evidence only for a verdict on that run's commit:
-   `jq -r '.head, .mode' .review/findings.json` must print a prefix of the
-   verdict's SHA, then `branch`. Two runs on one commit share that head, so
-   the verdict's findings table must also list the same IDs and titles as
-   `findings.json`. For each miss, search every lens's output and log for the
-   finding's file with the Grep tool, not a shell command, then read the
-   matching parts of the log.
+   and `log-<lens>.txt` holds what it ran and read. Each run of `review.sh`
+   replaces them and `findings.json`, so they are evidence only for the
+   verdict adjudicated from that run. Two checks must pass:
+   - `jq -r '.head, .mode' .review/findings.json` prints a prefix of the
+     verdict's SHA, then `branch`.
+   - The verdict is this worktree's live `.review/verdict.md`, written after
+     the run: `find .review/verdict.md -newer .review/findings.json` prints
+     its path. A second run on the same commit rewrites `findings.json` after
+     the earlier verdict, and an archived verdict is a copy made before the
+     next run. Either way, the logs belong to another run.
+
+   For each miss, search every lens's output and log for the finding's file
+   with the Grep tool, not a shell command, then read the matching parts of
+   the log.
 
    Set `cause_evidence` to one line naming the file and what it shows, such as
    ``log-correctness.txt: read src/a.ts:40-90 and checked the retry order; out-correctness.json: nothing on it``.
@@ -402,7 +408,9 @@ notifies everyone on it. The steps above apply, with these changes:
   the kit that ran then, which a replay does not measure. If its header does
   not name the comparison commit, report `failed — verdict: <why>`.
 - **The lens evidence for step 4 is this worktree's `.review/raw/`**, from
-  the run that the verdict adjudicated. A replay that keeps them copies them
+  the run that the verdict adjudicated. The worktree held only that run, so
+  the `head` and `mode` check alone ties them; skip the `find`, which the
+  replay does not allow. A replay that keeps them copies them
   into the record, at `<record>/raw/log-<lens>.txt` and
   `<record>/raw/out-<lens>.json`; re-scoring a record later reads them there.
 - **Save nothing.** In step 5, print the record instead: the status line,

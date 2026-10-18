@@ -2993,6 +2993,28 @@ test_postmortem_scores_code_present_at_the_verdict() {
   assert "pp1: … and a finding commit this clone lacks" test "$rc" -ne 0
 }
 
+# The lens logs are evidence only for the verdict adjudicated from the run that wrote
+# them; a second run on the same commit has the same head, mode and finding IDs.
+test_postmortem_lens_evidence_belongs_to_one_run() {
+  local repo="$WORK/pe" stub="$WORK/pe-stub" hist cmd
+  cmd="$(grep -o 'find \.review/verdict\.md -newer \.review/findings\.json' "$KIT/.claude/commands/review-postmortem.md" | head -n1)"
+  assert "pe1: the postmortem names the run check" test -n "$cmd"
+  make_repo "$repo"; mkdir -p "$stub"
+  rm -f "$repo/.review/verdict.md"
+  run_review "$repo" "$stub" --lenses correctness
+  sleep 1
+  printf '# Review verdict — change — %s — 2026-01-01\n' "$(git -C "$repo" rev-parse --short HEAD)" > "$repo/.review/verdict.md"
+  assert "pe1: a verdict written after the run owns its logs" \
+    sh -c 'cd "$1" && [ "$($2)" = .review/verdict.md ]' _ "$repo" "$cmd"
+  sleep 1
+  run_review "$repo" "$stub" --lenses correctness
+  hist="$(history_dir "$repo")"
+  assert "pe1: … and no longer does once another run replaced them" \
+    sh -c 'cd "$1" && [ -z "$($2)" ]' _ "$repo" "$cmd"
+  assert "pe1: … nor does its archived copy" \
+    sh -c 'cd "$1" && ls "$2"/code-2026-01-01-*.md && [ -z "$(find "$2" -name "code-2026-01-01-*.md" -newer .review/findings.json)" ]' _ "$repo" "$hist"
+}
+
 test_postmortem_docs_score_per_finding_and_cite_lens_evidence() {
   local pm="$KIT/.claude/commands/review-postmortem.md"
   assert_not "pp2: no whole-file compare decides a finding" grep -qF 'git diff --quiet <verdict-sha>' "$pm"
@@ -3006,7 +3028,7 @@ test_postmortem_docs_score_per_finding_and_cite_lens_evidence() {
   assert "pp2: … and a denied compare says so" grep -qF '`compare_failed: denied: <command>`' "$pm"
   assert "pp2: causes come from the lens logs" grep -qF '`log-<lens>.txt` holds what it ran and read' "$pm"
   assert "pp2: … only when they belong to the verdict's run" grep -qF "jq -r '.head, .mode' .review/findings.json" "$pm"
-  assert "pp2: … and to the run that wrote it, not another on that commit" grep -qF "the same IDs and titles as" "$pm"
+  assert "pp2: … and to the run that wrote it, not another on that commit" grep -qF 'find .review/verdict.md -newer .review/findings.json' "$pm"
   assert "pp2: … searched with the Grep tool, not a shell command" grep -qF "with the Grep tool, not a shell command" "$pm"
   assert "pp2: an unchanged anchor line is not proof the defect was there" grep -qF "rest on code a later commit changed elsewhere" "$pm"
   assert "pp2: a PR path is quoted in every command" grep -qF "put it in single quotes in every" "$pm"
@@ -3968,6 +3990,7 @@ run_tests \
   test_review_tune_docs_name_legacy_archive \
   test_postmortem_finds_the_verdict_for_the_reviewed_commit \
   test_postmortem_scores_code_present_at_the_verdict \
+  test_postmortem_lens_evidence_belongs_to_one_run \
   test_postmortem_docs_score_per_finding_and_cite_lens_evidence \
   test_uncommitted_marker_docs \
   test_expanded_files_hold_no_positional_refs \
