@@ -86,10 +86,15 @@ KIT_SHORT="$(git -C "$HUB" rev-parse --short "$KIT_SHA")"
 KIT_DESC="$(git -C "$HUB" describe --tags --always "$KIT_SHA" 2>/dev/null || echo "$KIT_SHORT")"
 
 RUN_TMP="$(mktemp -d)" || die "no temp dir"
+# no spoke hook runs, here or in anything this starts
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null
 CUR_WT=""; CHILD=""
 stop_child() {
   [ -n "$CHILD" ] || return 0
+  local s=0
   kill -TERM -- "-$CHILD" 2>/dev/null || kill -TERM "$CHILD" 2>/dev/null
+  while [ "$s" -lt 10 ] && kill -0 "$CHILD" 2>/dev/null; do sleep 0.5; s=$((s + 1)); done
+  kill -KILL -- "-$CHILD" 2>/dev/null
   wait "$CHILD" 2>/dev/null; CHILD=""
 }
 remove_worktree() { # prints why on failure
@@ -106,7 +111,7 @@ on_exit() {
   local rc=$?
   {
     stop_child; remove_worktree
-    [ -z "$CUR_PR" ] || echo "review-replay: failed — PR #$CUR_PR: interrupted (rc=$rc); nothing was recorded for it"
+    [ -z "$CUR_PR" ] || echo "review-replay: failed — PR #$CUR_PR: interrupted: rc=$rc, nothing was recorded for it"
     rm -rf "$RUN_TMP"
   } >&3 2>&4
 }
@@ -117,17 +122,28 @@ trap 'exit 143' TERM
 in_dir() { cd "$1" && shift && exec "$@"; }
 
 # run_child <secs> <cmd...> — in its own process group with stdin closed, so an
-# interrupt or a timeout stops everything it started (review.sh's lenses too)
+# interrupt or a timeout stops everything it started (review.sh's lenses too).
+# Returns 124 when it timed out.
 run_child() {
   local secs="$1" rc w; shift
+  rm -f "$RUN_TMP/timed-out"
   set -m; "$@" < /dev/null & CHILD=$!; set +m
   ( s=0; while [ "$s" -lt "$secs" ]; do sleep 2; s=$((s + 2)); kill -0 "$CHILD" 2>/dev/null || exit 0; done
-    kill -TERM -- "-$CHILD" 2>/dev/null; sleep 5; kill -KILL -- "-$CHILD" 2>/dev/null ) &
+    : > "$RUN_TMP/timed-out"; kill -TERM -- "-$CHILD" 2>/dev/null; sleep 5; kill -KILL -- "-$CHILD" 2>/dev/null ) &
   w=$!
   wait "$CHILD"; rc=$?
   kill "$w" 2>/dev/null; wait "$w" 2>/dev/null
   CHILD=""
+  [ ! -e "$RUN_TMP/timed-out" ] || case "$rc" in 137|143) rc=124 ;; esac
   return "$rc"
+}
+# exit_why <rc> <secs> — names a timeout
+exit_why() {
+  case "$1" in
+    124) echo "timed out after ${2}s" ;;
+    137|143) echo "was killed (rc $1; the timeout is ${2}s)" ;;
+    *) echo "exited $1" ;;
+  esac
 }
 
 KIT_DIR="$RUN_TMP/kit"; mkdir -p "$KIT_DIR"
@@ -141,10 +157,14 @@ if [ "${REVIEW_SKIP_AUTH_CHECK:-0}" != 1 ] && ! codex login status > /dev/null 2
   die "not authenticated to Codex — run 'codex login'"
 fi
 
+is_ancestor() { # is_ancestor <a> <b> — sets ANC to yes or no; fails only on a git error
+  git -C "$SPOKE" merge-base --is-ancestor "$1" "$2" 2> "$RUN_TMP/anc.err"
+  case $? in 0) ANC=yes ;; 1) ANC=no ;; *) G_ERR="git merge-base --is-ancestor ${1:0:7} $2: $(err_of "$RUN_TMP/anc.err")"; return 1 ;; esac
+}
 have_commit() { git -C "$SPOKE" cat-file -e "$1^{commit}" 2>/dev/null; }
 fetch_commits() { # fetch_commits <ref|sha>... — objects only: no ref and no FETCH_HEAD is written
-  run_with_timeout "$NET_TIMEOUT" git -C "$SPOKE" -c gc.auto=0 -c maintenance.auto=false fetch --quiet --no-write-fetch-head origin "$@" \
-    > "$RUN_TMP/fetch.err" 2>&1 || { G_ERR="git fetch origin $*: $(err_of "$RUN_TMP/fetch.err")"; return 1; }
+  run_with_timeout "$NET_TIMEOUT" git -C "$SPOKE" -c gc.auto=0 -c maintenance.auto=false fetch --quiet --no-write-fetch-head --no-tags --refmap= origin "$@" \
+    < /dev/null > "$RUN_TMP/fetch.err" 2>&1 || { G_ERR="git fetch origin $* $(exit_why $? "$NET_TIMEOUT"): $(err_of "$RUN_TMP/fetch.err")"; return 1; }
 }
 
 DEFAULT_SHA="$(git -C "$SPOKE" ls-remote origin HEAD 2>/dev/null | awk '$2 == "HEAD" { print $1; exit }')"
@@ -162,7 +182,7 @@ err_of() { head -c 300 "$1" 2>/dev/null | tr '\n' ' '; }
 
 gh_to() { # gh_to <file> <gh args...> — fails with gh's error
   local f="$1"; shift
-  run_with_timeout "$NET_TIMEOUT" gh "$@" > "$f.raw" 2> "$f.err" || { G_ERR="gh $*: $(err_of "$f.err")"; return 1; }
+  run_with_timeout "$NET_TIMEOUT" gh "$@" > "$f.raw" 2> "$f.err" || { G_ERR="gh $* $(exit_why $? "$NET_TIMEOUT"): $(err_of "$f.err")"; return 1; }
   mv "$f.raw" "$f"
 }
 gh_pages() { # gh_pages <file> <api path> — every page, as one array
@@ -181,6 +201,7 @@ gather() {
   gh_pages "$GH/reviews.json" "repos/$REPO/pulls/$n/reviews" || { fail_at github "$G_ERR"; return; }
   gh_pages "$GH/comments.json" "repos/$REPO/pulls/$n/comments" || { fail_at github "$G_ERR"; return; }
   gh_pages "$GH/issue-comments.json" "repos/$REPO/issues/$n/comments" || { fail_at github "$G_ERR"; return; }
+  jq -e 'type == "object"' "$GH/pull.json" > /dev/null 2>&1 || { fail_at github "unparseable reply from pulls/$n"; return; }
   jq -r '.commits[].oid' "$GH/pr.json" > "$GH/pr-commits.txt" && [ -s "$GH/pr-commits.txt" ] \
     || { fail_at github "gh pr view listed no commits for PR #$n"; return; }
   : > "$GH/statuses.pages"
@@ -205,9 +226,13 @@ gather() {
 REPO_OWNED=".review/rubric.md .review/learnings.md .review/config.sh .review/analyzers.local.sh .review/prompts.local"
 is_hub_kit() { grep -qE '^kit: [^ ]*codex-review-kit' "$1" 2>/dev/null; }
 overlay() {
-  local wt="$1" p src from="" default_kit
+  local wt="$1" p src from="" default_kit at_pr at_merge
   default_kit="$RUN_TMP/default-kit-version"
-  git -C "$SPOKE" show "$DEFAULT_SHA:.review/kit-version" > "$default_kit" 2>/dev/null || : > "$default_kit"
+  p="$(git -C "$SPOKE" ls-tree "$DEFAULT_SHA" -- .review/kit-version)" \
+    || { fail_at kit "cannot list .review/kit-version on the default branch (${DEFAULT_SHA:0:7})"; return; }
+  : > "$default_kit"
+  [ -z "$p" ] || git -C "$SPOKE" show "$DEFAULT_SHA:.review/kit-version" > "$default_kit" \
+    || { fail_at kit "cannot read .review/kit-version on the default branch (${DEFAULT_SHA:0:7})"; return; }
   if is_hub_kit "$wt/.review/kit-version"; then
     from=pr
   elif [ -e "$wt/.review" ]; then
@@ -224,6 +249,14 @@ overlay() {
   p="$(git -C "$wt" ls-files -s -- .review scripts .claude .codex .githooks .claude-plugin REVIEW.md OPERATING.md \
     | awk -F '\t' '{ split($1, m, " ") } m[1] == "120000" { print $2 }' | head -n3 | tr '\n' ' ')"
   [ -z "$p" ] || { skip_as "symlink in the kit's paths at ${FIRST:0:7} (${p% }): the kit overlay would write through it"; return; }
+  # review.sh runs these two; a version that never merged would run unreviewed code
+  [ "$from" != pr ] || [ -n "$MERGED" ] || { fail_at github "pulls/$CUR_PR has no merge_commit_sha to check its config against"; return; }
+  [ "$from" != pr ] || for p in .review/config.sh .review/analyzers.local.sh; do
+    at_pr="$(git -C "$SPOKE" ls-tree "$FIRST" -- "$p")" || { fail_at kit "cannot list $p at ${FIRST:0:7}"; return; }
+    at_merge="$(git -C "$SPOKE" ls-tree "$MERGED" -- "$p")" || { fail_at kit "cannot list $p at ${MERGED:0:7}"; return; }
+    [ "$at_pr" = "$at_merge" ] \
+      || { skip_as "$p at ${FIRST:0:7} differs from the merged one (${MERGED:0:7}): the replay would run code that never merged"; return; }
+  done
   OWNED="{}"
   for p in $REPO_OWNED; do
     if [ "$from" = pr ] && [ -e "$wt/$p" ]; then
@@ -250,8 +283,9 @@ overlay() {
     "$KIT_SHORT" "$KIT_DESC" "$(date +%Y-%m-%d)" > "$wt/.review/kit-version"
 }
 
-# Read-only by construction: no Edit or Write tool, every Bash command not allowed here is
-# denied, and gh is denied outright, so a replay cannot comment, file or push.
+# Read-only by construction: no settings file is loaded (a user's allow rules would apply under
+# dontAsk), there is no Edit or Write tool, every Bash command not allowed here is denied, and
+# gh is denied outright, so a replay cannot comment, file or push.
 READ_RULES=("Bash(git log:*)" "Bash(git show:*)" "Bash(git diff:*)" "Bash(git grep:*)" "Bash(git rev-parse:*)"
   "Bash(git rev-list:*)" "Bash(git merge-base:*)" "Bash(git cat-file:*)" "Bash(git blame:*)" "Bash(jq:*)"
   "Bash(grep:*)" "Bash(wc:*)")
@@ -260,7 +294,7 @@ claude_call() { # claude_call <out.json> <prompt> — in the worktree
   local model_args=()
   [ -z "$MODEL" ] || model_args=(--model "$MODEL")
   run_child "$CLAUDE_TIMEOUT" in_dir "$CUR_WT" claude -p "$prompt" ${model_args[@]+"${model_args[@]}"} \
-    --output-format json --no-session-persistence --strict-mcp-config \
+    --setting-sources "" --output-format json --no-session-persistence --strict-mcp-config \
     --settings '{"disableAllHooks":true}' --max-budget-usd "$BUDGET" \
     --tools "Read,Grep,Glob,Bash" --permission-mode dontAsk \
     --disallowedTools "Bash(gh:*)" "Bash(git push:*)" "Bash(git commit:*)" "Bash(git fetch:*)" \
@@ -268,15 +302,15 @@ claude_call() { # claude_call <out.json> <prompt> — in the worktree
   rc=$?
   COST="$(jq -n --argjson a "${COST:-0}" --argjson b "$(jq '.total_cost_usd // 0' "$out" 2>/dev/null || echo 0)" '$a + $b')"
   if [ "$rc" != 0 ] && ! jq -e . "$out" > /dev/null 2>&1; then
-    G_ERR="claude exited $rc: $(err_of "$out.err")"; return 1
+    G_ERR="claude $(exit_why "$rc" "$CLAUDE_TIMEOUT"): $(err_of "$out.err")"; return 1
   fi
   jq -e '.is_error != true and (.result | type) == "string"' "$out" > /dev/null 2>&1 \
     || { G_ERR="claude: $(jq -r '[.subtype, (.result // "" | .[0:200])] | map(select(. != null)) | join(": ")' "$out" 2>/dev/null)"; return 1; }
 }
 
 replay_pr() {
-  local n="$1" base_tip base wt branch verdict body json rel first_line
-  REC="$STORE/pr$n-$KIT_SHORT"; COST=0; R_COUNTS=""; CODEX_TOKENS=0
+  local n="$1" base_tip base wt branch verdict body json rel first_line separates
+  REC="$STORE/pr$n-$KIT_SHORT"; COST=0; R_COUNTS=""; CODEX_TOKENS=0; UNFETCHED=0
   if [ -z "${GATHERED:-}" ]; then
     REC_TMP="$RUN_TMP/pr$n"; rm -rf "$REC_TMP"; mkdir -p "$REC_TMP"
     gather "$n" || return
@@ -288,31 +322,36 @@ replay_pr() {
   short="${FIRST:0:7}"
   base_tip="$(jq -r '.base.sha // empty' "$GH/pull.json")"
   branch="$(jq -r '.headRefName // "replay"' "$GH/pr.json")"
+  MERGED="$(jq -r '.merge_commit_sha // empty' "$GH/pull.json")"
   [ -n "$base_tip" ] || { fail_at github "pulls/$n has no base.sha"; return; }
 
   # --- fetch: the PR head, the reviewed commit, its base; objects only
   fetch_commits "refs/pull/$n/head" || { fail_at fetch "$G_ERR"; return; }
-  for rel in "$FIRST" "$base_tip"; do
+  for rel in "$FIRST" "$base_tip" ${MERGED:+"$MERGED"}; do
     have_commit "$rel" || fetch_commits "$rel" || { fail_at fetch "$G_ERR"; return; }
   done
   # commits CodeRabbit commented on after a force-push; a miss surfaces as compare_failed
   jq -r --arg cr "$CR_LOGIN" '.[] | select(.user.login == $cr) | (.original_commit_id // .commit_id // empty)' \
-    "$GH/comments.json" "$GH/reviews.json" 2>/dev/null | sort -u | while read -r rel; do
-      have_commit "$rel" || fetch_commits "$rel" || warn "PR #$n: cannot fetch $rel, findings on it will be unscored"
-    done
+    "$GH/comments.json" "$GH/reviews.json" 2>/dev/null | sort -u > "$REC_TMP/commented.txt"
+  UNFETCHED=0
+  while read -r rel; do
+    have_commit "$rel" || fetch_commits "$rel" || { UNFETCHED=$((UNFETCHED + 1)); warn "PR #$n: cannot fetch $rel, findings on it will be unscored"; }
+  done < "$REC_TMP/commented.txt"
 
   # --- base: where the reviewed commit left the base branch
-  if git -C "$SPOKE" merge-base --is-ancestor "$FIRST" "$base_tip" 2>/dev/null; then
+  is_ancestor "$FIRST" "$base_tip" || { fail_at base "$G_ERR"; return; }
+  if [ "$ANC" = yes ]; then
     # merged with a merge commit: the base branch before it is the merge's first parent
-    rel="$(jq -r '.merge_commit_sha // empty' "$GH/pull.json")"
-    if [ -n "$rel" ] && { have_commit "$rel" || fetch_commits "$rel"; } \
-       && git -C "$SPOKE" rev-parse -q --verify "$rel^2" > /dev/null \
-       && git -C "$SPOKE" merge-base --is-ancestor "$FIRST" "$rel^2" \
-       && ! git -C "$SPOKE" merge-base --is-ancestor "$FIRST" "$rel^1"; then
-      base_tip="$(git -C "$SPOKE" rev-parse "$rel^1")"
-    else
-      fail_at base "the base branch tip ${base_tip:0:7} already contains $short, and no merge commit separates them"; return
+    rel="$MERGED"; separates=no
+    if [ -n "$rel" ] && git -C "$SPOKE" rev-parse -q --verify "$rel^2" > /dev/null; then
+      is_ancestor "$FIRST" "$rel^2" || { fail_at base "$G_ERR"; return; }
+      if [ "$ANC" = yes ]; then
+        is_ancestor "$FIRST" "$rel^1" || { fail_at base "$G_ERR"; return; }
+        [ "$ANC" = yes ] || separates=yes
+      fi
     fi
+    [ "$separates" = yes ] || { fail_at base "the base branch tip ${base_tip:0:7} already contains $short, and no merge commit separates them"; return; }
+    base_tip="$(git -C "$SPOKE" rev-parse "$rel^1")"
   fi
   base="$(git -C "$SPOKE" merge-base "$FIRST" "$base_tip")" || { fail_at base "no merge base of $short and ${base_tip:0:7}"; return; }
 
@@ -333,7 +372,7 @@ replay_pr() {
   rel=$?
   CODEX_TOKENS="$(cat "$wt"/.review/raw/log-*.txt 2>/dev/null | awk '/^tokens used$/ { getline; gsub(/,/, ""); s += $0 } END { print s + 0 }')"
   [ -f "$wt/.review/findings.json" ] && cp "$wt/.review/findings.json" "$wt/.review/findings.md" "$REC_TMP/" 2>/dev/null
-  [ "$rel" = 0 ] || { fail_at review "review.sh exited $rel: $(grep -E 'error:' "$REC_TMP/review.log" | tail -n1)"; return; }
+  [ "$rel" = 0 ] || { fail_at review "review.sh $(exit_why "$rel" "$REVIEW_TIMEOUT"): $(grep -E 'error:' "$REC_TMP/review.log" | tail -n1)"; return; }
   jq -e . "$REC_TMP/findings.json" > /dev/null 2>&1 || { fail_at review "no readable .review/findings.json"; return; }
   [ "$(jq '.changed_files // 0' "$REC_TMP/findings.json")" -gt 0 ] \
     || { fail_at review "nothing was reviewed (changed_files 0) over ${base:0:7}..$short"; return; }
@@ -396,12 +435,16 @@ Its \"Replay mode\" section says what changes: the GitHub data is already in .re
   R_COUNTS="$(jq -r '"caught \(.counts.caught) / missed \(.counts.missed) / rejected-wrongly \(.counts.rejected_wrongly) / noise \(.counts.noise) / unscored \(.counts.unscored)"' "$json")"
 }
 
-# keep the PR's artifacts, whatever the outcome; a re-run replaces them
-save_record() {
-  rm -rf "$REC.tmp.$$" "$REC.old.$$" && cp -R "$REC_TMP" "$REC.tmp.$$" && printf '%s\n' "$R_LINE" > "$REC.tmp.$$/outcome.txt" \
-    && { [ ! -e "$REC" ] || mv "$REC" "$REC.old.$$"; } || return 1
-  mv "$REC.tmp.$$" "$REC" || { [ ! -e "$REC.old.$$" ] || mv "$REC.old.$$" "$REC"; return 1; }
-  rm -rf "$REC.old.$$"
+# keep the PR's artifacts, whatever the outcome, in $LOGS: a re-run replaces them, except
+# that a scored record is only ever replaced by another one
+save_record() { # save_record <rc>
+  LOGS="$REC"
+  [ "$1" = 0 ] || ! grep -q '^review-replay: replayed — ' "$REC/outcome.txt" 2>/dev/null || LOGS="$REC.last-unscored"
+  rm -rf "$LOGS.tmp.$$" "$LOGS.old.$$" && cp -R "$REC_TMP" "$LOGS.tmp.$$" && printf '%s\n' "$R_LINE" > "$LOGS.tmp.$$/outcome.txt" \
+    && { [ ! -e "$LOGS" ] || mv "$LOGS" "$LOGS.old.$$"; } || return 1
+  mv "$LOGS.tmp.$$" "$LOGS" || { [ ! -e "$LOGS.old.$$" ] || mv "$LOGS.old.$$" "$LOGS"; return 1; }
+  rm -rf "$LOGS.old.$$"
+  [ "$1" != 0 ] || rm -rf "$REC.last-unscored"
 }
 
 # --- the PR list -----------------------------------------------------------
@@ -416,13 +459,17 @@ report() { # report <rc> <n>
   esac
   TOTAL_COST="$(jq -n --argjson a "$TOTAL_COST" --argjson b "${COST:-0}" '$a + $b')"
   TOTAL_TOKENS=$((TOTAL_TOKENS + ${CODEX_TOKENS:-0}))
-  if [ -d "${REC_TMP:-}" ] && ! save_record; then
-    [ "$1" != 0 ] || { R_LINE="review-replay: failed — PR #$2: record: cannot write $REC"; set -- 1 "$2"; }
+  [ "$1" != 0 ] || [ "${UNFETCHED:-0}" = 0 ] || R_LINE="$R_LINE · $UNFETCHED commented commit(s) not fetched"
+  LOGS=""
+  if [ -d "${REC_TMP:-}" ] && ! save_record "$1"; then
+    LOGS=""
+    if [ "$1" = 0 ]; then R_LINE="review-replay: failed — PR #$2: record: cannot write $REC"; set -- 1 "$2"
+    else R_LINE="$R_LINE (logs not saved: cannot write $REC)"; fi
   fi
   case "$1" in
     0) N_REPLAYED=$((N_REPLAYED + 1)); printf '%s\n' "$REC/record.json" >> "$RECORDS"; R_LINE="$R_LINE · record $REC/postmortem.md" ;;
     2) N_SKIPPED=$((N_SKIPPED + 1)) ;;
-    *) N_FAILED=$((N_FAILED + 1)); [ ! -d "${REC:-}" ] || R_LINE="$R_LINE (logs: $REC)" ;;
+    *) N_FAILED=$((N_FAILED + 1)); [ -z "$LOGS" ] || R_LINE="$R_LINE (logs: $LOGS)" ;;
   esac
   printf '%s\n' "$R_LINE"
 }
@@ -442,6 +489,7 @@ if [ -n "$RECENT" ]; then
   LIST="$RUN_TMP/merged.json"
   gh_to "$LIST" pr list -R "$REPO" --state merged --limit "$SCAN" --json number,mergedAt \
     || die "cannot list merged PRs: $G_ERR"
+  jq -e 'type == "array"' "$LIST" > /dev/null 2>&1 || die "gh pr list returned no PR list: $(head -c 200 "$LIST")"
   FOUND=0
   for n in $(jq -r 'sort_by(.mergedAt) | reverse | .[].number' "$LIST"); do
     [ "$FOUND" -lt "$RECENT" ] || break

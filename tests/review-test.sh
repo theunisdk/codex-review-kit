@@ -2926,7 +2926,7 @@ case "$2" in
   *) echo "unexpected prompt" >&2; exit 1 ;;
 esac
 [ ! -e .review/replay ] || touch "$CLAUDE_STUB_DIR/$kind.saw-github-data"
-[ -z "${CLAUDE_STUB_SLEEP:-}" ] || { touch "$CLAUDE_STUB_DIR/started"; sleep "$CLAUDE_STUB_SLEEP"; }
+[ -z "${CLAUDE_STUB_SLEEP:-}" ] || { echo "$$" > "$CLAUDE_STUB_DIR/started"; sleep "$CLAUDE_STUB_SLEEP"; }
 pr="$(printf '%s\n' "$2" | sed -n '1s/.* PR #\([0-9]*\).*/\1/p')"
 sed -e "s/@SHA@/$(git rev-parse HEAD)/g" -e "s/@SHORT@/$(git rev-parse --short HEAD)/g" -e "s/@PR@/$pr/g" \
   "$CLAUDE_STUB_DIR/$kind.txt" > "$CLAUDE_STUB_DIR/$kind.reply"
@@ -2948,7 +2948,7 @@ gh_json() { # gh_json <stubdir> <key> <json>
 gh_pr_fixture() { # gh_pr_fixture <stubdir> <n> <first-reviewed sha> <head sha> <base tip>
   local d="$1" n="$2" a="$3" b="$4" m="$5" cr='{"login":"coderabbitai[bot]"}'
   gh_json "$d" "pr-view-$n" "{\"number\":$n,\"url\":\"https://example.invalid/pull/$n\",\"author\":{\"login\":\"dev\"},\"state\":\"MERGED\",\"baseRefName\":\"main\",\"headRefName\":\"feat-$n\",\"headRefOid\":\"$b\",\"commits\":[{\"oid\":\"$a\"},{\"oid\":\"$b\"}]}"
-  gh_json "$d" "api-repos_o_r_pulls_$n" "{\"number\":$n,\"base\":{\"sha\":\"$m\"}}"
+  gh_json "$d" "api-repos_o_r_pulls_$n" "{\"number\":$n,\"base\":{\"sha\":\"$m\"},\"merge_commit_sha\":\"$m\"}"
   # an empty-bodied review (a thread reply) and a rate-limited status come earlier, and neither is a review
   gh_json "$d" "api-repos_o_r_pulls_${n}_reviews" "[{\"user\":$cr,\"body\":\"\",\"commit_id\":\"$b\",\"submitted_at\":\"2026-01-01T09:00:00Z\"},{\"user\":$cr,\"body\":\"**Actionable comments posted: 1**\",\"commit_id\":\"$a\",\"submitted_at\":\"2026-01-01T10:00:00Z\"}]"
   gh_json "$d" "api-repos_o_r_pulls_${n}_comments" "[{\"id\":7,\"user\":$cr,\"path\":\"src.txt\",\"original_commit_id\":\"$a\",\"body\":\"off by one\"}]"
@@ -2961,8 +2961,9 @@ gh_pr_fixture() { # gh_pr_fixture <stubdir> <n> <first-reviewed sha> <head sha> 
 # PR 1: A (first reviewed) then B, squash-merged as S · PR 2: a pre-hub kit
 # PR 3: PR 1's commits again · PR 4: a GitHub read fails · PR 5: CodeRabbit never reviewed it
 # PR 6: merged with a merge commit, reviewed only by a status · PR 7: still open · PR 8: a symlinked REVIEW.md
+# PR 9: its reviewed commit has a .review/config.sh that never merged
 replay_fixture() { # replay_fixture <id>
-  local id="$1" m a b s p c6 m6 l8
+  local id="$1" m a b s p c6 m6 l8 c9
   RS="$WORK/$id-spoke"; RREMOTE="$WORK/$id-remote.git"; RHUB="$WORK/$id-hub"
   RGH="$WORK/$id-gh"; RCL="$WORK/$id-claude"; RCX="$WORK/$id-codex"
   mkdir -p "$RGH" "$RCL" "$RCX"
@@ -2992,11 +2993,13 @@ replay_fixture() { # replay_fixture <id>
     printf 'six\n' > six.txt && git add six.txt && git commit -qm six
     git checkout -qb link8 main~1
     ln -s ../../../outside.txt REVIEW.md && git add REVIEW.md && git commit -qm link
+    git checkout -qb config9 main~1
+    printf 'LENSES="correctness"\ntouch /tmp/never\n' > .review/config.sh && git commit -qam config
     git checkout -q main
     git merge -q --no-ff merged6 -m 'merge six'
   )
   m=$(git -C "$src" rev-parse main); a=$(git -C "$src" rev-parse feat~1); b=$(git -C "$src" rev-parse feat)
-  p=$(git -C "$src" rev-parse prehub); c6=$(git -C "$src" rev-parse merged6); l8=$(git -C "$src" rev-parse link8)
+  p=$(git -C "$src" rev-parse prehub); c6=$(git -C "$src" rev-parse merged6); l8=$(git -C "$src" rev-parse link8); c9=$(git -C "$src" rev-parse config9)
   git clone -q --bare "$src" "$RREMOTE"
   git -C "$RREMOTE" config uploadpack.allowAnySHA1InWant true
   git -C "$RREMOTE" update-ref refs/pull/1/head "$b"
@@ -3007,7 +3010,8 @@ replay_fixture() { # replay_fixture <id>
   git -C "$RREMOTE" update-ref refs/pull/6/head "$c6"
   git -C "$RREMOTE" update-ref refs/pull/7/head "$b"
   git -C "$RREMOTE" update-ref refs/pull/8/head "$l8"
-  git -C "$RREMOTE" for-each-ref --format='delete %(refname)' refs/heads/feat refs/heads/prehub refs/heads/merged6 refs/heads/link8 \
+  git -C "$RREMOTE" update-ref refs/pull/9/head "$c9"
+  git -C "$RREMOTE" for-each-ref --format='delete %(refname)' refs/heads/feat refs/heads/prehub refs/heads/merged6 refs/heads/link8 refs/heads/config9 \
     | git -C "$RREMOTE" update-ref --stdin
   git clone -q "$RREMOTE" "$RS"
   printf '.claude/worktrees/\n' >> "$RS/.git/info/exclude"
@@ -3024,6 +3028,7 @@ replay_fixture() { # replay_fixture <id>
   gh_pr_fixture "$RGH" 7 "$a" "$b" "$m"
   sed 's/"MERGED"/"OPEN"/' "$RGH/pr-view-7.json" > "$RGH/pr-view-7.tmp" && mv "$RGH/pr-view-7.tmp" "$RGH/pr-view-7.json"
   gh_pr_fixture "$RGH" 8 "$l8" "$l8" "$m"
+  gh_pr_fixture "$RGH" 9 "$c9" "$c9" "$m"
   gh_json "$RGH" pr-list '[{"number":5,"mergedAt":"2026-01-05T00:00:00Z"},{"number":1,"mergedAt":"2026-01-04T00:00:00Z"},{"number":3,"mergedAt":"2026-01-01T00:00:00Z"}]'
   RA="$a"
   finding 'replayed finding' > "$RCX/correctness.json"
@@ -3072,8 +3077,10 @@ no_replay_worktrees() { # the spoke has only its own checkout, and no replay dir
 test_replay_scores_reports_and_writes_nothing_else() {
   local rc rec refs_before common short kit
   replay_fixture r1
+  # a fetch refspec for pull refs would let a fetch update refs/remotes/origin/pr/*
+  git -C "$RS" config --add remote.origin.fetch '+refs/pull/*/head:refs/remotes/origin/pr/*'
   refs_before="$(git -C "$RS" for-each-ref)"
-  run_replay --limit 10 1 2 4 5 6 7 8; rc=$?
+  run_replay --limit 10 1 2 4 5 6 7 8 9; rc=$?
   common="$(cd "$RS" && cd "$(git rev-parse --git-common-dir)" && pwd -P)"
   short="$(git -C "$RS" rev-parse --short "$RA")"; kit="$(git -C "$RHUB" rev-parse --short main)"
   rec="$common/review-replay/pr1-$kit"
@@ -3083,7 +3090,7 @@ test_replay_scores_reports_and_writes_nothing_else() {
   assert "r1: a pre-hub kit is skipped with its reason" \
     grep -qE '^review-replay: skipped — PR #2: pre-hub review kit at [0-9a-f]{7} \(https://github.com/theunisdk/ai-dev\)' "$LOG"
   assert "r1: a failed GitHub read is a failure, not a skip" \
-    grep -qE '^review-replay: failed — PR #4: github: gh api --paginate repos/o/r/pulls/4/comments: HTTP 404' "$LOG"
+    grep -qE '^review-replay: failed — PR #4: github: gh api --paginate repos/o/r/pulls/4/comments exited 1: HTTP 404' "$LOG"
   assert "r1: a PR CodeRabbit never reviewed is skipped" \
     grep -qxF 'review-replay: skipped — PR #5: CodeRabbit has not reviewed PR #5' "$LOG"
   assert "r1: a merge-commit PR reviewed only by a status is replayed from the merge's first parent" \
@@ -3094,8 +3101,10 @@ test_replay_scores_reports_and_writes_nothing_else() {
   assert "r1: a symlink in the kit's paths is skipped" \
     grep -qE "^review-replay: skipped — PR #8: symlink in the kit's paths at [0-9a-f]{7} \(REVIEW.md\)" "$LOG"
   assert "r1: … and nothing is written through it" test ! -e "$RS/outside.txt"
+  assert "r1: a reviewed commit whose config.sh never merged is skipped" \
+    grep -qE '^review-replay: skipped — PR #9: .review/config.sh at [0-9a-f]{7} differs from the merged one' "$LOG"
   assert "r1: the aggregate sums the scorecards" \
-    grep -qF 'review-replay: aggregate — replayed 2 / skipped 4 / failed 1 — caught 2 / missed 2 (wrong lens 2 / tracing 0 / threshold 0 / structural 0) / rejected-wrongly 0 / noise 0 / unscored 0' "$LOG"
+    grep -qF 'review-replay: aggregate — replayed 2 / skipped 5 / failed 1 — caught 2 / missed 2 (wrong lens 2 / tracing 0 / threshold 0 / structural 0) / rejected-wrongly 0 / noise 0 / unscored 0' "$LOG"
   assert "r1: … and groups lessons by cause" \
     sh -c 'grep -qxF "lessons — wrong_lens (2 missed):" "$1" && grep -qF "PR #1 propose (hub) .review/prompts/correctness.md" "$1"' _ "$LOG"
   assert "r1: … and the cost line covers every PR" grep -qxF 'review-replay: cost — claude $1.00, codex 0 tokens, failed and skipped PRs included' "$LOG"
@@ -3114,10 +3123,18 @@ test_replay_scores_reports_and_writes_nothing_else() {
     grep -qE '^(pr comment|pr review|issue create|issue comment|label create)|(^| )(-X|--method|-f|-F|--field|--raw-field|--input)( |$)' "$RGH/calls.log"
   assert "r1: claude never gets gh, Edit or Write" \
     sh -c '[ "$(grep -c . "$1")" -eq 4 ] && ! grep -vF -- "--disallowedTools Bash(gh:*)" "$1" | grep -q . && ! grep -vF -- "--tools Read,Grep,Glob,Bash" "$1" | grep -q .' _ "$RCL/calls.log"
+  assert "r1: … nor any settings file, whose allow rules would apply" \
+    sh -c '! grep -vF -- "--setting-sources  --output-format" "$1" | grep -q .' _ "$RCL/calls.log"
   assert "r1: the spoke's refs are untouched" test "$(git -C "$RS" for-each-ref)" = "$refs_before"
   assert "r1: … and no FETCH_HEAD is written" test ! -e "$common/FETCH_HEAD"
   assert "r1: … and its checkout is clean" test -z "$(git -C "$RS" status --porcelain)"
   assert_not "r1: the replay verdict stays out of the review history" sh -c 'ls "$1"/review-history/code-* 2>/dev/null | grep -q .' _ "$common"
+
+  printf '1\n' > "$RCX/correctness.rc"; rm "$RCX/correctness.json"
+  run_replay 1
+  assert "r1: a failed re-run keeps the scored record" grep -qxF '<!-- review-replay:v1 -->' "$rec/postmortem.md"
+  assert "r1: … and keeps its own logs beside it" \
+    sh -c 'test -s "$1.last-unscored/review.log" && grep -qF "(logs: $1.last-unscored)" "$2"' _ "$rec" "$LOG"
 }
 
 test_replay_failure_is_reported_and_cleaned_up() {
@@ -3165,7 +3182,8 @@ test_replay_interrupt_removes_the_worktree() {
   kill -TERM "$pid"; wait "$pid"; rc=$?
   assert "r3: an interrupted replay exits 143" test "$rc" -eq 143
   assert "r3: … and removes its worktree" no_replay_worktrees "$RS"
-  assert "r3: … and says the PR was interrupted" grep -qxF 'review-replay: failed — PR #1: interrupted (rc=143); nothing was recorded for it' "$LOG"
+  assert "r3: … and says the PR was interrupted" grep -qxF 'review-replay: failed — PR #1: interrupted: rc=143, nothing was recorded for it' "$LOG"
+  assert "r3: … and stops what it started" sh -c 'test -s "$1" && ! kill -0 "$(cat "$1")" 2>/dev/null' _ "$RCL/started"
 }
 
 test_replay_recent_and_limit() {
@@ -3174,6 +3192,10 @@ test_replay_recent_and_limit() {
   assert "r4: --recent passes over a PR CodeRabbit never reviewed" grep -qF '(1 merged PR(s) CodeRabbit never reviewed passed over)' "$LOG"
   assert "r4: … replays the most recent reviewed one" grep -qE '^review-replay: replayed — PR #1 ' "$LOG"
   assert "r4: … and skips the rest past --limit" grep -qxF 'review-replay: skipped — PR #3: --limit 1 reached' "$LOG"
+  gh_json "$RGH" pr-list '{"message":"Bad credentials"}'
+  run_replay --recent 2
+  assert "r4: a PR list that is not a list is an error, not an empty run" \
+    sh -c 'grep -qF "gh pr list returned no PR list" "$1" && ! grep -q aggregate "$1"' _ "$LOG"
 }
 
 test_replay_docs_post_nothing() {
