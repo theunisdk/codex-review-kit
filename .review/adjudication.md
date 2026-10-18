@@ -81,7 +81,9 @@ Exactly one disposition per finding:
   link is the responsible disposition, not an ignored finding.
 - **REJECT** — verified wrong, out of scope per `.review/rubric.md`, or a
   deliberate choice. **A one-line reason is mandatory.** "Not an issue" is not a
-  reason; "callers already hold the lock, see `pool.rs:88`" is.
+  reason; "callers already hold the lock, see `pool.rs:88`" is. A design
+  document that accepts a risk is not a reason when a cheap guard closes it (a
+  conditional write, compare-and-swap, If-Match): ESCALATE, naming the guard.
 - **ESCALATE** — real, but the fix is a judgement call, a scope increase, or
   touches something you should not decide alone. Leave the code untouched.
 
