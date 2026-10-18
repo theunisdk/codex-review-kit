@@ -284,11 +284,17 @@ EOF
   assert "pr: rule still applied beside shadowing modules" test "$(pr_status "$repo")" = applied
   assert "pr: inherited rules are named as unread" grep -qF 'through `inheritance: true` are not read' "$repo/.review/findings.md"
 
+  # an undotted name is not a documented gate config: named, not read, and it
+  # never shadows the .ts config the gate does read
   mv "$repo/.coderabbit.yaml" "$repo/coderabbit.yml"
   run_review "$repo" "$stub" --lenses correctness
-  assert "pr: undotted coderabbit.yml is read" test "$(pr_status "$repo")" = applied
+  assert "pr: undotted coderabbit.yml is not_inspected" test "$(pr_status "$repo")" = not_inspected
   assert "pr: undotted config named" jq -e '.path_rules.config == "coderabbit.yml"' "$repo/.review/findings.json"
-  rm "$repo/coderabbit.yml"
+  assert_not "pr: undotted config's rule kept out" grep -qF 'PATHRULE-STORE-91c2' "$prompt"
+  printf 'export default {}\n' > "$repo/.coderabbit.config.ts"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "pr: .ts config wins over an undotted one" jq -e '.path_rules.config == ".coderabbit.config.ts"' "$repo/.review/findings.json"
+  rm "$repo/coderabbit.yml" "$repo/.coderabbit.config.ts"
 
   printf 'reviews:\n  path_instructions:\n    - path: "docs/**"\n      instructions: PATHRULE-DOCS-4e7d\n' > "$repo/.coderabbit.yaml"
   run_review "$repo" "$stub" --lenses correctness
@@ -300,6 +306,7 @@ EOF
   run_review "$repo" "$stub" --lenses correctness
   assert "pr: no path_instructions is no_rules" test "$(pr_status "$repo")" = no_rules
   assert "pr: no_rules is said in findings.md" grep -qF 'sets no path_instructions' "$repo/.review/findings.md"
+  assert "pr: no_rules names unread inherited rules" grep -qF 'through `inheritance: true` are not read' "$repo/.review/findings.md"
 
   rm "$repo/.coderabbit.yaml"
   run_review "$repo" "$stub" --lenses correctness
@@ -348,9 +355,10 @@ EOF
   run_review "$repo" "$stub" --lenses correctness
   pr_assert_warned "an explicit null path_instructions" invalid
 
-  printf 'reviews:\n' > "$repo/.coderabbit.yaml"
+  printf 'inheritance: true\nreviews:\n' > "$repo/.coderabbit.yaml"
   run_review "$repo" "$stub" --lenses correctness
   pr_assert_warned "an explicit null reviews" invalid
+  assert "pr: a warning still names unread inherited rules" grep -qF 'through `inheritance: true` are not read' "$repo/.review/findings.md"
 
   printf 'reviews:\n  path_instructions:\n    - path: "lib/**/@(store|cache)/*.ts"\n      instructions: PATHRULE-EXT\n' > "$repo/.coderabbit.yaml"
   run_review "$repo" "$stub" --lenses correctness
@@ -400,6 +408,22 @@ EOF
 # The globs follow minimatch: `**` spans directories, `*` and `?` stay in one,
 # braces expand, a slashless pattern is top-level only, a trailing slash means
 # the whole directory, and dotfiles match.
+# The installer's yaml probe and config check run from /, so a repo-local yaml.py
+# neither runs nor stands in for PyYAML.
+test_install_ignores_repo_local_yaml_module() {
+  local spoke="$WORK/iy-spoke"
+  if ! have_yaml_parser; then
+    if require_yaml_parser; then fail "iy: python3 yaml module required (REVIEW_TEST_REQUIRE_YAML=1) but missing"
+    else skip_test "iy: python3 yaml module not installed"; fi
+    return
+  fi
+  make_installed_spoke "$spoke"
+  printf 'open("%s/iy-shadow", "w").write("ran")\n' "$WORK" > "$spoke/yaml.py"
+  run_install_check "$spoke"
+  assert_not "iy: repo-local yaml.py is not imported" test -e "$WORK/iy-shadow"
+  assert "iy: wired config still reported wired" grep -qF 'wires inheritance and both guideline mappings' "$LOG"
+}
+
 test_path_rule_globs() {
   local dir="$WORK/pg" out
   if ! have_yaml_parser; then
@@ -420,13 +444,22 @@ reviews:
     - { path: "nothing/**", instructions: R-NONE }
     - { path: "v{1..3}/**", instructions: R-RANGE }
     - { path: 'lit/\*.txt', instructions: R-ESCAPE }
+    - { path: "rel/{01..03}/*", instructions: R-PAD }
+    - { path: "odd/{1..5..2}/*", instructions: R-STEP }
+    - { path: "big/{1..256}/*", instructions: R-BUDGET }
+    - { path: "huge/{1..257}/*", instructions: R-OVER }
 EOF
   printf '%s\n' src/a/b/c.ts src/top.ts README.md docs/guide.md .github/workflows/ci.yml \
-    infra/net/main.tf cfg/a.json cfg/ab.json bin/run bin/xtool v2/x.go v4/x.go 'lit/*.txt' lit/a.txt > "$dir/changed.txt"
+    infra/net/main.tf cfg/a.json cfg/ab.json bin/run bin/xtool v2/x.go v4/x.go 'lit/*.txt' lit/a.txt \
+    rel/02/f rel/2/f odd/3/f odd/4/f big/256/f huge/1/f > "$dir/changed.txt"
   out="$( cd "$dir" && . "$KIT/scripts/lib/path-rules.sh" && collect_path_rules changed.txt rules.md \
     && printf '%s' "$PATH_RULES_JSON" )"
-  assert "pg: eight of nine rules match" jq -e '.status == "applied" and .matched == 8 and .rules == 9' <<< "$out"
+  assert "pg: eleven of thirteen rules match, the oversized range is invalid" \
+    jq -e '.status == "invalid" and .matched == 11 and .rules == 13 and (.warning | contains("#13 lacks"))' <<< "$out"
   assert "pg: numeric brace range expands" grep -qxF '### `v{1..3}/**` - applies to `v2/x.go`' "$dir/rules.md"
+  assert "pg: zero-padded range keeps its padding" grep -qxF '### `rel/{01..03}/*` - applies to `rel/02/f`' "$dir/rules.md"
+  assert "pg: stepped range steps" grep -qxF '### `odd/{1..5..2}/*` - applies to `odd/3/f`' "$dir/rules.md"
+  assert "pg: a range at the budget expands" grep -qF 'R-BUDGET' "$dir/rules.md"
   assert "pg: an escaped star is literal" grep -qxF '### `lit/\*.txt` - applies to `lit/*.txt`' "$dir/rules.md"
   assert "pg: ** spans nested and zero directories" grep -qF '`src/a/b/c.ts`, `src/top.ts`' "$dir/rules.md"
   assert "pg: slashless pattern is top-level only" grep -qxF '### `*.md` - applies to `README.md`' "$dir/rules.md"
@@ -4480,6 +4513,7 @@ run_tests \
   test_rubric_reaches_every_lens_prompt \
   test_path_rules_reach_matching_lens_prompts \
   test_path_rule_globs \
+  test_install_ignores_repo_local_yaml_module \
   test_unusual_filenames_reach_the_diff \
   test_deletions_are_not_unreadable \
   test_fail_on_gate_keeps_its_report \

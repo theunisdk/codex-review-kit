@@ -231,8 +231,7 @@ review at all.
 
 A house rule that holds only for some paths lives in the CodeRabbit config's
 `reviews.path_instructions`, not in `rubric.md`. On every run, `review.sh` reads
-that config (the first of `.coderabbit.yaml`, `.coderabbit.yml`,
-`coderabbit.yaml` and `coderabbit.yml`) and puts each rule whose
+that config (`.coderabbit.yaml`, else `.coderabbit.yml`) and puts each rule whose
 glob matches a changed file into every lens prompt, under the rubric, so the
 lenses grade those files against the same text the gate does. The config is read
 at review time rather than copied into the rubric, so there is no second copy to
@@ -251,9 +250,10 @@ reached the lenses. Every other status carries a `warning`, shown in
 the rules: `unparseable` (CodeRabbit discards such a file too), `invalid`
 (`reviews` or `path_instructions` of the wrong type, explicit null included, or
 an entry without a string `path` and `instructions` or with an unsupported
-glob; the valid entries still apply), `no_parser` (no `python3` or PyYAML), `not_inspected`
-(`.coderabbit.config.ts`, which is not read) and `failed` (an unreadable file
-or a crashed reader). None of them makes `complete` false: the lenses still
+glob; the valid entries still apply), `no_parser` (no `python3` or PyYAML),
+`not_inspected` (`.coderabbit.config.ts`, or an undotted `coderabbit.yaml` or
+`coderabbit.yml`, neither of which is read) and `failed` (an unreadable file or
+a crashed reader). None of them makes `complete` false: the lenses still
 reviewed the diff.
 
 ## Skills: which tool needs one, and why

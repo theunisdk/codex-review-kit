@@ -15,11 +15,13 @@
 collect_path_rules() {
   local changed="$1" section="$2" cfg="" f rc err
   : > "$section"
-  for f in .coderabbit.yaml .coderabbit.yml coderabbit.yaml coderabbit.yml .coderabbit.config.ts; do
+  for f in .coderabbit.yaml .coderabbit.yml .coderabbit.config.ts coderabbit.yaml coderabbit.yml; do
     [ -e "$f" ] && { cfg="$f"; break; }
   done
   if [ -z "$cfg" ]; then
     _path_rules_set no_config "" ""
+  elif [ "$cfg" = coderabbit.yaml ] || [ "$cfg" = coderabbit.yml ]; then
+    _path_rules_set not_inspected "$cfg" "\`$cfg\` is not one of CodeRabbit's documented config names, so it is not read here and its path_instructions did NOT reach the lenses; if it is the gate's active config, rename it \`.$cfg\`"
   elif [ "$cfg" = .coderabbit.config.ts ]; then
     _path_rules_set not_inspected "$cfg" "\`$cfg\` is the active CodeRabbit config and is not read here, so its path_instructions did NOT reach the lenses"
   elif [ ! -f "$cfg" ] || [ ! -r "$cfg" ]; then
@@ -51,16 +53,16 @@ _path_rules_set() { # _path_rules_set <status> <config> <warning>
 # The one-line findings.md note: a blockquote when a warning stands, plain otherwise.
 path_rules_note() {
   local cfg rules matched inherited
+  inherited=""
+  [ "$(jq -r '.inherits // false' <<< "$PATH_RULES_JSON")" != true ] \
+    || inherited=' Rules an org or central config adds through `inheritance: true` are not read.'
   if [ -n "$PATH_RULES_WARNING" ]; then
-    printf '> **Path rules NOT fully applied:** %s.\n' "$PATH_RULES_WARNING"
+    printf '> **Path rules NOT fully applied:** %s.%s\n' "$PATH_RULES_WARNING" "$inherited"
     return
   fi
   cfg="$(jq -r '.config // ""' <<< "$PATH_RULES_JSON")"
   rules="$(jq -r '.rules // 0' <<< "$PATH_RULES_JSON")"
   matched="$(jq -r '.matched // 0' <<< "$PATH_RULES_JSON")"
-  inherited=""
-  [ "$(jq -r '.inherits // false' <<< "$PATH_RULES_JSON")" != true ] \
-    || inherited=' Rules an org or central config adds through `inheritance: true` are not read.'
   case "$PATH_RULES_STATUS" in
     applied)   printf 'Path rules: %s of the %s `%s` path_instructions match the change set and reached every lens.%s\n' "$matched" "$rules" "$cfg" "$inherited" ;;
     no_match)  printf 'Path rules: none of the %s `%s` path_instructions match the change set.%s\n' "$rules" "$cfg" "$inherited" ;;
@@ -137,13 +139,13 @@ inherits = d.get("inheritance") is True
 reviews = d.get("reviews")
 if "reviews" in d and not isinstance(reviews, dict):
     emit("invalid", "`%s` sets reviews to %s rather than a mapping, so no path_instructions reached "
-         "the lenses, and CodeRabbit may discard the whole file" % (cfg, kind(reviews)))
+         "the lenses, and CodeRabbit may discard the whole file" % (cfg, kind(reviews)), inherits=inherits)
 pi = reviews.get("path_instructions") if isinstance(reviews, dict) else None
 if not isinstance(reviews, dict) or "path_instructions" not in reviews or pi == []:
     emit("no_rules", rules=0, matched=0, inherits=inherits)
 if not isinstance(pi, list):
     emit("invalid", "`%s` sets reviews.path_instructions to %s rather than a list, so none of it "
-         "reached the lenses, and CodeRabbit may discard the whole file" % (cfg, kind(pi)))
+         "reached the lenses, and CodeRabbit may discard the whole file" % (cfg, kind(pi)), inherits=inherits)
 
 
 def split_top(body):
@@ -166,15 +168,27 @@ def split_top(body):
 
 
 def brace_range(body, budget):
-    m = re.fullmatch(r"(-?[0-9]+)\.\.(-?[0-9]+)|([A-Za-z])\.\.([A-Za-z])", body)
+    m = re.fullmatch(r"(?:(-?[0-9]+)\.\.(-?[0-9]+)|([A-Za-z])\.\.([A-Za-z]))(?:\.\.(-?[0-9]+))?", body)
     if not m:
         return None
     num = m.group(1) is not None
     a, b = (int(m.group(1)), int(m.group(2))) if num else (ord(m.group(3)), ord(m.group(4)))
-    if abs(b - a) + 1 > budget[0]:
+    step = abs(int(m.group(5) or 1)) or 1
+    if (abs(b - a) // step) + 1 > budget[0]:
         raise ValueError("brace range too large")
-    step = 1 if b >= a else -1
-    return [str(x) if num else chr(x) for x in range(a, b + step, step)]
+    width = 0
+    if num and any(re.match(r"-?0[0-9]", e) for e in (m.group(1), m.group(2))):
+        width = max(len(m.group(1)), len(m.group(2)))
+    step = step if b >= a else -step
+    out = []
+    for x in range(a, b + (1 if b >= a else -1), step):
+        if not num:
+            out.append(chr(x))
+        elif width:
+            out.append(("-" if x < 0 else "") + str(abs(x)).zfill(width - (1 if x < 0 else 0)))
+        else:
+            out.append(str(x))
+    return out
 
 
 def braces(p, budget):
