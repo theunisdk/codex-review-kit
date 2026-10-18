@@ -51,7 +51,10 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
    `prunable` as unread.
 
    A verdict starts at a `# Review verdict — <branch> — <sha> — <date>` or
-   `# Spec verdict — …` line; a file may hold several. Before v1.2.0, spec
+   `# Spec verdict — …` line; a file may hold several. A `<sha>+uncommitted`
+   field marks an `--uncommitted` run, which reviewed working-tree changes on
+   top of `<sha>`: it is a code verdict, so read its rejections like any
+   other's, but it is not the same review as a verdict on `<sha>`. Before v1.2.0, spec
    verdicts also used `# Review verdict`. So a `# Spec verdict` header, or
    any `spec-*` lens on its `Lenses:` line, makes it a spec verdict. A file
    with no header takes its mode from its `Lenses:` line, else from its

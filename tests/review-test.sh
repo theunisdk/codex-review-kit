@@ -245,6 +245,8 @@ test_unusual_filenames_reach_the_diff() {
   assert "uncommitted: é.txt listed unquoted" grep -qxF 'é.txt' "$repo/.review/raw/changed-files.txt"
   assert "uncommitted: back\\slash.txt listed unquoted" grep -qxF 'back\slash.txt' "$repo/.review/raw/changed-files.txt"
   assert "uncommitted: complete" jq -e '.complete == true' "$repo/.review/findings.json"
+  assert "uncommitted: findings.json names the mode and the commit the changes sit on" \
+    jq -e --arg h "$(git -C "$repo" rev-parse --short HEAD)" '.mode == "uncommitted" and .head == $h' "$repo/.review/findings.json"
 
   ( cd "$repo" && git add -A && git commit -qm 'odd names' )
   run_review "$repo" "$stub" --lenses correctness; rc=$?
@@ -252,6 +254,7 @@ test_unusual_filenames_reach_the_diff() {
   assert "branch: é.txt listed unquoted" grep -qxF 'é.txt' "$repo/.review/raw/changed-files.txt"
   assert "branch: back\\slash.txt listed unquoted" grep -qxF 'back\slash.txt' "$repo/.review/raw/changed-files.txt"
   assert "branch: complete" jq -e '.complete == true' "$repo/.review/findings.json"
+  assert "branch: findings.json names the mode" jq -e '.mode == "branch"' "$repo/.review/findings.json"
 
   if [ "$(id -u)" = 0 ]; then
     skip_test "uncommitted: unreadable file (root reads everything)"
@@ -2633,6 +2636,31 @@ test_prepush_skips_a_sha256_deletion() {
   assert "h4: … for want of a verdict" grep -qF 'feature — no review verdict found' "$out"
 }
 
+# An --uncommitted verdict is stamped with HEAD but reviewed only the working tree
+# on top of it, so its header read as a review of HEAD and cleared the push (#53).
+test_prepush_rejects_an_uncommitted_verdict() {
+  local repo="$WORK/um1" stub="$WORK/um1-stub" remote="$WORK/um1-remote.git" out="$WORK/um1.push.log" rc short
+  hook_repo "$repo" "$stub"
+  git init -q --bare "$remote"
+  git -C "$repo" config core.hooksPath .githooks
+  short=$(git -C "$repo" rev-parse --short HEAD)
+
+  printf '# Review verdict — change — %s+uncommitted — 2026-01-01\n\nclean\n' "$short" > "$repo/.review/verdict.md"
+  ( cd "$repo" && REVIEW_STRICT=1 git push "$remote" 'HEAD:refs/heads/change' ) > "$out" 2>&1
+  rc=$?
+  assert "um1: an uncommitted verdict naming HEAD does not clear the gate" test "$rc" -ne 0
+  assert "um1: … and the hook says why" \
+    grep -qF "change — verdict reviewed uncommitted changes on $short, not a commit — commit them and run /review" "$out"
+  ( cd "$repo" && git push "$remote" 'HEAD:refs/heads/change2' ) > "$out" 2>&1
+  rc=$?
+  assert "um1: without REVIEW_STRICT it warns and pushes" \
+    sh -c '[ "$1" -eq 0 ] && grep -qF "change2 — verdict reviewed uncommitted changes" "$2"' _ "$rc" "$out"
+  printf '# Review verdict — change — %s — 2026-01-01\n\nclean\n' "$short" > "$repo/.review/verdict.md"
+  ( cd "$repo" && REVIEW_STRICT=1 git push "$remote" 'HEAD:refs/heads/change3' ) > "$out" 2>&1
+  rc=$?
+  assert "um1: the same header without the marker still clears it" test "$rc" -eq 0
+}
+
 # Verdicts are gitignored and overwritten each run, so /review-tune had no history
 # to mine. Regression for #28: each run archives the verdicts it is about to
 # supersede into the clone's git common dir, which every worktree shares and
@@ -2698,6 +2726,23 @@ test_verdict_archive_failure_warns_without_failing() {
   assert "v3: an unwritable archive warns" grep -qF 'is not writable — rejection history' "$LOG"
   assert "v3: the run's exit code is unchanged" test "$rc" -eq 0
   assert "v3: … and so is complete" jq -e '.complete == true' "$repo/.review/findings.json"
+}
+
+# A marked header failed the archive's SHA match and was filed as code-unparsed (#53).
+test_verdict_archive_keys_an_uncommitted_verdict() {
+  local repo="$WORK/um2" stub="$WORK/um2-stub" hist
+  make_repo "$repo"; mkdir -p "$stub"
+  printf '# Review verdict — change — abc1234+uncommitted — 2026-01-05\n\n## Rejected\nF1 — noise\n' > "$repo/.review/verdict.md"
+  run_review "$repo" "$stub" --lenses correctness
+  hist="$(history_dir "$repo")"
+  assert "um2: an uncommitted verdict is archived under its commit and marker" \
+    sh -c 'cmp -s "$1" "$2"/code-2026-01-05-abc1234+uncommitted-*.md' _ "$repo/.review/verdict.md" "$hist"
+  assert_not "um2: … not as code-unparsed" sh -c 'ls "$1" | grep -q unparsed' _ "$hist"
+  assert_not "um2: … and without the unparsed warning" grep -qF 'has no standard verdict header' "$LOG"
+  printf '# Spec verdict — change — abc1234+uncommitted — 2026-01-05\n' > "$repo/.review/spec-verdict.md"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "um2: a spec header never carries the marker, so one that does is unparsed" \
+    sh -c 'ls "$1"/spec-unparsed-*.md' _ "$hist"
 }
 
 # A worktree's final verdict is written after its last review run, so the run alone
@@ -2790,6 +2835,21 @@ test_postmortem_finds_the_verdict_for_the_reviewed_commit() {
     grep -qE 'spec-2026|postmortem-pr1|code-2026-01-01-oldspec' "$out"
   assert "p1: … so exactly six candidates" test "$(grep -c . "$out")" -eq 6
 
+  # #53: an --uncommitted run on the compared commit is listed as such, never 'same'.
+  printf '# Review verdict — change — %s+uncommitted — 2026-01-03\n' "${b:0:7}" > "$hist/code-2026-01-03-${b:0:7}+uncommitted-6.md"
+  printf '# Review verdict — change — %s+uncommitted — 2026-01-03\n' "$a" > "$hist/code-2026-01-03-$a+uncommitted-7.md"
+  printf '# Review verdict — other — %s+uncommitted — 2026-01-03\n' "$o" > "$hist/code-2026-01-03-$o+uncommitted-8.md"
+  ( cd "$repo" && bash -c "$snippet" ) > "$WORK/p1.unc" 2>&1; rc=$?
+  assert "um3: the listing succeeds" test "$rc" -eq 0
+  assert "um3: an uncommitted verdict on the compared commit is 'uncommitted'" \
+    grep -qE "^uncommitted ${b:0:7} 1 .*/code-2026-01-03-${b:0:7}\+uncommitted-6\.md$" "$WORK/p1.unc"
+  assert "um3: … and so is one on an ancestor" grep -qE "^uncommitted $a 1 .*\+uncommitted-7\.md$" "$WORK/p1.unc"
+  assert "um3: one on an unrelated commit stays 'other'" grep -qE "^other $o 1 .*\+uncommitted-8\.md$" "$WORK/p1.unc"
+  assert_not "um3: none is 'same' or 'ancestor'" grep -qE '^(same|ancestor) .*\+uncommitted' "$WORK/p1.unc"
+  assert "um3: … and the six earlier candidates are unchanged" \
+    bash -c 'cmp -s <(grep -v +uncommitted "$1" | sort) <(sort "$2")' _ "$WORK/p1.unc" "$out"
+  rm -f "$hist"/code-2026-01-03-*+uncommitted-*.md
+
   ( cd "$repo" && bash -c "$(postmortem_snippet 0123456789abcdef0123456789abcdef01234567 "$prs")" ) > "$out" 2>&1; rc=$?
   assert "p1: a compared commit this clone lacks fails the listing" \
     sh -c '[ "$1" -ne 0 ] && grep -qF "failed: the compared commit is not in this clone" "$2"' _ "$rc" "$out"
@@ -2823,6 +2883,19 @@ test_postmortem_finds_the_verdict_for_the_reviewed_commit() {
   else
     skip_test "p1: unreadable review history (running as root)"
   fi
+}
+
+# Claude writes the verdict header, so the marker lives in the procedure it follows (#53).
+test_uncommitted_marker_docs() {
+  local pm="$KIT/.claude/commands/review-postmortem.md"
+  assert "um4: adjudication marks an --uncommitted verdict's header" \
+    grep -qF '`<head>+uncommitted`, with `<head>` copied from `findings.json`' "$KIT/.review/adjudication.md"
+  assert "um4: the postmortem never scores it, and names each one it skips" \
+    sh -c 'grep -qF "never a pre-PR catch" "$1" && grep -qF "skipped uncommitted-run verdict <file>" "$1"' _ "$pm"
+  assert "um4: /review-tune still reads it as a code verdict" \
+    grep -qF 'it is a code verdict, so read its rejections like any' "$KIT/.claude/commands/review-tune.md"
+  assert "um4: REVIEW.md documents mode and head" \
+    sh -c 'grep -qF "| \`mode\` |" "$1" && grep -qF "| \`head\` |" "$1"' _ "$KIT/REVIEW.md"
 }
 
 # Every $<n> is rewritten, prose included ("$5 per run"). Codex does not fill
@@ -3748,12 +3821,15 @@ run_tests \
   test_prepush_reads_the_verdict_header \
   test_prepush_rejects_a_spec_verdict \
   test_prepush_skips_a_sha256_deletion \
+  test_prepush_rejects_an_uncommitted_verdict \
   test_review_archives_the_previous_verdicts \
   test_verdict_archive_is_shared_across_worktrees \
   test_verdict_archive_failure_warns_without_failing \
+  test_verdict_archive_keys_an_uncommitted_verdict \
   test_prepush_archives_the_verdict \
   test_review_tune_docs_name_legacy_archive \
   test_postmortem_finds_the_verdict_for_the_reviewed_commit \
+  test_uncommitted_marker_docs \
   test_expanded_files_hold_no_positional_refs \
   test_postmortem_docs_record_and_route \
   test_review_tune_docs_read_postmortem_records \

@@ -68,7 +68,9 @@ reports its own update of the record on a third line,
 
    A verdict's header names the commit it judged:
    `# Review verdict — <branch> — <short-sha> — <date>`. SHAs match when one
-   is a prefix of the other. First run `git fetch origin "pull/<n>/head"`, so
+   is a prefix of the other. An `--uncommitted` run writes
+   `<short-sha>+uncommitted` there instead: it judged working-tree changes on
+   top of that commit, not the commit. First run `git fetch origin "pull/<n>/head"`, so
    the PR's commits are in this clone. If the compared commit is still
    missing, because it was force-pushed away, run `git fetch origin <first>`.
    If `git rev-parse --is-shallow-repository` prints `true`, run
@@ -100,13 +102,16 @@ reports its own update of the record on a third line,
        continue
      fi
      heads="$(awk -F ' — ' -v title=1 -v rev=3 '
-       function flush() { if (sha != "" && !spec) print sha, line; sha = ""; spec = 0 }
+       function flush() { if (sha != "" && !spec) print sha, line, unc; sha = ""; spec = 0 }
        /^# (Review|Spec) verdict — / { flush() }
-       $title == "# Review verdict" && NF == 4 && $rev ~ /^[0-9a-f]+$/ && length($rev) >= 4 && length($rev) <= 64 { sha = $rev; line = FNR }
+       $title == "# Review verdict" && NF == 4 && $rev ~ /^[0-9a-f]+([+]uncommitted)?$/ {
+         s = $rev; u = sub(/[+]uncommitted$/, "", s)
+         if (length(s) >= 4 && length(s) <= 64) { sha = s; line = FNR; unc = u }
+       }
        /^Lenses:/ && /spec-/ { spec = 1 }
        END { flush() }' "$f")" || { echo "failed: cannot read $f"; exit 1; }
      [ -n "$heads" ] || continue
-     printf '%s\n' "$heads" | while read -r sha line; do
+     printf '%s\n' "$heads" | while read -r sha line unc; do
        case "$first" in
          "$sha"*) rel=same ;;
          *) full="$(git rev-parse --verify -q "$sha^{commit}")"
@@ -116,6 +121,7 @@ reports its own update of the record on a third line,
               case "$rc" in 0) rel=ancestor ;; 1) rel=other ;; *) echo "failed: git merge-base --is-ancestor $sha $first"; exit 1 ;; esac
             fi ;;
        esac
+       [ "$unc" = 1 ] && [ "$rel" != other ] && rel=uncommitted
        printf '%s %s %s %s\n' "$rel" "$sha" "$line" "$f"
      done || exit 1
    done
@@ -142,6 +148,12 @@ reports its own update of the record on a third line,
      That count is `uncovered_commits`; grep exits 1 when it is 0. If
      `<first>` is not in the PR commit file because a force-push dropped it,
      set `uncovered_commits` to `null` and say why.
+   - **`uncommitted`** — an `--uncommitted` run's verdict on the comparison
+     commit or an ancestor. It may hold fixes written after reading
+     CodeRabbit, so it is never a pre-PR catch: never use it, but never drop
+     it silently either. Name each one in the report and in the record's
+     `reason`, as `skipped uncommitted-run verdict <file>`. With no `same` or
+     `ancestor` beside it, the PR is `no-local-verdict` for that reason.
    - **Neither** — record `no-local-verdict` and do not score. `other` means a
      commit that is not one of this PR's commits before the compared commit:
      a review run after CodeRabbit's, another branch's, one that reached the

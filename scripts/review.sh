@@ -532,14 +532,16 @@ failed_lenses="$failed_lenses${missing_lenses:-}"
 FAILED_LIST="$(printf '%s' "${failed_lenses# }")"
 UNREADABLE_COUNT=0
 [ -s "$OUT/unreadable.txt" ] && UNREADABLE_COUNT="$(grep -c . < "$OUT/unreadable.txt")"
+HEAD_SHORT="$(git rev-parse --short -q --verify HEAD)" || HEAD_SHORT=""   # empty only on an unborn branch
 jq --arg failed "$FAILED_LIST" --arg unreadable "$(cat "$OUT/unreadable.txt" 2>/dev/null)" \
   --argjson secrets "$SECRET_FINDINGS" --argjson scan_failed "$SECRETS_FAILED" --argjson n "$CHANGED_COUNT" \
-  --arg scan "$SECRETS_SCAN" '
+  --arg scan "$SECRETS_SCAN" --arg mode "$MODE" --arg head "$HEAD_SHORT" '
   .findings = ($secrets + .findings | to_entries | map(.value + {id: ("F" + ((.key + 1)|tostring))}))
   | . + { lenses_failed: ($failed | if . == "" then [] else split(" ") end),
         unreadable_paths: ($unreadable | split("\n") | map(select(. != ""))) }
   | . + { complete: ((.lenses_failed | length) == 0 and (.unreadable_paths | length) == 0 and $scan_failed == 0),
-          changed_files: $n, secrets_scan: $scan }
+          changed_files: $n, secrets_scan: $scan,
+          mode: $mode, head: (if $head == "" then null else $head end) }
 ' .review/findings.json > .review/findings.json.tmp \
   && mv .review/findings.json.tmp .review/findings.json || die "could not finalise findings.json"
 
