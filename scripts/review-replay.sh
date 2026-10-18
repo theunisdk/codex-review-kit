@@ -3,13 +3,14 @@
 # review-replay.sh — replay today's review kit on PRs CodeRabbit already
 # reviewed, and score it against CodeRabbit's findings.
 #
-# Hub only. For each PR it checks out the first head CodeRabbit reviewed in a
-# temporary worktree of the spoke, overlays the hub kit at --kit-ref, runs
-# review.sh over the PR's base..that commit, adjudicates the findings with a
-# headless `claude -p`, and scores the verdict with `review-postmortem.md
-# --replay`. The record stays in the spoke clone, under
+# Hub only. For each PR it clones the history of the first head CodeRabbit
+# reviewed, and nothing past it, into a temporary checkout outside the spoke.
+# It overlays the hub kit at --kit-ref, runs review.sh over the PR's
+# base..that commit, adjudicates the findings with a headless `claude -p`, and
+# scores the verdict with `review-postmortem.md --replay`, which alone sees
+# the spoke's later objects. The record stays in the spoke clone, under
 # <git common dir>/review-replay/, each run's scorecard under runs/. Nothing is
-# posted, filed or pushed.
+# posted, filed or pushed. scripts/review-replay-sum.sh sums runs' scorecards.
 #
 #   scripts/review-replay.sh <spoke> <PR>...        # these PRs, in order
 #   scripts/review-replay.sh <spoke> --recent 7     # the 7 most recent merged
@@ -22,8 +23,9 @@
 #     --claude-budget USD per claude call (default 5)
 #     --no-analyzers      passed to review.sh
 #
-# One line per PR — replayed / skipped — <reason> / failed — <step>: <error> —
-# then an aggregate scorecard. Exit: 0 no PR failed · 1 a PR failed · 64 usage
+# One line per PR — replayed / incomplete — <why> / skipped — <reason> /
+# failed — <step>: <error> — then an aggregate scorecard. Exit: 0 no PR failed
+# or is incomplete · 1 one did · 64 usage
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
@@ -31,7 +33,7 @@ HUB="$(cd "$(dirname "$0")/.." && pwd -P)"
 # shellcheck source=lib/common.sh
 . "$HUB/scripts/lib/common.sh"
 
-usage() { sed -n '2,27p' "$0" >&2; exit 64; }
+usage() { sed -n '2,29p' "$0" >&2; exit 64; }
 
 SPOKE=""; PRS=""; RECENT=""; LIMIT=5; KIT_REF=main; REPO=""; MODEL=""; BUDGET=5; REVIEW_ARGS=""
 SCAN=100; CLAUDE_TIMEOUT=1800; REVIEW_TIMEOUT=3600; NET_TIMEOUT=300
@@ -45,7 +47,7 @@ while [ $# -gt 0 ]; do
     --model)         MODEL="${2:-}"; shift ;;
     --claude-budget) BUDGET="${2:-}"; shift ;;
     --no-analyzers)  REVIEW_ARGS="--no-analyzers" ;;
-    -h|--help)       sed -n '2,27p' "$0"; exit 0 ;;
+    -h|--help)       sed -n '2,29p' "$0"; exit 0 ;;
     -*)              echo "error: unknown flag: $1" >&2; usage ;;
     *)               if [ -z "$SPOKE" ]; then SPOKE="$1"
                      else
@@ -73,7 +75,7 @@ need_cmd git; need_cmd jq; need_cmd gh; need_cmd claude; need_cmd codex; need_cm
 
 # --- the spoke -------------------------------------------------------------
 SPOKE="$(git -C "$SPOKE" rev-parse --show-toplevel 2>/dev/null)" || die "not a git repository: $SPOKE"
-# worktrees live in the main worktree's .claude/worktrees/, even when given a linked one
+# the main worktree, even when given a linked one
 SPOKE="$(git -C "$SPOKE" worktree list --porcelain | sed -n '1s/^worktree //p')"
 [ -d "$SPOKE" ] || die "cannot find the main worktree of the spoke"
 COMMON="$(git -C "$SPOKE" rev-parse --git-common-dir)" && COMMON="$(cd "$SPOKE" && cd "$COMMON" && pwd -P)" \
@@ -94,6 +96,8 @@ KIT_SHORT="$(git -C "$HUB" rev-parse --short "$KIT_SHA")"
 KIT_DESC="$(git -C "$HUB" describe --tags --always "$KIT_SHA" 2>/dev/null || echo "$KIT_SHORT")"
 
 RUN_TMP="$(mktemp -d)" || die "no temp dir"
+# apart from RUN_TMP, which holds CodeRabbit's findings the lenses must not read
+CHECKOUTS="$(mktemp -d)" || { rm -rf "$RUN_TMP"; die "no temp dir"; }
 # no spoke hook runs, here or in anything this starts
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null
 CUR_WT=""; CHILD=""
@@ -105,11 +109,11 @@ stop_child() {
   kill -KILL -- "-$CHILD" 2>/dev/null
   wait "$CHILD" 2>/dev/null; CHILD=""
 }
-remove_worktree() { # prints why on failure
+remove_checkout() { # prints why on failure
   [ -n "$CUR_WT" ] || return 0
   local wt="$CUR_WT"; CUR_WT=""
-  git -C "$SPOKE" worktree remove --force "$wt" > "$RUN_TMP/wt-remove.err" 2>&1 && return 0
-  warn "could not remove the replay worktree $wt: $(head -n1 "$RUN_TMP/wt-remove.err") — run: git -C $SPOKE worktree remove --force $wt"
+  rm -rf "$wt" > "$RUN_TMP/wt-remove.err" 2>&1 && [ ! -e "$wt" ] && return 0
+  warn "could not remove the replay checkout $wt: $(head -n1 "$RUN_TMP/wt-remove.err") — run: rm -rf $wt"
   return 1
 }
 CUR_PR=""; SUMMARY=""; SUMMARY_LOST=""; RUN_DONE=""
@@ -122,11 +126,11 @@ exec 3>&1 4>&2
 on_exit() {
   local rc=$?
   {
-    stop_child; remove_worktree
+    stop_child; remove_checkout
     [ -z "$CUR_PR" ] || say "review-replay: failed — PR #$CUR_PR: interrupted: rc=$rc, nothing was recorded for it"
     [ -z "$SUMMARY" ] || [ -n "$RUN_DONE" ] \
       || printf 'review-replay: incomplete — the run exited %s before it finished, so it has no scorecard\n' "$rc" >> "$SUMMARY"
-    rm -rf "$RUN_TMP"
+    rm -rf "$RUN_TMP"; rmdir "$CHECKOUTS" 2>/dev/null
   } >&3 2>&4
 }
 trap on_exit EXIT
@@ -374,33 +378,42 @@ overlay() {
 READ_RULES=("Bash(git log:*)" "Bash(git show:*)" "Bash(git diff:*)" "Bash(git rev-parse:*)"
   "Bash(git rev-list:*)" "Bash(git merge-base:*)" "Bash(git cat-file:*)" "Bash(git blame:*)" "Bash(jq:*)"
   "Bash(grep:*)" "Bash(wc:*)")
-claude_call() { # claude_call <out.json> <prompt> — in the worktree
-  local out="$1" prompt="$2" rc c
+# claude_call <kind> <prompt> — in the checkout. The whole stream is kept as
+# transcript-<kind>.jsonl, its result event as <kind>.json, and the call's
+# permission_denials in DENIALS.<kind>: null when the call gave no list.
+claude_call() {
+  local kind="$1" prompt="$2" rc c d out tr
   local model_args=()
+  out="$REC_TMP/$kind.json"; tr="$REC_TMP/transcript-$kind.jsonl"
   [ -z "$MODEL" ] || model_args=(--model "$MODEL")
   run_child "$CLAUDE_TIMEOUT" in_dir "$CUR_WT" claude -p "$prompt" ${model_args[@]+"${model_args[@]}"} \
-    --setting-sources "" --output-format json --no-session-persistence --strict-mcp-config \
+    --setting-sources "" --output-format stream-json --verbose --no-session-persistence --strict-mcp-config \
     --settings '{"disableAllHooks":true}' --max-budget-usd "$BUDGET" \
     --tools "Read,Grep,Glob,Bash" --permission-mode dontAsk \
     --disallowedTools "Bash(gh:*)" "Bash(git push:*)" "Bash(git commit:*)" "Bash(git fetch:*)" \
       "Bash(git * --output*)" "Bash(git * --ext-diff*)" "Bash(git * --textconv*)" \
-    --allowedTools "${READ_RULES[@]}" > "$out" 2> "$out.err"
+    --allowedTools "${READ_RULES[@]}" > "$tr" 2> "$out.err"
   rc=$?
+  # a stream cut off by a timeout can end in half a line
+  jq -Rc 'fromjson? | select(type == "object" and .type == "result")' "$tr" 2>/dev/null | tail -n1 > "$out"
+  d="$(jq -c '.permission_denials | arrays' "$out" 2>/dev/null)"
+  DENIALS="$(jq -c --arg k "$kind" --argjson d "${d:-null}" '. + {($k): $d}' <<< "$DENIALS")"
   if c="$(jq -e '.total_cost_usd | numbers' "$out" 2>/dev/null)"; then
     COST="$(jq -n --argjson a "${COST:-0}" --argjson b "$c" '$a + $b')"
   else
     COST_UNKNOWN=$((COST_UNKNOWN + 1))
   fi
-  if [ "$rc" != 0 ] && ! jq -e . "$out" > /dev/null 2>&1; then
-    G_ERR="claude $(exit_why "$rc" "$CLAUDE_TIMEOUT"): $(err_of "$out.err")"; return 1
+  if [ ! -s "$out" ]; then
+    c="$(err_of "$out.err")"
+    G_ERR="claude $(exit_why "$rc" "$CLAUDE_TIMEOUT"), with no result in its transcript${c:+: $c}"; return 1
   fi
   jq -e '.is_error != true and (.result | type) == "string"' "$out" > /dev/null 2>&1 \
     || { G_ERR="claude: $(jq -r '[.subtype, (.result // "" | .[0:200])] | map(select(. != null)) | join(": ")' "$out" 2>/dev/null)"; return 1; }
 }
 
 replay_pr() {
-  local n="$1" base_tip base wt branch verdict body json rel first_line separates raw_err f
-  REC="$STORE/pr$n-$KIT_SHORT"; COST=0; COST_UNKNOWN=0; R_COUNTS=""; CODEX_TOKENS=0
+  local n="$1" base_tip base wt branch verdict body json rel first_line separates raw_err f gaps
+  REC="$STORE/pr$n-$KIT_SHORT"; COST=0; COST_UNKNOWN=0; R_COUNTS=""; CODEX_TOKENS=0; DENIALS="{}"
   if [ -z "${GATHERED:-}" ]; then
     REC_TMP="$RUN_TMP/pr$n"; rm -rf "$REC_TMP"; mkdir -p "$REC_TMP"
     gather "$n" || return
@@ -449,13 +462,15 @@ replay_pr() {
   fi
   base="$(git -C "$SPOKE" merge-base "$FIRST" "$base_tip")" || { fail_at base "no merge base of $short and ${base_tip:0:7}"; return; }
 
-  # --- worktree
-  wt="$SPOKE/.claude/worktrees/replay-pr$n"
-  [ ! -e "$wt" ] || { fail_at worktree "$wt already exists — remove it with: git -C $SPOKE worktree remove --force $wt"; return; }
-  mkdir -p "$SPOKE/.claude/worktrees"
-  git -C "$SPOKE" worktree add --quiet --detach "$wt" "$FIRST" > "$REC_TMP/wt.err" 2>&1 \
-    || { fail_at worktree "$(err_of "$REC_TMP/wt.err")"; return; }
-  CUR_WT="$wt"
+  # --- checkout: the reviewed commit's history and nothing else, no ref or object past it,
+  # so no lens and no adjudicator can read a later fix (a worktree shares every ref)
+  wt="$CHECKOUTS/replay-pr$n"
+  git init -q "$wt" > "$REC_TMP/wt.err" 2>&1 && CUR_WT="$wt" \
+    && GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_1=uploadpack.allowAnySHA1InWant GIT_CONFIG_VALUE_1=true \
+      git -C "$wt" -c gc.auto=0 -c maintenance.auto=false fetch --quiet --no-tags --no-write-fetch-head "$SPOKE" "$FIRST" \
+      < /dev/null >> "$REC_TMP/wt.err" 2>&1 \
+    && git -C "$wt" -c advice.detachedHead=false checkout --quiet --detach "$FIRST" >> "$REC_TMP/wt.err" 2>&1 \
+    || { fail_at checkout "cannot clone ${FIRST:0:7} alone: $(err_of "$REC_TMP/wt.err")"; return; }
 
   # --- kit: today's shared half over the PR's repo-owned half
   overlay "$wt" || return
@@ -483,7 +498,7 @@ replay_pr() {
   ls "$REC_TMP"/raw/out-*.json > /dev/null 2>&1 || { fail_at review "review.sh left no lens output in .review/raw"; return; }
 
   # --- adjudicate: the verdict /review would write, with nothing applied
-  claude_call "$REC_TMP/adjudicate.json" "Replay adjudication of PR #$n, commit $FIRST.
+  claude_call adjudicate "Replay adjudication of PR #$n, commit $FIRST.
 
 scripts/review-replay.sh checked out the first commit CodeRabbit reviewed on this PR and ran today's ./scripts/review.sh over ${base}..${FIRST}. Its report is .review/findings.json, and it is complete.
 
@@ -498,10 +513,13 @@ Read .review/adjudication.md and follow it, steps 2 to 5, with the deltas in its
     || { fail_at adjudicate "the reply has no verdict header naming $short: $(jq -r '.result | .[0:200]' "$REC_TMP/adjudicate.json")"; return; }
   cp "$verdict" "$wt/.review/verdict.md"
 
-  # --- postmortem: score the verdict against CodeRabbit, record only
+  # --- postmortem: score the verdict against CodeRabbit, record only. It compares later
+  # heads, so it alone reads the spoke's objects; it still sees none of its refs
+  printf '%s\n' "$COMMON/objects" > "$wt/.git/objects/info/alternates" \
+    || { fail_at postmortem "cannot give the checkout the spoke's objects"; return; }
   mkdir -p "$wt/.review/replay" && cp "$GH"/*.json "$GH/pr-commits.txt" "$wt/.review/replay/" \
-    || { fail_at postmortem "cannot copy the GitHub data into the worktree"; return; }
-  claude_call "$REC_TMP/postmortem.json" "Replay postmortem of PR #$n.
+    || { fail_at postmortem "cannot copy the GitHub data into the checkout"; return; }
+  claude_call postmortem "Replay postmortem of PR #$n.
 
 Read .claude/commands/review-postmortem.md and follow it with the arguments: $n --replay .review/replay
 Its \"Replay mode\" section says what changes: the GitHub data is already in .review/replay/, the verdict is .review/verdict.md, and you print the record instead of saving or posting it." \
@@ -530,12 +548,18 @@ Its \"Replay mode\" section says what changes: the GitHub data is already in .re
     "$json" > /dev/null 2>&1 \
     || { fail_at postmortem "the record's counts or missed_by_cause do not tally its findings: $(jq -c '{counts, missed_by_cause}' "$json" 2>/dev/null)"; return; }
 
+  # a finding the postmortem could not compare is unscored, not scored: the PR is incomplete
+  gaps="$(jq -r '[.findings[] | select(.unscored_reason | strings | startswith("compare_failed"))]
+      | if length == 0 then "" else "\(length) finding(s) unscored because a compare failed (\(.[0].unscored_reason | .[0:200]))" end' "$json")" \
+    || { fail_at postmortem "cannot read the record's unscored reasons"; return; }
+
   # --- record: the replay's own facts merged into the postmortem's JSON
   jq --arg ref "$KIT_REF" --arg sha "$KIT_SHA" --arg desc "$KIT_DESC" --arg base "$base" \
      --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson owned "$OWNED" --argjson cost "$COST" \
-     --argjson cu "$COST_UNKNOWN" --arg tokens "$CODEX_TOKENS" '. + {replay: {kit_ref: $ref, kit_sha: $sha, kit_describe: $desc,
+     --argjson cu "$COST_UNKNOWN" --arg tokens "$CODEX_TOKENS" --argjson denials "$DENIALS" '. + {replay: {kit_ref: $ref, kit_sha: $sha, kit_describe: $desc,
        base: $base, repo_owned: $owned, date: $date,
-       cost: {claude_usd: (if $cu > 0 then null else $cost end), codex_tokens: ($tokens | tonumber? // null)}}}' \
+       cost: {claude_usd: (if $cu > 0 then null else $cost end), codex_tokens: ($tokens | tonumber? // null)},
+       permission_denials: $denials}}' \
     "$json" > "$json.tmp" && mv "$json.tmp" "$json" || { fail_at record "cannot merge the replay facts"; return; }
   {
     printf '<!-- review-replay:v1 -->\n'
@@ -544,36 +568,52 @@ Its \"Replay mode\" section says what changes: the GitHub data is already in .re
       skip && /^```[[:space:]]*$/ { skip = 0; done = 1 } !skip' "$body"
   } > "$REC_TMP/postmortem.md" || { fail_at record "cannot write postmortem.md"; return; }
   R_COUNTS="$(jq -r '"caught \(.counts.caught) / missed \(.counts.missed) / rejected-wrongly \(.counts.rejected_wrongly) / noise \(.counts.noise) / unscored \(.counts.unscored)"' "$json")"
+  [ -z "$gaps" ] || { R_MSG="$gaps"; return 3; }
 }
 
 # keep the PR's artifacts, whatever the outcome, in $LOGS: a re-run replaces them, except
 # that a scored record is only ever replaced by another one
 save_record() { # save_record <rc>
   LOGS="$REC"
-  [ "$1" = 0 ] || ! grep -q '^review-replay: replayed — ' "$REC/outcome.txt" 2>/dev/null || LOGS="$REC.last-unscored"
+  [ "$1" = 0 ] || [ "$1" = 3 ] || ! grep -qE '^review-replay: (replayed|incomplete) — ' "$REC/outcome.txt" 2>/dev/null || LOGS="$REC.last-unscored"
   rm -rf "$LOGS.tmp.$$" "$LOGS.old.$$" && cp -R "$REC_TMP" "$LOGS.tmp.$$" && printf '%s\n' "$R_LINE" > "$LOGS.tmp.$$/outcome.txt" \
     && { [ ! -e "$LOGS" ] || mv "$LOGS" "$LOGS.old.$$"; } || return 1
   mv "$LOGS.tmp.$$" "$LOGS" || { [ ! -e "$LOGS.old.$$" ] || mv "$LOGS.old.$$" "$LOGS"; return 1; }
   rm -rf "$LOGS.old.$$"
-  [ "$1" != 0 ] || rm -rf "$REC.last-unscored"
+  [ "$1" != 0 ] && [ "$1" != 3 ] || rm -rf "$REC.last-unscored"
 }
 
 # --- the PR list -----------------------------------------------------------
-N_REPLAYED=0; N_SKIPPED=0; N_FAILED=0; N_UNREVIEWED=0; TOTAL_COST=0; TOTAL_TOKENS=0
-N_COST_UNKNOWN=0; N_TOKENS_UNKNOWN=0; RECENT_JSON=null
+N_REPLAYED=0; N_INCOMPLETE=0; N_SKIPPED=0; N_FAILED=0; N_UNREVIEWED=0; TOTAL_COST=0; TOTAL_TOKENS=0
+N_COST_UNKNOWN=0; N_TOKENS_UNKNOWN=0; RECENT_JSON=null; DENIALS="{}"
+N_DENIED=0; N_PRS_DENIED=0; N_DENIALS_UNKNOWN=0
 # cost_of <usd> <calls of unknown cost> <tokens or "unknown">
 cost_of() {
   printf 'claude $%.2f' "$1"
   [ "$2" = 0 ] || printf ' + unknown for %s call(s)' "$2"
   if [ "$3" = unknown ]; then printf ', codex tokens unknown'; else printf ', codex %s tokens' "$3"; fi
 }
+# count_denials — sets DENIED to " · commands denied: …" for each claude call in DENIALS
+# that had a denial or gave no list (else empty), and counts them into the run's totals
+count_denials() {
+  local n
+  DENIED="$(jq -r 'to_entries | map(select(.value == null or (.value | length) > 0)
+      | "\(.key) \(if .value == null then "unknown" else .value | length end)") | join(", ")' <<< "$DENIALS")" \
+    && n="$(jq -r '[.[] | select(. != null) | length] | add // 0' <<< "$DENIALS")" \
+    || { DENIED="unreadable"; n=0; N_DENIALS_UNKNOWN=$((N_DENIALS_UNKNOWN + 1)); }
+  [ -z "$DENIED" ] || DENIED=" · commands denied: $DENIED"
+  N_DENIED=$((N_DENIED + n)); [ "$n" = 0 ] || N_PRS_DENIED=$((N_PRS_DENIED + 1))
+  ! jq -e 'any(.[]; . == null)' <<< "$DENIALS" > /dev/null 2>&1 || N_DENIALS_UNKNOWN=$((N_DENIALS_UNKNOWN + 1))
+}
 report() { # report <rc> <n>
-  local cost
+  local cost denied
   cost="$(cost_of "${COST:-0}" "${COST_UNKNOWN:-0}" "${CODEX_TOKENS:-0}")"
+  count_denials; denied="$DENIED"
   case "$1" in
-    0) R_LINE="review-replay: replayed — PR #$2 ($short, kit $KIT_SHORT): $R_COUNTS · cost $cost" ;;
+    0) R_LINE="review-replay: replayed — PR #$2 ($short, kit $KIT_SHORT): $R_COUNTS$denied · cost $cost" ;;
+    3) R_LINE="review-replay: incomplete — PR #$2 ($short, kit $KIT_SHORT): $R_COUNTS · $R_MSG$denied · cost $cost" ;;
     2) R_LINE="review-replay: skipped — PR #$2: $R_MSG" ;;
-    *) R_LINE="review-replay: failed — PR #$2: $R_STEP: $R_MSG"
+    *) R_LINE="review-replay: failed — PR #$2: $R_STEP: $R_MSG$denied"
        [ "$cost" = "claude \$0.00, codex 0 tokens" ] || R_LINE="$R_LINE · cost so far $cost" ;;
   esac
   TOTAL_COST="$(jq -n --argjson a "$TOTAL_COST" --argjson b "${COST:-0}" '$a + $b')"
@@ -582,16 +622,20 @@ report() { # report <rc> <n>
   else TOTAL_TOKENS=$((TOTAL_TOKENS + ${CODEX_TOKENS:-0})); fi
   LOGS=""
   # the run's scorecard reads its own copy: a later run can replace $REC before this one ends
-  if [ "$1" = 0 ] && ! cp "$REC_TMP/record.json" "$RUN_TMP/record-$((N_REPLAYED + 1)).json"; then
-    R_LINE="review-replay: failed — PR #$2: record: cannot keep a copy for the run's scorecard"; set -- 1 "$2"
-  fi
+  case "$1" in 0|3)
+    cp "$REC_TMP/record.json" "$RUN_TMP/record-$((N_REPLAYED + N_INCOMPLETE + 1)).json" \
+      || { R_LINE="review-replay: failed — PR #$2: record: cannot keep a copy for the run's scorecard"; set -- 1 "$2"; } ;;
+  esac
   if [ -d "${REC_TMP:-}" ] && ! save_record "$1"; then
     LOGS=""
-    if [ "$1" = 0 ]; then R_LINE="review-replay: failed — PR #$2: record: cannot write $REC"; set -- 1 "$2"
-    else R_LINE="$R_LINE (logs not saved: cannot write $REC)"; fi
+    case "$1" in
+      0|3) R_LINE="review-replay: failed — PR #$2: record: cannot write $REC"; set -- 1 "$2" ;;
+      *) R_LINE="$R_LINE (logs not saved: cannot write $REC)" ;;
+    esac
   fi
   case "$1" in
     0) N_REPLAYED=$((N_REPLAYED + 1)); R_LINE="$R_LINE · record $REC/postmortem.md" ;;
+    3) N_INCOMPLETE=$((N_INCOMPLETE + 1)); R_LINE="$R_LINE · record $REC/postmortem.md" ;;
     2) N_SKIPPED=$((N_SKIPPED + 1)) ;;
     *) N_FAILED=$((N_FAILED + 1)); [ -z "$LOGS" ] || R_LINE="$R_LINE (logs: $LOGS)" ;;
   esac
@@ -602,8 +646,8 @@ run_one() {
   local n="$1" rc
   short=""; CUR_PR="$n"; replay_pr "$n"; rc=$?
   stop_child
-  if ! remove_worktree; then
-    [ "$rc" = 1 ] || { R_STEP=cleanup; R_MSG="the replay worktree could not be removed"; rc=1; }
+  if ! remove_checkout; then
+    [ "$rc" = 1 ] || { R_STEP=cleanup; R_MSG="the replay checkout could not be removed"; rc=1; }
   fi
   report "$rc" "$n"; CUR_PR=""
 }
@@ -619,7 +663,7 @@ if [ -n "$RECENT" ]; then
   FOUND=0
   for n in $NUMS; do
     [ "$FOUND" -lt "$RECENT" ] || break
-    REC_TMP="$RUN_TMP/pr$n"; rm -rf "$REC_TMP"; mkdir -p "$REC_TMP"; REC="$STORE/pr$n-$KIT_SHORT"; short=""; COST=0; COST_UNKNOWN=0; CODEX_TOKENS=0
+    REC_TMP="$RUN_TMP/pr$n"; rm -rf "$REC_TMP"; mkdir -p "$REC_TMP"; REC="$STORE/pr$n-$KIT_SHORT"; short=""; COST=0; COST_UNKNOWN=0; CODEX_TOKENS=0; DENIALS="{}"
     CUR_PR="$n"; gather "$n"; rc=$?; CUR_PR=""
     if [ "$rc" = 0 ] && [ -z "$FIRST" ]; then N_UNREVIEWED=$((N_UNREVIEWED + 1)); rm -rf "$REC_TMP"; continue; fi
     FOUND=$((FOUND + 1))
@@ -631,50 +675,41 @@ if [ -n "$RECENT" ]; then
   RECENT_JSON="{\"asked\": $RECENT, \"found\": $FOUND, \"scanned\": $SCAN}"
 else
   for n in $PRS; do
-    if [ "$ATTEMPTED" -ge "$LIMIT" ]; then R_MSG="--limit $LIMIT reached"; REC_TMP=""; short=""; COST=0; COST_UNKNOWN=0; CODEX_TOKENS=0; report 2 "$n"; continue; fi
+    if [ "$ATTEMPTED" -ge "$LIMIT" ]; then R_MSG="--limit $LIMIT reached"; REC_TMP=""; short=""; COST=0; COST_UNKNOWN=0; CODEX_TOKENS=0; DENIALS="{}"; report 2 "$n"; continue; fi
     ATTEMPTED=$((ATTEMPTED + 1)); run_one "$n"
   done
 fi
 
 # --- aggregate -------------------------------------------------------------
 AGG="$RUN_DIR/aggregate.json"
+SCORE=(jq -L "$HUB/scripts/lib")
+N_SCORED=$((N_REPLAYED + N_INCOMPLETE))
 i=0; : > "$RUN_TMP/records.all" || die_run "cannot read the records back"
-while [ "$i" -lt "$N_REPLAYED" ]; do
+while [ "$i" -lt "$N_SCORED" ]; do
   i=$((i + 1)); cat "$RUN_TMP/record-$i.json" >> "$RUN_TMP/records.all" || die_run "cannot read the records back"
 done
 jq -s . "$RUN_TMP/records.all" > "$RUN_TMP/records.json" || die_run "cannot read the records back"
-jq -r --argjson r "$N_REPLAYED" --argjson s "$N_SKIPPED" --argjson f "$N_FAILED" --argjson u "$N_UNREVIEWED" '
-  def sum(p): map(p // 0) | add // 0;
-  "review-replay: aggregate — replayed \($r) / skipped \($s) / failed \($f)"
-  + (if $u > 0 then " (\($u) merged PR(s) CodeRabbit never reviewed passed over)" else "" end)
-  + " — caught \(sum(.counts.caught)) / missed \(sum(.counts.missed))"
-  + " (wrong lens \(sum(.missed_by_cause.wrong_lens)) / tracing \(sum(.missed_by_cause.tracing)) / threshold \(sum(.missed_by_cause.threshold)) / structural \(sum(.missed_by_cause.structural)))"
-  + " / rejected-wrongly \(sum(.counts.rejected_wrongly)) / noise \(sum(.counts.noise)) / unscored \(sum(.counts.unscored))",
-  ( [.[] | .pr as $pr | ((.findings // [])[] | select(.class == "missed") | {cause: (.cause // "unclassified"), pr: $pr, what: "missed: \(.file // "?") — \(.summary // "")"}),
-                        ((.proposals // [])[] | {cause: (.cause // "unclassified"), pr: $pr, what: "propose (\(.route // "?")) \(.file // "?"): \(.lines // "")"})]
-    | group_by(.cause) | .[]
-    | "lessons — \(.[0].cause) (\(map(select(.what | startswith("missed"))) | length) missed):",
-      (.[] | "  PR #\(.pr) \(.what)") )
-' "$RUN_TMP/records.json" > "$RUN_TMP/scorecard.txt" || die_run "cannot sum the records"
+PRS_JSON="{\"replayed\": $N_REPLAYED, \"incomplete\": $N_INCOMPLETE, \"skipped\": $N_SKIPPED, \"failed\": $N_FAILED, \"unreviewed_passed_over\": $N_UNREVIEWED}"
+COST_JSON="$(jq -n --argjson cost "$TOTAL_COST" --argjson cu "$N_COST_UNKNOWN" --argjson tokens "$TOTAL_TOKENS" --argjson tu "$N_TOKENS_UNKNOWN" \
+  '{claude_usd: $cost, claude_calls_of_unknown_cost: $cu, codex_tokens: $tokens, prs_of_unknown_codex_tokens: $tu}')" || die_run "cannot sum the cost"
+DENIALS_JSON="{\"commands\": $N_DENIED, \"prs_with_denials\": $N_PRS_DENIED, \"prs_of_unknown_denials\": $N_DENIALS_UNKNOWN}"
+"${SCORE[@]}" -r --argjson prs "$PRS_JSON" --argjson denials "$DENIALS_JSON" 'include "replay-scorecard";
+  "review-replay: aggregate — \($prs | prs_text) — \(tally | counts_text)",
+  lessons("PR #\(.pr)")' "$RUN_TMP/records.json" > "$RUN_TMP/scorecard.txt" || die_run "cannot sum the records"
 printf 'review-replay: cost — %s, failed and skipped PRs included\n' \
   "$(cost_of "$TOTAL_COST" "$N_COST_UNKNOWN" "$TOTAL_TOKENS")$([ "$N_TOKENS_UNKNOWN" = 0 ] || printf ' + unknown for %s PR(s)' "$N_TOKENS_UNKNOWN")" \
   >> "$RUN_TMP/scorecard.txt" || die_run "cannot sum the cost"
+"${SCORE[@]}" -rn --argjson d "$DENIALS_JSON" 'include "replay-scorecard"; "review-replay: denials — \($d | denials_text), failed PRs included"' \
+  >> "$RUN_TMP/scorecard.txt" || die_run "cannot sum the denials"
 while IFS= read -r l; do say "$l"; done < "$RUN_TMP/scorecard.txt"
-jq --arg run "$RUN_ID" --arg repo "$REPO" --arg ref "$KIT_REF" --arg sha "$KIT_SHA" --arg desc "$KIT_DESC" \
-   --argjson r "$N_REPLAYED" --argjson s "$N_SKIPPED" --argjson f "$N_FAILED" --argjson u "$N_UNREVIEWED" --argjson recent "$RECENT_JSON" \
-   --argjson cost "$TOTAL_COST" --argjson cu "$N_COST_UNKNOWN" --argjson tokens "$TOTAL_TOKENS" --argjson tu "$N_TOKENS_UNKNOWN" --arg check "$KIT_CHECK" \
-   --rawfile summary "$SUMMARY" '
-  def sum(p): map(p // 0) | add // 0;
-  {schema: "review-replay-run/v1", run: $run, repo: $repo, kit: {ref: $ref, sha: $sha, describe: $desc, check: $check}, recent: $recent,
-   prs: {replayed: $r, skipped: $s, failed: $f, unreviewed_passed_over: $u},
-   counts: {caught: sum(.counts.caught), missed: sum(.counts.missed), rejected_wrongly: sum(.counts.rejected_wrongly),
-            noise: sum(.counts.noise), unscored: sum(.counts.unscored)},
-   missed_by_cause: {wrong_lens: sum(.missed_by_cause.wrong_lens), tracing: sum(.missed_by_cause.tracing),
-                     threshold: sum(.missed_by_cause.threshold), structural: sum(.missed_by_cause.structural)},
-   cost: {claude_usd: $cost, claude_calls_of_unknown_cost: $cu, codex_tokens: $tokens, prs_of_unknown_codex_tokens: $tu},
+"${SCORE[@]}" --arg run "$RUN_ID" --arg repo "$REPO" --arg ref "$KIT_REF" --arg sha "$KIT_SHA" --arg desc "$KIT_DESC" \
+   --argjson prs "$PRS_JSON" --argjson recent "$RECENT_JSON" --argjson cost "$COST_JSON" --argjson denials "$DENIALS_JSON" --arg check "$KIT_CHECK" \
+   --rawfile summary "$SUMMARY" 'include "replay-scorecard";
+  {schema: "review-replay-run/v2", run: $run, repo: $repo, kit: {ref: $ref, sha: $sha, describe: $desc, check: $check}, recent: $recent,
+   prs: $prs} + tally + {cost: $cost, denials: $denials,
    summary: ($summary | split("\n") | map(select(. != ""))),
    records: .}' "$RUN_TMP/records.json" > "$AGG.tmp" && mv "$AGG.tmp" "$AGG" || die_run "cannot write $AGG"
 [ -z "$SUMMARY_LOST" ] || die "cannot write every line to $SUMMARY, so the run record is incomplete"
 RUN_DONE=1
 printf 'review-replay: run record — %s\n' "$RUN_DIR"
-[ "$N_FAILED" = 0 ]
+[ "$N_FAILED" = 0 ] && [ "$N_INCOMPLETE" = 0 ]

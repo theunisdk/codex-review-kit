@@ -301,19 +301,22 @@ rejected in a thread reply, so `/review-tune` learns from those too.
 
 **Replays** (`scripts/review-replay.sh <spoke> <PR>… | --recent N`, in the
 hub only) run the coverage loop on PRs that merged without a local verdict.
-For each PR it checks out the first commit CodeRabbit reviewed in a
-throwaway worktree, `<spoke>/.claude/worktrees/replay-pr<n>`. It overlays
-the hub kit at `--kit-ref` on the repo-owned files of that commit. Then it
-runs `review.sh`, adjudicates headlessly, and scores the verdict with
-`/review-postmortem --replay`. A replay measures **today's kit** on old
+For each PR it clones the first commit CodeRabbit reviewed into a
+throwaway checkout outside the spoke. The clone holds that commit's history
+and no ref or object past it, so the lenses and the adjudicator cannot read
+a later fix. It overlays the hub kit at `--kit-ref` on the repo-owned files
+of that commit. Then it runs `review.sh`, adjudicates headlessly, and scores
+the verdict with `/review-postmortem --replay`, which alone is given the
+spoke's objects to compare later heads. A replay measures **today's kit** on old
 code, not the review that ran then. A live postmortem says what this PR's
 review missed; a replay says what the current kit would still miss. It
 posts nothing, files nothing and pushes nothing. Its record goes to
 `<git common dir>/review-replay/pr<n>-<kit>/`, with each lens's raw output,
-and each run's scorecard to `review-replay/runs/<time>-<kit>/`. Neither goes
+each `claude` call's full transcript and its denied commands, and each run's
+scorecard to `review-replay/runs/<time>-<kit>/`. Neither goes
 to `review-history/`, so `/review-tune` and later postmortems do not read it
-as history. See
-OPERATING.md for what it costs and how to read it.
+as history. `scripts/review-replay-sum.sh` sums the scorecards of runs from
+several spokes. See OPERATING.md for what it costs and how to read it.
 
 Both commands **route** each lesson before writing it: repo-specific lessons
 land in the repo's `learnings.md` or `prompts.local/`. Anything that would

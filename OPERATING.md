@@ -62,9 +62,16 @@ Read a replay differently from a live postmortem:
   review that ran then found.
 - **The adjudication applies nothing.** No fixes and no re-review: the
   verdict is what `/review` would have decided before its step 4.
-- **The lenses may see later history.** The worktree shares the clone's
-  objects, so a lens that runs `git log --all` can see fix commits. Read the
-  catch rate as an upper bound.
+- **The lenses cannot see later history.** The lenses and the adjudicator
+  run in a temporary clone, outside the spoke, that holds the reviewed
+  commit's history and nothing else: no ref but its detached `HEAD`, no
+  remote, and no object of a later head or of the default branch, so
+  `git log --all` or `git diff HEAD origin/main` finds no fix commit. Only
+  then is the postmortem given the spoke's objects (as git alternates), so
+  it can compare later heads by SHA. It still sees none of the spoke's refs.
+  This isolates git history, not the filesystem: an agent that names a path
+  outside the clone, such as the spoke itself, can still read it. The
+  transcripts show whether one did.
 - **It runs the PR commit's own code,** as `/review` would on that branch:
   its `.review/config.sh` and `analyzers.local.sh`. So it replays merged PRs
   only, and skips one whose reviewed commit has a version of either file that
@@ -77,12 +84,41 @@ Read a replay differently from a live postmortem:
   CodeRabbit commented on that cannot be fetched fails the PR, rather than
   leaving its findings unscored. A re-run that fails keeps the scored record
   and writes its logs to `<record>.last-unscored`.
+- **A finding the postmortem could not compare makes the PR `incomplete`**,
+  not `replayed`: its line reads
+  `incomplete — … · <k> finding(s) unscored because a compare failed (<reason>)`.
+  It is one whose `unscored_reason` starts with `compare_failed`. The record
+  is kept, its counts go into the scorecard, and the run exits 1.
+- **Denied commands are shown, never dropped.** The headless `claude` may
+  run only single read-only commands, so a compound one (`cd … && …`) is
+  denied. A PR's line ends with `commands denied: <call> <n>` for each call
+  that had one, and with `<call> unknown` for a call that gave no list.
+  `denials —` totals them for the run. A denial alone does not fail the PR:
+  read what was denied in the record before trusting a classification.
+- **Each PR keeps its record** in `review-replay/pr<n>-<kit>/`:
+  `postmortem.md` and its `record.json`, `outcome.txt` (the PR's line),
+  `verdict.md`, `findings.json` and `findings.md`, `review.log`, each lens's
+  `raw/out-<lens>.json` and `raw/log-<lens>.txt`, and the GitHub data in
+  `github/`. Both `claude` calls keep their whole stream, every tool call and
+  its result, as `transcript-adjudicate.jsonl` and
+  `transcript-postmortem.jsonl`, and their result as `adjudicate.json` and
+  `postmortem.json`. `record.json` copies each call's `permission_denials`
+  into `replay.permission_denials`, with `null` for a call that gave no list.
+  A call whose transcript has no result fails the PR.
 - **Each run keeps its own record** in `review-replay/runs/<time>-<kit>/`.
   `summary.txt` opens with the kit and how its freshness was checked, then
   holds each PR's line, any note such as a short `--recent` scan, and the
-  scorecard. `aggregate.json` holds the same scorecard with each PR's record.
-  A run that stopped early says so in `summary.txt` and has no
-  `aggregate.json`.
+  scorecard. `aggregate.json` (`review-replay-run/v2`) holds the same
+  scorecard with each PR's record: replayed, incomplete, skipped and failed
+  PRs, the findings left unscored by a failed compare, the cost and the
+  denied commands. A run that stopped early says so in `summary.txt` and has
+  no `aggregate.json`.
+- **Runs sum across spokes** with
+  `scripts/review-replay-sum.sh <run dir>…` (`--json` for the combined
+  JSON). It prints the same scorecard over all of them, each lesson named by
+  `owner/repo#PR`. It refuses, rather than sums, a run with no
+  `aggregate.json`, one an older replay wrote, the same run twice, a PR
+  scored in two runs, and runs of different kits.
 
 Each PR costs one full `review.sh` run (six Codex lenses at the configured
 effort) plus two headless `claude -p` calls, capped by `--claude-budget`.
