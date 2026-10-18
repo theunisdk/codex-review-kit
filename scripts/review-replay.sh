@@ -56,12 +56,15 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ -n "$SPOKE" ] || usage
-for v in "$LIMIT" ${RECENT:+"$RECENT"}; do
-  case "$v" in ''|*[!0-9]*) echo "error: --limit and --recent take a positive number" >&2; exit 64 ;; esac
-  [ "$((10#$v))" -gt 0 ] || { echo "error: --limit and --recent take a positive number" >&2; exit 64; }
-done
-# 07 is not a JSON number, and the aggregate embeds them
-LIMIT=$((10#$LIMIT)); [ -z "$RECENT" ] || RECENT=$((10#$RECENT))
+# count_arg <value> — the positive count it names, without leading zeros (07 is not a JSON
+# number, and the aggregate embeds them); at most 9 digits, so shell arithmetic cannot wrap it
+count_arg() {
+  local v="${1#"${1%%[!0]*}"}"
+  case "$v" in ''|*[!0-9]*|??????????*) return 1 ;; esac
+  printf '%s' "$v"
+}
+LIMIT="$(count_arg "$LIMIT")" && { [ -z "$RECENT" ] || RECENT="$(count_arg "$RECENT")"; } \
+  || { echo "error: --limit and --recent take a positive number of at most 9 digits" >&2; exit 64; }
 case "$BUDGET" in ''|*[!0-9.]*) echo "error: --claude-budget takes a dollar amount" >&2; exit 64 ;; esac
 if [ -n "$RECENT" ] && [ -n "$PRS" ]; then echo "error: name PRs or pass --recent, not both" >&2; exit 64; fi
 if [ -z "$RECENT" ] && [ -z "$PRS" ]; then echo "error: name at least one PR, or pass --recent N" >&2; exit 64; fi
