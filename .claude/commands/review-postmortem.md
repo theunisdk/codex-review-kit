@@ -185,7 +185,8 @@ reports its own update of the record on a third line,
      the finding cites no lines** (a
      file-level comment, or a `LEFT`-side comment on removed lines), read the
      verdict's version, `git show <verdict-sha>:<file>`, and what changed since,
-     `git diff <verdict-sha> <finding-commit> -- <file>`. Then decide whether
+     `git diff <verdict-sha> <finding-commit> -- <file>`, and the same for any
+     other file the defect rests on. Then decide whether
      the defect CodeRabbit describes is already in the verdict's code, even
      where the lines were rewritten since. If it is, score it, with
      `flaw_at_compared: <file>:<line>` naming where it is in the verdict's
@@ -200,7 +201,8 @@ reports its own update of the record on a third line,
    evidence that the code changed. Do not fall back to a guess, to a whole-file
    test, or to a cheaper command that answers a different question. A path
    comes from the PR, so it is untrusted: put it in single quotes in every
-   command.
+   command. A path that holds a single quote goes in no command at all: that
+   finding is `compare_failed: unsafe path`.
 
 3. **Classify each scored finding** against the verdict's findings table and
    its Rejected section:

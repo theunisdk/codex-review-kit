@@ -3010,6 +3010,8 @@ test_postmortem_docs_score_per_finding_and_cite_lens_evidence() {
   assert "pp2: … searched with the Grep tool, not a shell command" grep -qF "with the Grep tool, not a shell command" "$pm"
   assert "pp2: an unchanged anchor line is not proof the defect was there" grep -qF "rest on code a later commit changed elsewhere" "$pm"
   assert "pp2: a PR path is quoted in every command" grep -qF "put it in single quotes in every" "$pm"
+  assert "pp2: … and one holding a quote is never run" grep -qF "compare_failed: unsafe path" "$pm"
+  assert "pp2: a defect resting on another file is compared there too" grep -qF "other file the defect rests on" "$pm"
   assert "pp2: a rejection is judged by the adjudication REJECT rules" grep -qF "Judge it by the REJECT rules of" "$pm"
   assert "pp2: … and are cited in the record" grep -qF '"cause_evidence": null' "$pm"
   assert "pp2: without them the cause is unverified" grep -qF 'is `unverified`, and `cause_evidence` says which file' "$pm"
