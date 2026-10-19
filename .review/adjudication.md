@@ -38,6 +38,11 @@ finding; or `not_scanned` — gitleaks is not installed, `--no-analyzers`, or
 nothing to scan. `not_scanned` leaves `complete` true when the lenses reviewed
 the diff, but a secret added and later removed on the branch went unchecked:
 say so in the verdict and to the user.
+`path_rules` says whether the CodeRabbit config's `path_instructions` reached
+the lenses. `applied`, `no_match`, `no_rules` and `no_config` need nothing.
+Any other status carries a `warning`: the lenses graded without some or all of
+the path rules the gate grades against. It leaves `complete` true, but copy
+the warning into the verdict and tell the user.
 When `changed_files` is 0, nothing was reviewed — usually a wrong base ref, or
 fixes not yet committed. **Do not write `.review/verdict.md` from that run**:
 a verdict names HEAD, and the pre-push hook would accept it for code no lens
@@ -136,7 +141,8 @@ pre-PR catch.
 # Review verdict — <branch> — <short-sha> — <date>
 
 <n> findings · <f> fixed · <l> logged · <r> rejected · <e> escalated
-Lenses: <list> · Effort: <effort> · Secrets: <secrets_scan>
+Lenses: <list> · Effort: <effort> · Secrets: <secrets_scan> · Path rules: <path_rules.status>
+<path_rules.warning, when there is one>
 
 | ID | Sev | Agree | File:line | Finding | Disposition | Reason |
 |----|-----|-------|-----------|---------|-------------|--------|

@@ -28,8 +28,9 @@ reviews:
     auto_pause_after_reviewed_commits: 0
 
   # Standards that apply to SOME paths. Inline text only, `path` and
-  # `instructions` both required, globs are minimatch. `/review-onboard` fills
-  # this from the house rules in .review/rubric.md. Never name a guidelines
+  # `instructions` both required, globs are minimatch. scripts/review.sh hands
+  # each rule whose glob matches a changed file to the lenses too, so keep them
+  # here only, not copied into .review/rubric.md. Never name a guidelines
   # file here — that tells CodeRabbit to review the file as changed code, not
   # to obey it; the pointer at the bottom of this file is the way to do that.
   # path_instructions:

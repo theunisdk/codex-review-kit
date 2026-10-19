@@ -25,6 +25,8 @@ cd "$REPO_ROOT" || exit 1
 
 # shellcheck source=lib/common.sh
 . "$REPO_ROOT/scripts/lib/common.sh"
+# shellcheck source=lib/path-rules.sh
+. "$REPO_ROOT/scripts/lib/path-rules.sh"
 
 # --- defaults (override in .review/config.sh or via flags) -----------------
 LENSES="correctness,security,contracts,resources,tests,scope"
@@ -378,6 +380,9 @@ secret_warnings() {
 [ ! -s .review/rubric.md ] || [ -r .review/rubric.md ] || die "cannot read .review/rubric.md"
 [ -s .review/rubric.md ] || warn "no .review/rubric.md — lenses will not see this repository's house rules (run /review-onboard)"
 
+collect_path_rules "$OUT/changed-files.txt" "$OUT/path-rules.md"
+if [ -n "$PATH_RULES_WARNING" ]; then warn "path rules: $PATH_RULES_WARNING"; else info "$(path_rules_note)"; fi
+
 # --- launch lenses ---------------------------------------------------------
 pids=""; running=0; launched=""
 OLD_IFS="$IFS"; IFS=','
@@ -408,6 +413,10 @@ for lens in $LENSES; do
       echo "## House rules (\`.review/rubric.md\` — a violation is a finding for every lens)"
       echo
       cat .review/rubric.md
+      echo; echo "---"; echo
+    fi
+    if [ -s "$OUT/path-rules.md" ]; then
+      cat "$OUT/path-rules.md"
       echo; echo "---"; echo
     fi
     if [ -s .review/learnings-shared.md ]; then
@@ -498,13 +507,15 @@ if [ "$ok_lenses" -eq 0 ]; then
   failed_lenses="$failed_lenses${missing_lenses:-}"
   jq -n --arg failed "$(printf '%s' "${failed_lenses# }")" --argjson secrets "$SECRET_FINDINGS" \
     --argjson n "$CHANGED_COUNT" --arg scan "$SECRETS_SCAN" --arg mode "$MODE" --argjson head "$HEAD_JSON" \
+    --argjson path_rules "$PATH_RULES_JSON" \
     '{findings: $secrets, lenses_failed: ($failed | if . == "" then [] else split(" ") end), complete: false,
-      changed_files: $n, secrets_scan: $scan, mode: $mode, head: $head}' \
+      changed_files: $n, secrets_scan: $scan, mode: $mode, head: $head, path_rules: $path_rules}' \
     > .review/findings.json
   {
     printf '# Codex pre-PR review\n\n> **INCOMPLETE — every lens failed.** No area of this diff was reviewed.\n> Check `%s/log-*.txt`.\n\n' "$OUT"
     [ "$SECRETS_LEAKED" = 0 ] || printf '> **gitleaks found a secret** — see `.review/findings.json` and `%s/analyzers.txt`.\n\n' "$OUT"
     secret_notes
+    path_rules_note
   } > .review/findings.md
   REPORT_WRITTEN=1
   secret_warnings
@@ -539,13 +550,14 @@ UNREADABLE_COUNT=0
 [ -s "$OUT/unreadable.txt" ] && UNREADABLE_COUNT="$(grep -c . < "$OUT/unreadable.txt")"
 jq --arg failed "$FAILED_LIST" --arg unreadable "$(cat "$OUT/unreadable.txt" 2>/dev/null)" \
   --argjson secrets "$SECRET_FINDINGS" --argjson scan_failed "$SECRETS_FAILED" --argjson n "$CHANGED_COUNT" \
-  --arg scan "$SECRETS_SCAN" --arg mode "$MODE" --argjson head "$HEAD_JSON" '
+  --arg scan "$SECRETS_SCAN" --arg mode "$MODE" --argjson head "$HEAD_JSON" \
+  --argjson path_rules "$PATH_RULES_JSON" '
   .findings = ($secrets + .findings | to_entries | map(.value + {id: ("F" + ((.key + 1)|tostring))}))
   | . + { lenses_failed: ($failed | if . == "" then [] else split(" ") end),
         unreadable_paths: ($unreadable | split("\n") | map(select(. != ""))) }
   | . + { complete: ((.lenses_failed | length) == 0 and (.unreadable_paths | length) == 0 and $scan_failed == 0),
           changed_files: $n, secrets_scan: $scan,
-          mode: $mode, head: $head }
+          mode: $mode, head: $head, path_rules: $path_rules }
 ' .review/findings.json > .review/findings.json.tmp \
   && mv .review/findings.json.tmp .review/findings.json || die "could not finalise findings.json"
 
@@ -571,6 +583,8 @@ TOTAL="$(jq '.findings | length' .review/findings.json)"
     echo
   fi
   secret_notes
+  path_rules_note
+  echo
   if [ "$(jq '.findings | length' .review/findings.json)" -eq 0 ]; then
     if [ -n "$FAILED_LIST" ] || [ "$UNREADABLE_COUNT" -gt 0 ] || [ "$SECRETS_FAILED" = 1 ]; then
       echo "_No findings — but the run was incomplete, so this is not a clean result._"

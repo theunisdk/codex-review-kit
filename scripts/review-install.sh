@@ -31,7 +31,8 @@ ok()  { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 no()  { printf '  \033[31m✗\033[0m %s\n' "$*"; fail=1; }
 skip(){ printf '  \033[2m·\033[0m %s\n' "$*"; }
 
-have_yaml_parser() { python3 -c 'import yaml' 2>/dev/null; }
+# From /, so a repo-local yaml.py is never the module imported.
+have_yaml_parser() { ( cd / && python3 -c 'import yaml' ) 2>/dev/null; }
 
 # Print one line per wiring defect in a YAML CodeRabbit config; silence means
 # correctly wired. Parsed rather than grepped: the seeded template names
@@ -39,7 +40,7 @@ have_yaml_parser() { python3 -c 'import yaml' 2>/dev/null; }
 # path_instructions is not a guideline at all, and a valid config may quote
 # differently than the template.
 cfg_diagnose() {
-  python3 - "$1" 2>/dev/null <<'PYCFG'
+  ( cd / && python3 - "$REPO_ROOT/$1" ) 2>/dev/null <<'PYCFG'
 import sys, yaml
 
 
@@ -112,6 +113,8 @@ command -v claude >/dev/null 2>&1 && ok "claude" || skip "claude CLI not found (
 for c in semgrep gitleaks shellcheck; do
   command -v "$c" >/dev/null 2>&1 && ok "$c (optional analyzer)" || skip "$c not installed (optional)"
 done
+have_yaml_parser && ok "python3 yaml module (reads CodeRabbit path_instructions for the lenses)" \
+  || skip "python3 yaml module not installed (optional) — without it, a review in a repo with a YAML CodeRabbit config warns that the lenses did not see its path_instructions"
 [ "$fail" -eq 1 ] && { echo; echo "Install the missing required tools, then re-run." >&2; exit 1; }
 
 # --- 2. codex auth ---------------------------------------------------------
