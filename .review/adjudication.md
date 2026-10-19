@@ -44,9 +44,9 @@ Any other status carries a `warning`: the lenses graded without some or all of
 the path rules the gate grades against. It leaves `complete` true, but copy
 the warning into the verdict and tell the user.
 `analyzers` says which static analyzers produced results. A tool whose
-`status` is `skipped`, `failed` or `unknown` checked nothing, so do not take
-its silence as clean: run that check yourself in step 4, or name it in the
-verdict's `Analyzers:` field as not run.
+`status` is `skipped`, `failed` or `unknown` checked nothing, or not
+everything, so do not take its silence as clean: run that check yourself in
+step 4, or name it in the verdict's `Analyzers:` field as not run.
 When `changed_files` is 0, nothing was reviewed — usually a wrong base ref, or
 fixes not yet committed. **Do not write `.review/verdict.md` from that run**:
 a verdict names HEAD, and the pre-push hook would accept it for code no lens

@@ -48,7 +48,7 @@ _run_analyzer() {
     _analyzer_status "failed — $title could not run (rc=$rc): $why"
   elif [ "$rc" -eq 0 ] && [ -z "$out" ]; then
     _analyzer_status "ran — clean (rc=0, no output)"
-  elif [ "$rc" -gt 128 ] && sig="$(kill -l "$rc" 2> /dev/null)"; then
+  elif [ "$rc" -gt 128 ] && sig="$(kill -l "$rc" 2> /dev/null)" && [ -n "$sig" ]; then
     printf '%s\n' "$out" | head -200 >> "$report"
     _analyzer_status "unknown — $title was killed by SIG$sig, so it may have stopped before checking everything"
   elif [ -n "$re" ] && grep -qE -- "$re" <<< "$out"; then
@@ -408,7 +408,7 @@ collect_analyzer_output() {
           if [ "$tool_rc" -ne 0 ] && grep -q 'error TS5094' <<< "$tool_out"; then
             echo "analyzer skipped: tsc --build --noEmit needs TypeScript >= 5.6 (plain --build writes build output into the tree) — references not type-checked; wire it in .review/analyzers.local.sh" >> "$report"
             _analyzer_status "skipped — tsc --build --noEmit needs TypeScript >= 5.6"
-          elif [ "$tool_rc" -gt 128 ] && sig="$(kill -l "$tool_rc" 2> /dev/null)"; then
+          elif [ "$tool_rc" -gt 128 ] && sig="$(kill -l "$tool_rc" 2> /dev/null)" && [ -n "$sig" ]; then
             printf 'tsc %s killed by SIG%s — types are UNKNOWN, not clean:\n%s\n' \
               "$tsc_args" "$sig" "$(printf '%s\n' "$tool_out" | head -100)" >> "$report"
             _analyzer_status "unknown — tsc was killed by SIG$sig"
