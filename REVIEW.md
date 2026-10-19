@@ -185,7 +185,9 @@ the misses in each spoke's `review-history/` and `review-replay/` records
 (under its git common dir) since the last tag. Fold what recurred in two or
 more PRs into `learnings-shared.md` or a base prompt, close what is stale, and
 list what was folded in the release notes under its own heading, not
-`## Upgrading`, naming any spoke whose records could not be read.
+`## Upgrading`. The notes are public: describe each lesson generically, never
+with spoke code, and name a spoke whose records could not be read by alias,
+never by repo name or path.
 
 `make-plugin.sh` still exists for a Claude Code plugin build, but the runner
 reads prompts from the repo, not `${CLAUDE_PLUGIN_ROOT}` — the vendored spoke
