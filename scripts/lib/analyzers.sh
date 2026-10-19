@@ -34,7 +34,7 @@ _cannot_run_line() {
 # for the call, findings that include a line it matches (an import the tool
 # could not resolve) are unknown too: they may be missing dependencies, not code.
 _run_analyzer() {
-  local title="$1" re="$2" raw="$report.run" out="" rc kept why; shift 2
+  local title="$1" re="$2" raw="$report.run" out="" rc kept why sig; shift 2
   _section "$title"
   # the first 1 MB, and the rest drained unkept, so the tool keeps its own exit status
   "$@" < /dev/null 2>&1 | { head -c 1000000 > "$raw"; kept=$?; cat > /dev/null; exit "$kept"; }
@@ -48,9 +48,9 @@ _run_analyzer() {
     _analyzer_status "failed — $title could not run (rc=$rc): $why"
   elif [ "$rc" -eq 0 ] && [ -z "$out" ]; then
     _analyzer_status "ran — clean (rc=0, no output)"
-  elif [ "$rc" -ge 128 ]; then
+  elif [ "$rc" -gt 128 ] && sig="$(kill -l "$rc" 2> /dev/null)"; then
     printf '%s\n' "$out" | head -200 >> "$report"
-    _analyzer_status "unknown — $title was killed by signal $((rc - 128)), so it may have stopped before checking everything"
+    _analyzer_status "unknown — $title was killed by SIG$sig, so it may have stopped before checking everything"
   elif [ -n "$re" ] && grep -qE -- "$re" <<< "$out"; then
     printf '%s\n' "$out" | head -200 >> "$report"
     why=""
@@ -360,7 +360,7 @@ collect_analyzer_output() {
         _analyzer_status "skipped — dependencies are not installed (no node_modules)"
       done
     else
-      local runner runner_src f tool_out tool_rc tsc_args why
+      local runner runner_src f tool_out tool_rc tsc_args why sig
       local -a js_files; js_files=()
       runner="$(_js_runner)"; runner_src="${runner#*|}"; runner="${runner%%|*}"
       while IFS= read -r f; do js_files+=("$f"); done <<< "$js"
@@ -408,10 +408,10 @@ collect_analyzer_output() {
           if [ "$tool_rc" -ne 0 ] && grep -q 'error TS5094' <<< "$tool_out"; then
             echo "analyzer skipped: tsc --build --noEmit needs TypeScript >= 5.6 (plain --build writes build output into the tree) — references not type-checked; wire it in .review/analyzers.local.sh" >> "$report"
             _analyzer_status "skipped — tsc --build --noEmit needs TypeScript >= 5.6"
-          elif [ "$tool_rc" -ge 128 ]; then
-            printf 'tsc %s killed by signal %s — types are UNKNOWN, not clean:\n%s\n' \
-              "$tsc_args" "$((tool_rc - 128))" "$(printf '%s\n' "$tool_out" | head -100)" >> "$report"
-            _analyzer_status "unknown — tsc was killed by signal $((tool_rc - 128))"
+          elif [ "$tool_rc" -gt 128 ] && sig="$(kill -l "$tool_rc" 2> /dev/null)"; then
+            printf 'tsc %s killed by SIG%s — types are UNKNOWN, not clean:\n%s\n' \
+              "$tsc_args" "$sig" "$(printf '%s\n' "$tool_out" | head -100)" >> "$report"
+            _analyzer_status "unknown — tsc was killed by SIG$sig"
           elif grep -qE '\([0-9]+,[0-9]+\): error TS' <<< "$tool_out"; then
             printf 'tsc %s:\n%s\n' "$tsc_args" "$(printf '%s\n' "$tool_out" | head -100)" >> "$report"
             _analyzer_status "ran — type errors above"

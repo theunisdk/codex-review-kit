@@ -1397,6 +1397,7 @@ _run_analyzer vitest '^ FAIL ' bash -c 'echo "Error: Cannot find package '\''vit
 _run_analyzer banner0 '' bash -c 'echo "npm error could not determine executable to run"; exit 0'
 _run_analyzer clean '' true
 _run_analyzer killed ':[0-9]+: ' sh -c 'echo "a.py:1: error: x"; kill -9 $$'
+_run_analyzer exit200 ':[0-9]+: ' sh -c 'echo "a.py:1: error: x"; exit 200'
 _run_analyzer lint ':[0-9]+:[0-9]+: ' bash -c 'echo "a.sh:1:1: warning: unquoted"; exit 1'
 _run_analyzer crash ':[0-9]+:[0-9]+: ' bash -c 'echo "out of memory"; exit 2'
 _run_analyzer shapeless '' bash -c 'echo "3 problems"; exit 1'
@@ -1435,7 +1436,9 @@ EOF
   assert "al1: a bad unresolved-import pattern is unknown, not findings" \
     bash -c 'status_of "$1" badre | grep -qF "could not resolve an import" && status_of "$1" badre | grep -qF "is not a valid pattern"' _ "$r"
   assert "al1: findings from a tool killed by a signal are unknown" \
-    bash -c '[ "$(status_of "$1" killed)" = "analyzer status: unknown — killed was killed by signal 9, so it may have stopped before checking everything" ]' _ "$r"
+    bash -c '[ "$(status_of "$1" killed)" = "analyzer status: unknown — killed was killed by SIGKILL, so it may have stopped before checking everything" ]' _ "$r"
+  assert "al1: … but a plain exit status above 128 is not a signal" \
+    bash -c '[ "$(status_of "$1" exit200)" = "analyzer status: ran — findings above (rc=200)" ]' _ "$r"
   assert "al1: output that could not be kept is unknown, not clean" \
     bash -c '[ "$(status_of "$1" unkept)" = "analyzer status: unknown — unkept exited rc=0, but its output could not be kept" ]' _ "$r"
   assert "al1: every section has exactly one status line" \
@@ -1444,7 +1447,7 @@ EOF
     jq -e '.analyzers.status == "ran" and (.analyzers.tools | map(select(.name | test("^(semgrep|shellcheck)") | not) | {(.name): .status}) | add) == {
       "gitleaks (secrets)": "ran", tsc: "failed", vitest: "failed", banner0: "failed", clean: "ran", lint: "ran",
       crash: "unknown", shapeless: "unknown", "legacy-banner": "failed", "legacy-plain": "unknown", "legacy-empty": "unknown",
-      flood: "ran", nogo: "failed", badre: "unknown", unkept: "unknown", killed: "unknown"}
+      flood: "ran", nogo: "failed", badre: "unknown", unkept: "unknown", killed: "unknown", exit200: "ran"}
       and (.analyzers.tools[] | select(.name == "tsc") | .reason | startswith("tsc could not run"))' "$json"
   assert "al1: a tool that did not run leaves complete alone" jq -e '.complete == true' "$json"
   assert "al1: the lens prompt names each tool that produced no results" \
@@ -1517,6 +1520,17 @@ test_js_without_deps_and_tsc_evidence() {
   js_review j23 "printf '{}' > package.json; : > pnpm-lock.yaml; printf '{}' > tsconfig.json"
   assert "j23: tsc with no located error and no known failure is unknown, not clean" \
     bash -c '[ "$(status_of "$1" tsc)" = "analyzer status: unknown — rc=2 with no located type error" ] && grep -qF "types are UNKNOWN, not clean" "$1"' _ "$JS_REPORT"
+  mkdir -p "$WORK/j24-stub"
+  printf 'pnpm\n' > "$WORK/j24-stub/runner"; printf '137\n' > "$WORK/j24-stub/tsc.rc"; printf '0\n' > "$WORK/j24-stub/eslint.rc"
+  printf "app.ts(1,14): error TS2322: Type 'string' is not assignable to type 'number'.\n" > "$WORK/j24-stub/tsc.out"
+  local j23_report="$JS_REPORT"
+  js_review j24 "printf '{}' > package.json; : > pnpm-lock.yaml; printf '{}' > tsconfig.json"
+  assert "j24: tsc killed after a located error is unknown, with its partial output kept" \
+    bash -c '[ "$(status_of "$1" tsc)" = "analyzer status: unknown — tsc was killed by SIGKILL" ] && grep -qF "error TS2322" "$1"' _ "$JS_REPORT"
+  assert "j24: … and reaches findings.json and the lens prompt as unknown" \
+    sh -c 'jq -e ".analyzers.tools[] | select(.name == \"tsc\") | .status == \"unknown\"" "$1" && grep -qF "  - tsc (unknown — tsc was killed by SIGKILL)" "$2"' \
+    _ "$WORK/j24/.review/findings.json" "$WORK/j24/.review/raw/prompt-correctness.md"
+  JS_REPORT="$j23_report"
   assert "j23: eslint rc 1 that never loaded is failed, not findings" \
     bash -c 'status_of "$1" eslint | grep -qF "analyzer status: failed — eslint could not run: Error: Cannot find package" && grep -qF "eslint FAILED (rc=1)" "$1"' _ "$JS_REPORT"
 }
