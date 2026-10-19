@@ -1405,6 +1405,7 @@ _section legacy-empty
 _run_analyzer flood ':[0-9]+: ' sh -c 'yes "f.sh:1: noisy" | head -c 3000000; exit 3'
 _run_analyzer nogo ':[0-9]+: ' sh -c 'echo "exec: \"go\": executable file not found in \$PATH"; exit 1'
 ANALYZER_UNRESOLVED_RE='(' _run_analyzer badre ':[0-9]+: ' sh -c 'echo "a.py:1: error: x"; exit 1'
+mkdir "$report.run"; _run_analyzer unkept '' true; rmdir "$report.run"
 EOF
   ( cd "$AREPO" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
   run_review_analyzers "$AREPO" "$ASTUB" main
@@ -1432,13 +1433,15 @@ EOF
       && ! ls "$1".run' _ "$r"
   assert "al1: a bad unresolved-import pattern is unknown, not findings" \
     bash -c 'status_of "$1" badre | grep -qF "could not resolve an import" && status_of "$1" badre | grep -qF "is not a valid pattern"' _ "$r"
+  assert "al1: output that could not be kept is unknown, not clean" \
+    bash -c '[ "$(status_of "$1" unkept)" = "analyzer status: unknown — unkept exited rc=0, but its output could not be kept" ]' _ "$r"
   assert "al1: every section has exactly one status line" \
     bash -c '[ "$(awk "/^### /{ if (n) print c; n = 1; c = 0 } /^analyzer status: /{ c++ } END { print c }" "$1" | sort -u)" = 1 ]' _ "$r"
   assert "al1: findings.json carries each tool's status" \
     jq -e '.analyzers.status == "ran" and (.analyzers.tools | map(select(.name | test("^(semgrep|shellcheck)") | not) | {(.name): .status}) | add) == {
       "gitleaks (secrets)": "ran", tsc: "failed", vitest: "failed", banner0: "failed", clean: "ran", lint: "ran",
       crash: "unknown", shapeless: "unknown", "legacy-banner": "failed", "legacy-plain": "unknown", "legacy-empty": "unknown",
-      flood: "ran", nogo: "failed", badre: "unknown"}
+      flood: "ran", nogo: "failed", badre: "unknown", unkept: "unknown"}
       and (.analyzers.tools[] | select(.name == "tsc") | .reason | startswith("tsc could not run"))' "$json"
   assert "al1: a tool that did not run leaves complete alone" jq -e '.complete == true' "$json"
   assert "al1: the lens prompt names each tool that produced no results" \
@@ -1542,6 +1545,15 @@ test_mypy_unresolved_imports_are_unknown() {
     bash -c 'status_of "$1" mypy | grep -qF "analyzer status: unknown — mypy could not resolve an import, so its findings may be missing dependencies, not code (rc=1): app.py:1: error: Cannot find implementation"' \
     _ "$AREPO/.review/raw/analyzers.txt"
   assert "al4: … and both lines are still shown" grep -qF 'app.py:3: error: Incompatible types' "$AREPO/.review/raw/analyzers.txt"
+
+  local form
+  for form in 'app.py:1: error: Library stubs not installed for "yaml"' 'app.py:1: error: Skipping analyzing "x": module is installed, but missing library stubs or py.typed marker  [import-untyped]'; do
+    printf '#!/bin/sh\ncat <<"OUT"\n%s\nOUT\nexit 1\n' "$form" > "$WORK/al4-bin/mypy"
+    ( cd "$AREPO" && PATH="$WORK/al4-bin:$WORK/abin:$WORK/bin:$PATH" CODEX_STUB_DIR="$ASTUB" ANALYZER_STUB_DIR="$ASTUB" \
+        REVIEW_SKIP_AUTH_CHECK=1 bash scripts/review.sh --lenses correctness main ) > "$AREPO.log" 2>&1
+    assert "al4: missing stubs alone are unknown too: ${form#app.py:1: error: }" \
+      bash -c 'status_of "$1" mypy | grep -qF "analyzer status: unknown — mypy could not resolve an import"' _ "$AREPO/.review/raw/analyzers.txt"
+  done
 }
 
 # --- updater fixtures ------------------------------------------------------
