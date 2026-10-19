@@ -11,6 +11,7 @@
 #     --json            print the combined scorecard as JSON instead
 #     --aliases <file>  name each repo by its alias, and print lessons as counts
 #                       only, so the output is safe to paste into the public hub.
+#                       Its JSON is review-replay-sum-public/v1: no records.
 #                       One "<owner/repo> <alias>" per line; # starts a comment.
 #                       A repo the file does not cover is refused, and errors
 #                       name each run by its argument number, not its path.
@@ -121,7 +122,8 @@ SCORE=(jqq -L "$HUB/scripts/lib")
 # aliased: no spoke path, no record, and lessons as counts — what each finding quotes is spoke code
 if [ -n "$ALIASES" ]; then
   "${SCORE[@]}" 'include "replay-scorecard";
-    del(.records) + {runs: (.runs | map(del(.spoke, .path))), lessons: (.records | lesson_counts("\(.repo) #\(.pr)"))}' \
+    del(.records) + {schema: "review-replay-sum-public/v1", runs: (.runs | map(del(.spoke, .path))),
+                     lessons: (.records | lesson_counts("\(.repo) #\(.pr)"))}' \
     "$TMP/sum.json" > "$TMP/sum.aliased" && mv "$TMP/sum.aliased" "$TMP/sum.json" || die "cannot alias the scorecard"
 fi
 

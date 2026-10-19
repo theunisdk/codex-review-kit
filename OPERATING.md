@@ -132,7 +132,8 @@ Read a replay differently from a live postmortem:
   `owner/repo#PR` and quoting the spoke's paths and code. For the public hub,
   pass `--aliases <file>` (one `<owner/repo> <alias>` per line): it names each
   repo by its alias, prints lessons as counts per cause, and refuses a repo
-  the file does not cover. It refuses, rather than sums, a run with no
+  the file does not cover; its `--json` is `review-replay-sum-public/v1`,
+  with no records. It refuses, rather than sums, a run with no
   `aggregate.json`, one an older replay wrote, the same run twice, a PR
   scored in two runs, and runs of different kits.
 

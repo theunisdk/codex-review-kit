@@ -1396,6 +1396,7 @@ _run_analyzer tsc '\([0-9]+,[0-9]+\): error TS' bash -c 'printf "\n%s\n\n" "    
 _run_analyzer vitest '^ FAIL ' bash -c 'echo "Error: Cannot find package '\''vitest'\'' imported from vitest.config.ts"; exit 1'
 _run_analyzer banner0 '' bash -c 'echo "npm error could not determine executable to run"; exit 0'
 _run_analyzer clean '' true
+_run_analyzer killed ':[0-9]+: ' sh -c 'echo "a.py:1: error: x"; kill -9 $$'
 _run_analyzer lint ':[0-9]+:[0-9]+: ' bash -c 'echo "a.sh:1:1: warning: unquoted"; exit 1'
 _run_analyzer crash ':[0-9]+:[0-9]+: ' bash -c 'echo "out of memory"; exit 2'
 _run_analyzer shapeless '' bash -c 'echo "3 problems"; exit 1'
@@ -1433,6 +1434,8 @@ EOF
       && ! ls "$1".run' _ "$r"
   assert "al1: a bad unresolved-import pattern is unknown, not findings" \
     bash -c 'status_of "$1" badre | grep -qF "could not resolve an import" && status_of "$1" badre | grep -qF "is not a valid pattern"' _ "$r"
+  assert "al1: findings from a tool killed by a signal are unknown" \
+    bash -c '[ "$(status_of "$1" killed)" = "analyzer status: unknown — killed was killed by signal 9, so it may have stopped before checking everything" ]' _ "$r"
   assert "al1: output that could not be kept is unknown, not clean" \
     bash -c '[ "$(status_of "$1" unkept)" = "analyzer status: unknown — unkept exited rc=0, but its output could not be kept" ]' _ "$r"
   assert "al1: every section has exactly one status line" \
@@ -1441,7 +1444,7 @@ EOF
     jq -e '.analyzers.status == "ran" and (.analyzers.tools | map(select(.name | test("^(semgrep|shellcheck)") | not) | {(.name): .status}) | add) == {
       "gitleaks (secrets)": "ran", tsc: "failed", vitest: "failed", banner0: "failed", clean: "ran", lint: "ran",
       crash: "unknown", shapeless: "unknown", "legacy-banner": "failed", "legacy-plain": "unknown", "legacy-empty": "unknown",
-      flood: "ran", nogo: "failed", badre: "unknown", unkept: "unknown"}
+      flood: "ran", nogo: "failed", badre: "unknown", unkept: "unknown", killed: "unknown"}
       and (.analyzers.tools[] | select(.name == "tsc") | .reason | startswith("tsc could not run"))' "$json"
   assert "al1: a tool that did not run leaves complete alone" jq -e '.complete == true' "$json"
   assert "al1: the lens prompt names each tool that produced no results" \
@@ -1450,7 +1453,7 @@ EOF
   assert "al1: … and says only a ran section holds results" grep -qF 'only a `ran` section holds results' "$prompt"
   assert "al1: findings.md names them too" \
     bash -c 'grep -qF "These analyzers produced no results" "$1" && grep -qF "> - vitest (failed — " "$1"' _ "$md"
-  assert "al1: the run warns" grep -qE 'analyzer\(s\) produced no results: .*tsc vitest banner0 crash' "$LOG"
+  assert "al1: the run warns" grep -qE 'analyzer\(s\) produced no results: .*tsc vitest banner0 killed crash' "$LOG"
 }
 
 # The other "nothing"s: no analyzers.txt because the pass was turned off, because
@@ -4170,7 +4173,7 @@ test_replay_sum_across_spokes() {
     sh -c '! grep -qiF "o/r" "$1" && ! grep -qF "src.txt" "$1" && ! grep -qF "$2" "$1" && ! grep -qF " missed: " "$1"' _ "$WORK/r13.pub" "$WORK"
   bash "$hub/scripts/review-replay-sum.sh" --json --aliases "$WORK/r13.aliases" "$a" "$b" > "$WORK/r13.pub.json" 2>&1
   assert "r13: --json --aliases carries counts and aliases only" \
-    sh -c 'jq -e "(has(\"records\") | not) and .counts.caught == 2 and (.runs | map(.repo) | unique) == [\"S1\"] and all(.runs[]; has(\"spoke\") or has(\"path\") | not)
+    sh -c 'jq -e ".schema == \"review-replay-sum-public/v1\" and (has(\"records\") | not) and .counts.caught == 2 and (.runs | map(.repo) | unique) == [\"S1\"] and all(.runs[]; has(\"spoke\") or has(\"path\") | not)
       and .lessons == [{cause: \"wrong_lens\", missed: 2, proposals: 2, prs: [\"S1 #1\", \"S1 #6\"]}]" "$1" \
       && ! grep -qiF "o/r" "$1" && ! grep -qF "src.txt" "$1" && ! grep -qF "$2" "$1"' _ "$WORK/r13.pub.json" "$WORK"
   mkdir -p "$WORK/r13-runs/freecause"; jq '.run = "free-run" | .records[0].pr = 7 | .records[0].findings |= map(.cause = "see src.txt line 3")' "$b/aggregate.json" > "$WORK/r13-runs/freecause/aggregate.json"
