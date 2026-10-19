@@ -4256,6 +4256,9 @@ test_replay_sum_across_spokes() {
   bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$b" "$WORK/r13-runs/dup" > "$WORK/r13.pub" 2>&1; rc=$?
   assert "r13: … and a PR scored twice by alias" \
     sh -c '[ "$2" -eq 1 ] && grep -qF "s1#6 is scored in more than one run" "$1" && ! grep -qiF "o/r" "$1"' _ "$WORK/r13.pub" "$rc"
+  bash "$hub/scripts/review-replay-sum.sh" --aliases "" "$a" > "$WORK/r13.pub" 2>&1; rc=$?
+  assert "r13: an empty --aliases is a usage error, not the private output" \
+    sh -c '[ "$2" -eq 64 ] && grep -qF -- "--aliases needs a file" "$1" && ! grep -qiF "o/r" "$1"' _ "$WORK/r13.pub" "$rc"
   printf 'x/y S2\n' > "$WORK/r13.aliases2"
   bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases2" "$a" > "$WORK/r13.pub" 2>&1; rc=$?
   assert "r13: a repo the alias file does not cover is refused, not printed by name" \

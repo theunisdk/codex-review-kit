@@ -32,7 +32,7 @@ JSON=""; ALIASES=""; RUNS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --json)    JSON=1 ;;
-    --aliases) [ $# -ge 2 ] || { echo "error: --aliases needs a file" >&2; usage; }
+    --aliases) [ $# -ge 2 ] && [ -n "$2" ] || { echo "error: --aliases needs a file" >&2; usage; }
                ALIASES="$2"; shift ;;
     -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
     -*)        echo "error: unknown flag: $1" >&2; usage ;;
