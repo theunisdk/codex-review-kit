@@ -1411,6 +1411,9 @@ _section legacy-banner; printf 'tsc rc=1\n%s\n' "This is not the tsc command you
 _section legacy-plain; echo "lint: clean" >> "$report"
 _section legacy-empty
 _run_analyzer flood ':[0-9]+: ' sh -c 'yes "f.sh:1: noisy" | head -c 3000000; exit 3'
+_run_analyzer late ':[0-9]+: ' sh -c 'yes "preamble" | head -c 999950; echo; echo "late.sh:9: found"; exit 1'
+_run_analyzer exact '' sh -c 'yes "x" | head -c 1000000'
+_run_analyzer over '' sh -c 'yes "x" | head -c 1000001'
 _run_analyzer nogo ':[0-9]+: ' sh -c 'echo "exec: \"go\": executable file not found in \$PATH"; exit 1'
 ANALYZER_UNRESOLVED_RE='(' _run_analyzer badre ':[0-9]+: ' sh -c 'echo "a.py:1: error: x"; exit 1'
 mkdir "$report.run"; _run_analyzer unkept '' true; rmdir "$report.run"
@@ -1439,6 +1442,8 @@ EOF
   assert "al1: a flood of output is capped, says so, and is still labelled" \
     bash -c '[ "$(status_of "$1" flood)" = "analyzer status: ran — findings above (rc=3)" ] && [ "$(section_body "$1" flood | grep -c .)" -le 202 ] \
       && section_body "$1" flood | grep -qF "(output cut at 1 MB" && ! section_body "$1" lint | grep -qF "output cut" \
+      && [ "$(status_of "$1" late)" = "analyzer status: ran — findings above (rc=1)" ] \
+      && ! section_body "$1" exact | grep -qF "output cut" && section_body "$1" over | grep -qF "(output cut at 1 MB" \
       && ! ls "$1".run' _ "$r"
   assert "al1: a bad unresolved-import pattern is unknown, not findings" \
     bash -c 'status_of "$1" badre | grep -qF "could not resolve an import" && status_of "$1" badre | grep -qF "is not a valid pattern"' _ "$r"
@@ -1454,7 +1459,8 @@ EOF
     jq -e '.analyzers.status == "ran" and (.analyzers.tools | map(select(.name | test("^(semgrep|shellcheck)") | not) | {(.name): .status}) | add) == {
       "gitleaks (secrets)": "ran", tsc: "failed", vitest: "failed", banner0: "failed", clean: "ran", lint: "ran",
       crash: "unknown", shapeless: "unknown", "legacy-banner": "failed", "legacy-plain": "unknown", "legacy-empty": "unknown",
-      flood: "ran", nogo: "failed", badre: "unknown", unkept: "unknown", killed: "unknown", exit200: "ran"}
+      flood: "ran", nogo: "failed", badre: "unknown", unkept: "unknown", killed: "unknown", exit200: "ran",
+      late: "ran", exact: "ran", over: "ran"}
       and (.analyzers.tools[] | select(.name == "tsc") | .reason | startswith("tsc could not run"))' "$json"
   assert "al1: a tool that did not run leaves complete alone" jq -e '.complete == true' "$json"
   assert "al1: the lens prompt names each tool that produced no results" \
@@ -4216,12 +4222,19 @@ test_replay_sum_across_spokes() {
   assert "r13: … and jq quotes nothing it choked on" \
     sh -c '[ "$2" -eq 1 ] && grep -qF "argument 1" "$1" && ! grep -qF "src.txt" "$1" && ! grep -qiF "o/r" "$1"' _ "$WORK/r13.pub" "$rc"
   mkdir -p "$WORK/r13-runs/odd"
-  for bad in '.run = "/home/someone/client-x/run"' '.kit.describe = "client x"' '.records[0].pr = "o/r#1"' '.schema = "client-x-secret"'; do
+  for bad in '.run = "/home/someone/client-x/run"' '.kit.sha = "client-x"' '.records[0].pr = "o/r#1"' '.schema = "client-x-secret"' \
+             '.prs.replayed = "client-x"' '.cost.claude_usd = "client-x"' '.denials.commands = "client-x"'; do
     jq "$bad" "$b/aggregate.json" > "$WORK/r13-runs/odd/aggregate.json"
     bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$WORK/r13-runs/odd" > "$WORK/r13.pub" 2>&1; rc=$?
     assert "r13: aliased output refuses, and does not echo, a field not shaped as review-replay.sh writes it: $bad" \
       sh -c '[ "$2" -eq 1 ] && grep -qF "argument 1" "$1" && ! grep -qE "client|someone|o/r" "$1"' _ "$WORK/r13.pub" "$rc"
   done
+  jq '.kit.describe = "release/client-x"' "$b/aggregate.json" > "$WORK/r13-runs/odd/aggregate.json"
+  bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$WORK/r13-runs/odd" > "$WORK/r13.pub" 2>&1; rc=$?
+  bash "$hub/scripts/review-replay-sum.sh" --json --aliases "$WORK/r13.aliases" "$WORK/r13-runs/odd" > "$WORK/r13.pub.json" 2>&1
+  assert "r13: a kit tag outside the safe set is printed as the kit SHA, not refused" \
+    sh -c '[ "$2" -eq 0 ] && grep -qE "^review-replay-sum: runs — 1 run\(s\) of kit ([0-9a-f]{7}) \(\1\)" "$1" && ! grep -qF "client" "$1" "$3"' \
+    _ "$WORK/r13.pub" "$rc" "$WORK/r13.pub.json"
   bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/client-x-missing.aliases" "$a" > "$WORK/r13.pub" 2>&1; rc=$?
   assert "r13: … nor the alias file's own path" sh -c '[ "$2" -eq 1 ] && grep -qF "cannot read the alias file" "$1" && ! grep -qF "client-x" "$1"' _ "$WORK/r13.pub" "$rc"
   if [ "$(id -u)" != 0 ]; then

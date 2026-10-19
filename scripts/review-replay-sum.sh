@@ -84,9 +84,9 @@ for r in "${RUNS[@]}"; do
   jqq -e '(.spoke | type) == "string" and (.run | type) == "string"' < "$f" > /dev/null || die "$lbl names no spoke or run, so it cannot be told apart from another run"
   # aliased output prints these as they are, so each must have the shape review-replay.sh gives it
   [ -z "$ALIASES" ] || jqq -e '(.run | test("^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{4,64}(-[0-9]+)?$"))
-      and (.kit.sha | type == "string" and test("^[0-9a-f]{40,64}$")) and (.kit.describe | type == "string" and test("^[A-Za-z0-9._+-]+$"))
+      and (.kit.sha | type == "string" and test("^[0-9a-f]{40,64}$"))
       and ([.records[]?.pr] | all(type == "number")) and ([.prs[]?, .cost[]?, .denials[]?] | all(type == "number"))' < "$f" > /dev/null \
-    || die "$lbl has a run name, kit name, PR number or count that is not the shape review-replay.sh writes, so alias mode will not print it"
+    || die "$lbl has a run name, kit SHA, PR number or count that is not the shape review-replay.sh writes, so alias mode will not print it"
   jqq -c --arg path "$lbl" '{path: $path, run, spoke, repo, kit, prs, cost, denials, records: [.repo as $r | .records[] | . + {repo: $r}]}' \
     < "$f" >> "$TMP/runs.all" \
     || die "cannot read $lbl"
@@ -128,8 +128,11 @@ SCORE=(jqq -L "$HUB/scripts/lib")
 
 # aliased: no spoke path, no record, and lessons as counts — what each finding quotes is spoke code
 if [ -n "$ALIASES" ]; then
+  # a tag may hold anything, a slash included: past the safe set, the kit goes by its SHA
   "${SCORE[@]}" 'include "replay-scorecard";
-    del(.records) + {schema: "review-replay-sum-public/v1", runs: (.runs | map(del(.spoke, .path))),
+    (.kit.describe |= (if type == "string" and test("^[A-Za-z0-9._+-]+$") then . else null end))
+    | .kit.describe //= .kit.sha[0:7]
+    | del(.records) + {schema: "review-replay-sum-public/v1", runs: (.runs | map(del(.spoke, .path))),
                      lessons: (.records | lesson_counts("\(.repo) #\(.pr)"))}' \
     "$TMP/sum.json" > "$TMP/sum.aliased" && mv "$TMP/sum.aliased" "$TMP/sum.json" || die "cannot alias the scorecard"
 fi
