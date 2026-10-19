@@ -72,6 +72,11 @@ Read a replay differently from a live postmortem:
   This isolates git history, not the filesystem: an agent that names a path
   outside the clone, such as the spoke itself, can still read it. The
   transcripts show whether one did.
+- **The clone has no installed dependencies.** An analyzer that needs them
+  is labelled in `.review/raw/analyzers.txt`, the lens prompt and
+  `findings.json` `analyzers` (`skipped`, `failed` or `unknown`, with the
+  reason), never passed on as results. Lenses that want a dependency's source
+  may look for it outside the clone.
 - **It runs the PR commit's own code,** as `/review` would on that branch:
   its `.review/config.sh` and `analyzers.local.sh`. So it replays merged PRs
   only, and skips one whose reviewed commit has a version of either file that
@@ -124,7 +129,11 @@ Read a replay differently from a live postmortem:
 - **Runs sum across spokes** with
   `scripts/review-replay-sum.sh <run dir>…` (`--json` for the combined
   JSON). It prints the same scorecard over all of them, each lesson named by
-  `owner/repo#PR`. It refuses, rather than sums, a run with no
+  `owner/repo#PR` and quoting the spoke's paths and code. For the public hub,
+  pass `--aliases <file>` (one `<owner/repo> <alias>` per line): it names each
+  repo by its alias, prints lessons as counts per cause, and refuses a repo
+  the file does not cover; its `--json` is `review-replay-sum-public/v1`,
+  with no records. It refuses, rather than sums, a run with no
   `aggregate.json`, one an older replay wrote, the same run twice, a PR
   scored in two runs, and runs of different kits.
 
@@ -153,7 +162,9 @@ model change.
 For the first few runs, look under the hood:
 
 - `.review/raw/log-<lens>.txt` — did all lenses actually produce output?
-- `.review/raw/analyzers.txt` — does it contain real sections for your stack?
+- `.review/raw/analyzers.txt` — does it contain real sections for your stack,
+  each ending `analyzer status: ran — …`? `findings.json` `analyzers` lists
+  the ones that did not.
 - `.review/raw/prompt-<lens>.md` — is your `prompts.local/` overlay and both
   learnings files present in the assembled prompt?
 - `@coderabbitai configuration` on the first PR — is the `.coderabbit.yaml`

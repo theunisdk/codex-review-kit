@@ -224,6 +224,7 @@ In Claude Code:
 | `unreadable_paths` | changed paths no lens could read |
 | `changed_files` | how many paths were reviewed; `0` means nothing was, and no verdict may be written from it |
 | `secrets_scan` | `clean`, `leaks` (a critical `gitleaks` finding carries it), `failed` (forces `complete: false`), or `not_scanned` (gitleaks not installed, `--no-analyzers`, or nothing to scan) |
+| `analyzers` | `{status, reason, tools}`. `status` is `ran`, `not_run` (`--no-analyzers`, spec mode) or `failed` (the pass broke). Each of `tools` is `{name, status, reason}`, with `status` `ran`, `skipped`, `failed` or `unknown`; only `ran` holds results. A tool that did not run leaves `complete` alone, but what it checks went unchecked |
 | `history_scan` | zero-change runs on a branch with commits only: `{commits, result}` for the history scan |
 | `mode` | `branch`, `uncommitted` or `spec`. An `uncommitted` verdict names its commit as `<head>+uncommitted`, which clears no push |
 | `head` | HEAD's short SHA when the run started; `null` on a branch with no commits |
@@ -440,4 +441,6 @@ templates/             hub only: seeds for the repo-owned files (--init)
 - **Add your stack's linters** to `.review/analyzers.local.sh` (never to
   `scripts/lib/analyzers.sh`, which the next sync overwrites). Their output is
   fed to Codex as "already covered, don't re-report" — which is what pushes the
-  lenses toward semantic bugs instead of lint-level noise.
+  lenses toward semantic bugs instead of lint-level noise. Run each one through
+  `_run_analyzer` (see `templates/analyzers.local.sh`), so a tool that could
+  not run is labelled `failed` or `unknown` rather than passed on as results.
