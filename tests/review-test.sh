@@ -1222,6 +1222,9 @@ test_semgrep_failure_is_named() {
   semgrep_case sg2 1 '{"results":[{"path":"src.txt","start":{"line":1},"check_id":"rule.x","extra":{"message":"bad"}}],"errors":[]}'
   assert     "sg2: rc 1 lists the finding" grep -qF -- '- src.txt:1 [rule.x] bad' "$SG_REPORT"
   assert_not "sg2: rc 1 is not FAILED" grep -qF 'semgrep FAILED' "$SG_REPORT"
+  assert     "sg2: … and its findings are ran" \
+    sh -c 'grep -qxF "analyzer status: ran — findings above" "$1" && jq -e ".analyzers.tools[] | select(.name == \"semgrep --config=auto\") | .status == \"ran\"" "$2"' \
+    _ "$SG_REPORT" "$AREPO/.review/findings.json"
 
   semgrep_case sg3 2 '' 'semgrep: invalid configuration'
   assert "sg3: rc 2 is FAILED" grep -qF 'semgrep FAILED (rc=2)' "$SG_REPORT"
@@ -1272,6 +1275,9 @@ test_js_runner_follows_package_manager() {
     JS_REPORT="$AREPO/.review/raw/analyzers.txt"
     assert "$id: eslint run as '$want'" grep -qxF "$want app.ts" "$ASTUB/runner.calls"
     assert "$id: eslint findings reported" grep -qF "'x' is assigned a value" "$JS_REPORT"
+    assert "$id: … and labelled ran" \
+      sh -c 'awk "/^### eslint\$/ { on = 1; next } /^### / { on = 0 } on" "$1" | grep -qxF "analyzer status: ran — findings above" \
+        && jq -e ".analyzers.tools[] | select(.name == \"eslint\") | .status == \"ran\"" "$2"' _ "$JS_REPORT" "$AREPO/.review/findings.json"
     assert_js_sections_nonempty "$id" tsc
   done <<'EOF'
 j1~printf '{"packageManager":"pnpm@9.1.0"}' > package.json; : > package-lock.json~pnpm~pnpm exec eslint
@@ -3169,6 +3175,9 @@ test_findings_name_mode_and_head_on_every_path() {
   assert "um5: every lens failed" grep -qF 'every lens failed' "$LOG"
   assert "um5: … and findings.json still names the mode and HEAD" \
     jq -e --arg h "$short" '.complete == false and .mode == "uncommitted" and .head == $h' "$repo/.review/findings.json"
+  assert "um5: … and its analyzers, with the note findings.md carries" \
+    sh -c 'jq -e ".analyzers == {status: \"not_run\", reason: \"--no-analyzers\", tools: []}" "$1" && grep -qF "Analyzers were NOT run (--no-analyzers)" "$2"' \
+    _ "$repo/.review/findings.json" "$repo/.review/findings.md"
 
   rm "$repo/new.txt"
   run_review "$repo" "$stub" --uncommitted --lenses correctness
