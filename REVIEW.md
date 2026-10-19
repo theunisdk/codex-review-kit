@@ -180,9 +180,12 @@ variable, a change to the rubric or learnings format. The sync PR lifts that
 section to the top for every release it skips over, and flags a release
 without one as unreadable for contract changes.
 
-Before tagging, fold lessons: triage the open `lesson` issues and the misses
-in postmortem and replay records since the last release. Apply what recurred,
-close what is stale, and say in the release notes what was folded.
+**Folding lessons:** before tagging, triage the hub's open `lesson` issues and
+the misses in each spoke's `review-history/` and `review-replay/` records
+(under its git common dir) since the last tag. Fold what recurred in two or
+more PRs into `learnings-shared.md` or a base prompt, close what is stale, and
+list what was folded in the release notes under its own heading, not
+`## Upgrading`, naming any spoke whose records could not be read.
 
 `make-plugin.sh` still exists for a Claude Code plugin build, but the runner
 reads prompts from the repo, not `${CLAUDE_PLUGIN_ROOT}` — the vendored spoke
