@@ -36,10 +36,15 @@ _cannot_run_line() {
 _run_analyzer() {
   local title="$1" re="$2" raw="$report.run" out="" rc kept why sig; shift 2
   _section "$title"
-  # the first 1 MB, and the rest drained unkept, so the tool keeps its own exit status
-  "$@" < /dev/null 2>&1 | { head -c 1000000 > "$raw"; kept=$?; cat > /dev/null; exit "$kept"; }
+  # the first 1 MB and a byte to tell it was cut, the rest drained unkept, so the
+  # tool keeps its own exit status
+  "$@" < /dev/null 2>&1 | { head -c 1000001 > "$raw"; kept=$?; cat > /dev/null; exit "$kept"; }
   rc=${PIPESTATUS[0]} kept=${PIPESTATUS[1]}
-  [ "$kept" -eq 0 ] && out="$(cat "$raw")" || kept=1; rm -f "$raw"
+  [ "$kept" -eq 0 ] && out="$(head -c 1000000 "$raw")" || kept=1
+  if [ "$kept" -eq 0 ] && [ "$(wc -c < "$raw")" -gt 1000000 ]; then
+    echo "(output cut at 1 MB: anything after it, including findings, is not shown)" >> "$report"
+  fi
+  rm -f "$raw"
   why="$(_cannot_run_line "$out")"
   if [ "$kept" -ne 0 ]; then
     _analyzer_status "unknown — $title exited rc=$rc, but its output could not be kept"

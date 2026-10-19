@@ -50,17 +50,17 @@ if [ -n "$ALIASES" ]; then jqq() { jq "$@" 2> /dev/null; }; else jqq() { jq "$@"
 
 # {"owner/repo" (lower case): alias}; the alias must not be able to carry a repo name
 if [ -n "$ALIASES" ]; then
-  [ -f "$ALIASES" ] && [ -r "$ALIASES" ] || die "cannot read the alias file $ALIASES"
+  [ -f "$ALIASES" ] && [ -r "$ALIASES" ] || die "cannot read the alias file"
   sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$ALIASES" | grep . > "$TMP/aliases.txt"
-  [ $? -le 1 ] || die "cannot read the alias file $ALIASES"
-  [ -s "$TMP/aliases.txt" ] || die "the alias file $ALIASES names no repo"
+  [ $? -le 1 ] || die "cannot read the alias file"
+  [ -s "$TMP/aliases.txt" ] || die "the alias file names no repo"
   bad="$(grep -vnE '^[^/[:space:]]+/[^/[:space:]]+[[:space:]]+[A-Za-z0-9_-]+$' "$TMP/aliases.txt" | head -n1)"
   [ -z "$bad" ] || die "alias file line is not \"<owner/repo> <alias>\" with a letters, digits, _ or - alias: ${bad%%:*} (comments and blank lines not counted)"
   jq -R -s 'split("\n") | map(select(. != "") | [splits("[[:space:]]+")] | {key: (.[0] | ascii_downcase), value: .[1]})
     | if (map(.key) | unique | length) != length then error("a repo is named twice")
       elif (map(.value | ascii_downcase) | unique | length) != length then error("two repos share an alias")
       else from_entries end' "$TMP/aliases.txt" > "$TMP/aliases.json" 2> "$TMP/aliases.err" \
-    || die "bad alias file $ALIASES: $(sed 's/^jq: error[^:]*: //' "$TMP/aliases.err" | head -n1)"
+    || die "bad alias file: $(sed 's/^jq: error[^:]*: //' "$TMP/aliases.err" | head -n1)"
 fi
 
 : > "$TMP/runs.all"; i=0
@@ -77,9 +77,16 @@ for r in "${RUNS[@]}"; do
   [ -f "$f" ] && [ -r "$f" ] || die "$lbl cannot be read"
   jqq -e 'type == "object" and (.schema | type) == "string"' < "$f" > /dev/null 2>&1 || die "$lbl is not a replay run's aggregate"
   schema="$(jqq -r .schema < "$f")"
-  [ "$schema" = review-replay-run/v2 ] \
-    || die "$lbl is $schema, not review-replay-run/v2: an older review-replay.sh wrote it, without its incomplete PRs and denied commands — re-run it"
+  if [ "$schema" != review-replay-run/v2 ]; then
+    [ -z "$ALIASES" ] || schema="another schema"
+    die "$lbl is $schema, not review-replay-run/v2: an older review-replay.sh wrote it, without its incomplete PRs and denied commands — re-run it"
+  fi
   jqq -e '(.spoke | type) == "string" and (.run | type) == "string"' < "$f" > /dev/null || die "$lbl names no spoke or run, so it cannot be told apart from another run"
+  # aliased output prints these as they are, so each must have the shape review-replay.sh gives it
+  [ -z "$ALIASES" ] || jqq -e '(.run | test("^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{4,64}(-[0-9]+)?$"))
+      and (.kit.sha | type == "string" and test("^[0-9a-f]{40,64}$")) and (.kit.describe | type == "string" and test("^[A-Za-z0-9._+-]+$"))
+      and ([.records[]?.pr] | all(type == "number")) and ([.prs[]?, .cost[]?, .denials[]?] | all(type == "number"))' < "$f" > /dev/null \
+    || die "$lbl has a run name, kit name, PR number or count that is not the shape review-replay.sh writes, so alias mode will not print it"
   jqq -c --arg path "$lbl" '{path: $path, run, spoke, repo, kit, prs, cost, denials, records: [.repo as $r | .records[] | . + {repo: $r}]}' \
     < "$f" >> "$TMP/runs.all" \
     || die "cannot read $lbl"

@@ -1436,8 +1436,9 @@ EOF
     bash -c 'status_of "$1" legacy-plain | grep -qF "analyzer status: unknown — no exit status was recorded"' _ "$r"
   assert "al1: an empty section is unknown, not clean" \
     bash -c 'status_of "$1" legacy-empty | grep -qF "analyzer status: unknown — the section is empty"' _ "$r"
-  assert "al1: a flood of output is capped, and still labelled" \
-    bash -c '[ "$(status_of "$1" flood)" = "analyzer status: ran — findings above (rc=3)" ] && [ "$(section_body "$1" flood | grep -c .)" -le 201 ] \
+  assert "al1: a flood of output is capped, says so, and is still labelled" \
+    bash -c '[ "$(status_of "$1" flood)" = "analyzer status: ran — findings above (rc=3)" ] && [ "$(section_body "$1" flood | grep -c .)" -le 202 ] \
+      && section_body "$1" flood | grep -qF "(output cut at 1 MB" && ! section_body "$1" lint | grep -qF "output cut" \
       && ! ls "$1".run' _ "$r"
   assert "al1: a bad unresolved-import pattern is unknown, not findings" \
     bash -c 'status_of "$1" badre | grep -qF "could not resolve an import" && status_of "$1" badre | grep -qF "is not a valid pattern"' _ "$r"
@@ -4199,7 +4200,7 @@ test_replay_sum_across_spokes() {
     sh -c 'jq -e ".schema == \"review-replay-sum-public/v1\" and (has(\"records\") | not) and .counts.caught == 2 and (.runs | map(.repo) | unique) == [\"S1\"] and all(.runs[]; has(\"spoke\") or has(\"path\") | not)
       and .lessons == [{cause: \"wrong_lens\", missed: 2, proposals: 2, prs: [\"S1 #1\", \"S1 #6\"]}]" "$1" \
       && ! grep -qiF "o/r" "$1" && ! grep -qF "src.txt" "$1" && ! grep -qF "$2" "$1"' _ "$WORK/r13.pub.json" "$WORK"
-  mkdir -p "$WORK/r13-runs/freecause"; jq '.run = "free-run" | .records[0].pr = 7 | .records[0].findings |= map(.cause = "see src.txt line 3")' "$b/aggregate.json" > "$WORK/r13-runs/freecause/aggregate.json"
+  mkdir -p "$WORK/r13-runs/freecause"; jq '.run = "20261019T000001Z-abcdef1" | .records[0].pr = 7 | .records[0].findings |= map(.cause = "see src.txt line 3")' "$b/aggregate.json" > "$WORK/r13-runs/freecause/aggregate.json"
   bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$a" "$WORK/r13-runs/freecause" > "$WORK/r13.pub" 2>&1; rc=$?
   assert "r13: … and a free-text cause is printed as other, never quoted" \
     sh -c '[ "$2" -eq 0 ] && grep -qE "^lessons — other \(1 missed, " "$1" && ! grep -qF "src.txt" "$1"' _ "$WORK/r13.pub" "$rc"
@@ -4213,7 +4214,16 @@ test_replay_sum_across_spokes() {
   jq '.records = ["see src.txt in o/r"]' "$b/aggregate.json" > "$WORK/r13-runs/norecords/aggregate.json"
   bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$WORK/r13-runs/norecords" > "$WORK/r13.pub" 2>&1; rc=$?
   assert "r13: … and jq quotes nothing it choked on" \
-    sh -c '[ "$2" -eq 1 ] && grep -qF "cannot read argument 1" "$1" && ! grep -qF "src.txt" "$1" && ! grep -qiF "o/r" "$1"' _ "$WORK/r13.pub" "$rc"
+    sh -c '[ "$2" -eq 1 ] && grep -qF "argument 1" "$1" && ! grep -qF "src.txt" "$1" && ! grep -qiF "o/r" "$1"' _ "$WORK/r13.pub" "$rc"
+  mkdir -p "$WORK/r13-runs/odd"
+  for bad in '.run = "/home/someone/client-x/run"' '.kit.describe = "client x"' '.records[0].pr = "o/r#1"' '.schema = "client-x-secret"'; do
+    jq "$bad" "$b/aggregate.json" > "$WORK/r13-runs/odd/aggregate.json"
+    bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$WORK/r13-runs/odd" > "$WORK/r13.pub" 2>&1; rc=$?
+    assert "r13: aliased output refuses, and does not echo, a field not shaped as review-replay.sh writes it: $bad" \
+      sh -c '[ "$2" -eq 1 ] && grep -qF "argument 1" "$1" && ! grep -qE "client|someone|o/r" "$1"' _ "$WORK/r13.pub" "$rc"
+  done
+  bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/client-x-missing.aliases" "$a" > "$WORK/r13.pub" 2>&1; rc=$?
+  assert "r13: … nor the alias file's own path" sh -c '[ "$2" -eq 1 ] && grep -qF "cannot read the alias file" "$1" && ! grep -qF "client-x" "$1"' _ "$WORK/r13.pub" "$rc"
   if [ "$(id -u)" != 0 ]; then
     chmod 000 "$WORK/r13-runs/norecords/aggregate.json"
     bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$WORK/r13-runs/norecords" > "$WORK/r13.pub" 2>&1; rc=$?
@@ -4221,7 +4231,7 @@ test_replay_sum_across_spokes() {
       sh -c '[ "$2" -eq 1 ] && grep -qF "argument 1 cannot be read" "$1" && ! grep -qF "$3" "$1"' _ "$WORK/r13.pub" "$rc" "$WORK"
     chmod 644 "$WORK/r13-runs/norecords/aggregate.json"
   fi
-  mkdir -p "$WORK/r13-runs/dup"; jq '.run = "dup-run"' "$b/aggregate.json" > "$WORK/r13-runs/dup/aggregate.json"
+  mkdir -p "$WORK/r13-runs/dup"; jq '.run = "20261019T000002Z-abcdef1"' "$b/aggregate.json" > "$WORK/r13-runs/dup/aggregate.json"
   bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$b" "$WORK/r13-runs/dup" > "$WORK/r13.pub" 2>&1; rc=$?
   assert "r13: … and a PR scored twice by alias" \
     sh -c '[ "$2" -eq 1 ] && grep -qF "s1#6 is scored in more than one run" "$1" && ! grep -qiF "o/r" "$1"' _ "$WORK/r13.pub" "$rc"
