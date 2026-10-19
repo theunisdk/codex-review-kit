@@ -1410,10 +1410,10 @@ _run_analyzer shapeless '' bash -c 'echo "3 problems"; exit 1'
 _section legacy-banner; printf 'tsc rc=1\n%s\n' "This is not the tsc command you are looking for" >> "$report"
 _section legacy-plain; echo "lint: clean" >> "$report"
 _section legacy-empty
-_run_analyzer flood ':[0-9]+: ' sh -c 'yes "f.sh:1: noisy" | head -c 3000000; exit 3'
-_run_analyzer late ':[0-9]+: ' sh -c 'yes "preamble" | head -c 999950; echo; echo "late.sh:9: found"; exit 1'
-_run_analyzer exact '' sh -c 'yes "x" | head -c 1000000'
-_run_analyzer over '' sh -c 'yes "x" | head -c 1000001'
+_run_analyzer flood ':[0-9]+: ' sh -c 'yes "f.sh:1: noisy" 2> /dev/null | head -c 3000000; exit 3'
+_run_analyzer late ':[0-9]+: ' sh -c 'yes "preamble" 2> /dev/null | head -c 999950; echo; echo "late.sh:9: found"; exit 1'
+_run_analyzer exact '' sh -c 'yes "x" 2> /dev/null | head -c 1000000'
+_run_analyzer over '' sh -c 'yes "x" 2> /dev/null | head -c 1000001'
 _run_analyzer nogo ':[0-9]+: ' sh -c 'echo "exec: \"go\": executable file not found in \$PATH"; exit 1'
 ANALYZER_UNRESOLVED_RE='(' _run_analyzer badre ':[0-9]+: ' sh -c 'echo "a.py:1: error: x"; exit 1'
 mkdir "$report.run"; _run_analyzer unkept '' true; rmdir "$report.run"
