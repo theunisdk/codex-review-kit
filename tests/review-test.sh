@@ -4224,7 +4224,8 @@ test_replay_sum_across_spokes() {
   mkdir -p "$WORK/r13-runs/odd"
   for bad in '.run = "/home/someone/client-x/run"' '.kit.sha = "client-x"' '.records[0].pr = "o/r#1"' '.schema = "client-x-secret"' \
              '.prs.replayed = "client-x"' '.cost.claude_usd = "client-x"' '.denials.commands = "client-x"' 'del(.cost.claude_usd)' \
-             '.records[0].counts.caught = "client-x"' '.records[0].missed_by_cause.tracing = "client-x"'; do
+             '.records[0].counts.caught = "client-x"' '.records[0].missed_by_cause.tracing = "client-x"' \
+             '.run += "\n"' '.records[0].findings[0].cause = 5' '.records[0].proposals = "client-x"'; do
     jq "$bad" "$b/aggregate.json" > "$WORK/r13-runs/odd/aggregate.json"
     bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$WORK/r13-runs/odd" > "$WORK/r13.pub" 2>&1; rc=$?
     assert "r13: aliased output refuses, and does not echo, a field not shaped as review-replay.sh writes it: $bad" \

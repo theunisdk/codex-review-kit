@@ -92,20 +92,21 @@ for r in "${RUNS[@]}"; do
     jqq -c --arg path "$lbl" '
       def num: if type == "number" then . else error("shape") end;
       def nums($ks): . as $o | if type == "object" then reduce $ks[] as $k ({}; . + {($k): ($o[$k] | num)}) else error("shape") end;
-      def shaped($re): if type == "string" and test($re) then . else error("shape") end;
-      def word: if type == "string" then . else null end;
+      def shaped($re): if type == "string" and test($re) and (contains("\n") | not) then . else error("shape") end;
+      def word: if type == "string" or type == "null" then . else error("shape") end;
+      def list: if type == "array" then .[] elif type == "null" then empty else error("shape") end;
       {path: $path, spoke, repo, run: (.run | shaped("^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{4,64}(-[0-9]+)?$")),
        kit: {sha: (.kit.sha | shaped("^[0-9a-f]{40,64}$")),
-             describe: (.kit.describe | if type == "string" and test("^[A-Za-z0-9._+-]+$") then . else null end)},
+             describe: (.kit.describe | if type == "string" and test("^[A-Za-z0-9._+-]+$") and (contains("\n") | not) then . else null end)},
        prs: (.prs | nums(["replayed", "incomplete", "skipped", "failed", "unreviewed_passed_over"])),
        cost: (.cost | nums(["claude_usd", "claude_calls_of_unknown_cost", "codex_tokens", "prs_of_unknown_codex_tokens"])),
        denials: (.denials | nums(["commands", "prs_with_denials", "prs_of_unknown_denials"])),
        records: [.repo as $r | .records[] | {repo: $r, pr: (.pr | num),
          counts: (.counts | nums(["caught", "missed", "rejected_wrongly", "noise", "unscored"])),
          missed_by_cause: (.missed_by_cause | nums(["wrong_lens", "tracing", "threshold", "structural"])),
-         findings: [(.findings // [])[] | {class: (.class | word), cause: (.cause | word),
+         findings: [.findings | list | {class: (.class | word), cause: (.cause | word),
            unscored_reason: (if (.unscored_reason | type) == "string" and (.unscored_reason | startswith("compare_failed")) then "compare_failed" else null end)}],
-         proposals: [(.proposals // [])[] | {cause: (.cause | word)}]}]}' \
+         proposals: [.proposals | list | {cause: (.cause | word)}]}]}' \
       < "$f" >> "$TMP/runs.all" \
       || die "$lbl has a field missing, or not the type and shape review-replay.sh writes, so alias mode will not print it"
   fi
