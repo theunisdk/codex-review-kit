@@ -1440,7 +1440,7 @@ EOF
   assert "al1: an empty section is unknown, not clean" \
     bash -c 'status_of "$1" legacy-empty | grep -qF "analyzer status: unknown — the section is empty"' _ "$r"
   assert "al1: a flood of output is capped, says so, and is still labelled" \
-    bash -c '[ "$(status_of "$1" flood)" = "analyzer status: ran — findings above (rc=3)" ] && [ "$(section_body "$1" flood | grep -c .)" -le 202 ] \
+    bash -c '[ "$(status_of "$1" flood)" = "analyzer status: ran — findings above (rc=3); output cut at 1 MB" ] && [ "$(section_body "$1" flood | grep -c .)" -le 202 ] \
       && section_body "$1" flood | grep -qF "(output cut at 1 MB" && ! section_body "$1" lint | grep -qF "output cut" \
       && [ "$(status_of "$1" late)" = "analyzer status: ran — findings above (rc=1)" ] \
       && ! section_body "$1" exact | grep -qF "output cut" && section_body "$1" over | grep -qF "(output cut at 1 MB" \
@@ -4216,19 +4216,26 @@ test_replay_sum_across_spokes() {
   mkdir -p "$WORK/r13-runs/norecords"; jq '.records = null' "$b/aggregate.json" > "$WORK/r13-runs/norecords/aggregate.json"
   bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$WORK/r13-runs/norecords" > "$WORK/r13.pub" 2>&1; rc=$?
   assert "r13: … and so does jq's own error on a malformed run" \
-    sh -c '[ "$2" -eq 1 ] && grep -qF "cannot read argument 1" "$1" && ! grep -qF "$3" "$1"' _ "$WORK/r13.pub" "$rc" "$WORK"
+    sh -c '[ "$2" -eq 1 ] && grep -qF "argument 1 has a field missing" "$1" && ! grep -qF "$3" "$1"' _ "$WORK/r13.pub" "$rc" "$WORK"
   jq '.records = ["see src.txt in o/r"]' "$b/aggregate.json" > "$WORK/r13-runs/norecords/aggregate.json"
   bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$WORK/r13-runs/norecords" > "$WORK/r13.pub" 2>&1; rc=$?
   assert "r13: … and jq quotes nothing it choked on" \
     sh -c '[ "$2" -eq 1 ] && grep -qF "argument 1" "$1" && ! grep -qF "src.txt" "$1" && ! grep -qiF "o/r" "$1"' _ "$WORK/r13.pub" "$rc"
   mkdir -p "$WORK/r13-runs/odd"
   for bad in '.run = "/home/someone/client-x/run"' '.kit.sha = "client-x"' '.records[0].pr = "o/r#1"' '.schema = "client-x-secret"' \
-             '.prs.replayed = "client-x"' '.cost.claude_usd = "client-x"' '.denials.commands = "client-x"'; do
+             '.prs.replayed = "client-x"' '.cost.claude_usd = "client-x"' '.denials.commands = "client-x"' 'del(.cost.claude_usd)' \
+             '.records[0].counts.caught = "client-x"' '.records[0].missed_by_cause.tracing = "client-x"'; do
     jq "$bad" "$b/aggregate.json" > "$WORK/r13-runs/odd/aggregate.json"
     bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$WORK/r13-runs/odd" > "$WORK/r13.pub" 2>&1; rc=$?
     assert "r13: aliased output refuses, and does not echo, a field not shaped as review-replay.sh writes it: $bad" \
       sh -c '[ "$2" -eq 1 ] && grep -qF "argument 1" "$1" && ! grep -qE "client|someone|o/r" "$1"' _ "$WORK/r13.pub" "$rc"
   done
+  jq '.kit.ref = "client-x" | .kit.check = "on client-x" | .kit.extra = "client-x" | .prs["client-x src/a.ts"] = 0
+      | .cost["client-x"] = 1 | .records[0].findings[0].extra = "client-x" | .records[0].extra = "client-x"' "$b/aggregate.json" > "$WORK/r13-runs/odd/aggregate.json"
+  bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$WORK/r13-runs/odd" > "$WORK/r13.pub" 2>&1; rc=$?
+  bash "$hub/scripts/review-replay-sum.sh" --json --aliases "$WORK/r13.aliases" "$WORK/r13-runs/odd" > "$WORK/r13.pub.json" 2>&1
+  assert "r13: fields the scorecard does not need never reach aliased output" \
+    sh -c '[ "$2" -eq 0 ] && jq -e ".kit | keys == [\"describe\", \"sha\"]" "$3" && ! grep -qF "client" "$1" "$3"' _ "$WORK/r13.pub" "$rc" "$WORK/r13.pub.json"
   jq '.kit.describe = "release/client-x"' "$b/aggregate.json" > "$WORK/r13-runs/odd/aggregate.json"
   bash "$hub/scripts/review-replay-sum.sh" --aliases "$WORK/r13.aliases" "$WORK/r13-runs/odd" > "$WORK/r13.pub" 2>&1; rc=$?
   bash "$hub/scripts/review-replay-sum.sh" --json --aliases "$WORK/r13.aliases" "$WORK/r13-runs/odd" > "$WORK/r13.pub.json" 2>&1

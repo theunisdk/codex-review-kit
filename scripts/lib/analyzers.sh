@@ -34,7 +34,7 @@ _cannot_run_line() {
 # for the call, findings that include a line it matches (an import the tool
 # could not resolve) are unknown too: they may be missing dependencies, not code.
 _run_analyzer() {
-  local title="$1" re="$2" raw="$report.run" out="" rc kept why sig; shift 2
+  local title="$1" re="$2" raw="$report.run" out="" rc kept why sig cut=""; shift 2
   _section "$title"
   # the first 1 MB and a byte to tell it was cut, the rest drained unkept, so the
   # tool keeps its own exit status
@@ -43,19 +43,20 @@ _run_analyzer() {
   [ "$kept" -eq 0 ] && out="$(head -c 1000000 "$raw")" || kept=1
   if [ "$kept" -eq 0 ] && [ "$(wc -c < "$raw")" -gt 1000000 ]; then
     echo "(output cut at 1 MB: anything after it, including findings, is not shown)" >> "$report"
+    cut="; output cut at 1 MB"
   fi
   rm -f "$raw"
   why="$(_cannot_run_line "$out")"
   if [ "$kept" -ne 0 ]; then
-    _analyzer_status "unknown — $title exited rc=$rc, but its output could not be kept"
+    _analyzer_status "unknown — $title exited rc=$rc, but its output could not be kept$cut"
   elif [ -n "$why" ]; then
     printf '%s\n' "$out" | head -20 >> "$report"
-    _analyzer_status "failed — $title could not run (rc=$rc): $why"
+    _analyzer_status "failed — $title could not run (rc=$rc): $why$cut"
   elif [ "$rc" -eq 0 ] && [ -z "$out" ]; then
-    _analyzer_status "ran — clean (rc=0, no output)"
+    _analyzer_status "ran — clean (rc=0, no output)$cut"
   elif [ "$rc" -gt 128 ] && sig="$(kill -l "$rc" 2> /dev/null)" && [ -n "$sig" ]; then
     printf '%s\n' "$out" | head -200 >> "$report"
-    _analyzer_status "unknown — $title was killed by SIG$sig, so it may have stopped before checking everything"
+    _analyzer_status "unknown — $title was killed by SIG$sig, so it may have stopped before checking everything$cut"
   elif [ -n "$re" ] && grep -qE -- "$re" <<< "$out"; then
     printf '%s\n' "$out" | head -200 >> "$report"
     why=""
@@ -64,17 +65,17 @@ _run_analyzer() {
       case $? in 0) why="$(printf '%s\n' "$why" | sed 's/^[[:space:]]*//' | cut -c 1-200)" ;; 1) ;; *) why="ANALYZER_UNRESOLVED_RE is not a valid pattern" ;; esac
     fi
     if [ -n "$why" ]; then
-      _analyzer_status "unknown — $title could not resolve an import, so its findings may be missing dependencies, not code (rc=$rc): $why"
+      _analyzer_status "unknown — $title could not resolve an import, so its findings may be missing dependencies, not code (rc=$rc): $why$cut"
     else
-      _analyzer_status "ran — findings above (rc=$rc)"
+      _analyzer_status "ran — findings above (rc=$rc)$cut"
     fi
   elif [ "$rc" -eq 0 ]; then
     printf '%s\n' "$out" | head -200 >> "$report"
-    _analyzer_status "ran — rc=0, output above"
+    _analyzer_status "ran — rc=0, output above$cut"
   else
     printf '%s\n' "$out" | head -20 >> "$report"
     if [ -n "$re" ]; then why="no output line is a finding"; else why="no findings pattern to tell a finding from a crash"; fi
-    _analyzer_status "unknown — rc=$rc and $why, so $title may not have checked anything"
+    _analyzer_status "unknown — rc=$rc and $why, so $title may not have checked anything$cut"
   fi
 }
 

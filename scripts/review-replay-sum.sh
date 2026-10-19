@@ -82,14 +82,33 @@ for r in "${RUNS[@]}"; do
     die "$lbl is $schema, not review-replay-run/v2: an older review-replay.sh wrote it, without its incomplete PRs and denied commands — re-run it"
   fi
   jqq -e '(.spoke | type) == "string" and (.run | type) == "string"' < "$f" > /dev/null || die "$lbl names no spoke or run, so it cannot be told apart from another run"
-  # aliased output prints these as they are, so each must have the shape review-replay.sh gives it
-  [ -z "$ALIASES" ] || jqq -e '(.run | test("^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{4,64}(-[0-9]+)?$"))
-      and (.kit.sha | type == "string" and test("^[0-9a-f]{40,64}$"))
-      and ([.records[]?.pr] | all(type == "number")) and ([.prs[]?, .cost[]?, .denials[]?] | all(type == "number"))' < "$f" > /dev/null \
-    || die "$lbl has a run name, kit SHA, PR number or count that is not the shape review-replay.sh writes, so alias mode will not print it"
-  jqq -c --arg path "$lbl" '{path: $path, run, spoke, repo, kit, prs, cost, denials, records: [.repo as $r | .records[] | . + {repo: $r}]}' \
-    < "$f" >> "$TMP/runs.all" \
-    || die "cannot read $lbl"
+  if [ -z "$ALIASES" ]; then
+    jqq -c --arg path "$lbl" '{path: $path, run, spoke, repo, kit, prs, cost, denials, records: [.repo as $r | .records[] | . + {repo: $r}]}' \
+      < "$f" >> "$TMP/runs.all" \
+      || die "cannot read $lbl"
+  else
+    # only the fields the scorecard needs, each the type and shape review-replay.sh writes:
+    # anything else in a run may be spoke text, and aliased output must not carry it
+    jqq -c --arg path "$lbl" '
+      def num: if type == "number" then . else error("shape") end;
+      def nums($ks): . as $o | if type == "object" then reduce $ks[] as $k ({}; . + {($k): ($o[$k] | num)}) else error("shape") end;
+      def shaped($re): if type == "string" and test($re) then . else error("shape") end;
+      def word: if type == "string" then . else null end;
+      {path: $path, spoke, repo, run: (.run | shaped("^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{4,64}(-[0-9]+)?$")),
+       kit: {sha: (.kit.sha | shaped("^[0-9a-f]{40,64}$")),
+             describe: (.kit.describe | if type == "string" and test("^[A-Za-z0-9._+-]+$") then . else null end)},
+       prs: (.prs | nums(["replayed", "incomplete", "skipped", "failed", "unreviewed_passed_over"])),
+       cost: (.cost | nums(["claude_usd", "claude_calls_of_unknown_cost", "codex_tokens", "prs_of_unknown_codex_tokens"])),
+       denials: (.denials | nums(["commands", "prs_with_denials", "prs_of_unknown_denials"])),
+       records: [.repo as $r | .records[] | {repo: $r, pr: (.pr | num),
+         counts: (.counts | nums(["caught", "missed", "rejected_wrongly", "noise", "unscored"])),
+         missed_by_cause: (.missed_by_cause | nums(["wrong_lens", "tracing", "threshold", "structural"])),
+         findings: [(.findings // [])[] | {class: (.class | word), cause: (.cause | word),
+           unscored_reason: (if (.unscored_reason | type) == "string" and (.unscored_reason | startswith("compare_failed")) then "compare_failed" else null end)}],
+         proposals: [(.proposals // [])[] | {cause: (.cause | word)}]}]}' \
+      < "$f" >> "$TMP/runs.all" \
+      || die "$lbl has a field missing, or not the type and shape review-replay.sh writes, so alias mode will not print it"
+  fi
 done
 jqq -s . "$TMP/runs.all" > "$TMP/runs.json" || die "cannot read the runs back"
 
@@ -130,8 +149,7 @@ SCORE=(jqq -L "$HUB/scripts/lib")
 if [ -n "$ALIASES" ]; then
   # a tag may hold anything, a slash included: past the safe set, the kit goes by its SHA
   "${SCORE[@]}" 'include "replay-scorecard";
-    (.kit.describe |= (if type == "string" and test("^[A-Za-z0-9._+-]+$") then . else null end))
-    | .kit.describe //= .kit.sha[0:7]
+    .kit.describe //= .kit.sha[0:7]
     | del(.records) + {schema: "review-replay-sum-public/v1", runs: (.runs | map(del(.spoke, .path))),
                      lessons: (.records | lesson_counts("\(.repo) #\(.pr)"))}' \
     "$TMP/sum.json" > "$TMP/sum.aliased" && mv "$TMP/sum.aliased" "$TMP/sum.json" || die "cannot alias the scorecard"
