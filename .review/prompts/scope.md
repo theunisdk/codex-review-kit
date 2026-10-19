@@ -17,7 +17,11 @@ Hunt specifically for:
   behaviour change smuggled inside a rename.
 - **Incomplete change** — a pattern applied to three of the four places it needed
   to be applied to; a renamed concept updated in code but not in docs, config, or
-  error strings; a TODO added with no ticket; a stub that returns a placeholder.
+  error strings; a TODO added with no ticket; a stub that returns a placeholder;
+  an item or an explanatory caveat added to, removed from or reordered in one
+  enumeration (a README list, CLI usage/help text, a menu, a dispatch table, a
+  per-check doc) but not its parallel ones: find every place the set is spelled
+  out and compare them.
 - **Debug residue** — `console.log`, `print`, `dbg!`, commented-out code, a
   hardcoded local URL, credentials in a fixture, `.only` or `.skip` left on a test,
   a temporarily loosened timeout or assertion.

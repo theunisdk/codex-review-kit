@@ -87,8 +87,10 @@ Exactly one disposition per finding:
 - **REJECT** — verified wrong, out of scope per `.review/rubric.md`, or a
   deliberate choice. **A one-line reason is mandatory.** "Not an issue" is not a
   reason; "callers already hold the lock, see `pool.rs:88`" is. A design
-  document that accepts a risk is not a reason when a cheap guard closes it (a
-  conditional write, compare-and-swap, If-Match): ESCALATE, naming the guard.
+  document that accepts a risk, or behaviour that is documented, tested or
+  deliberate, is no reason to REJECT a verified finding, or to fix only part of
+  it, when a cheap guard closes the rest (a conditional write, compare-and-swap,
+  If-Match, an allowlist): ESCALATE any half you keep, naming the guard.
 - **ESCALATE** — real, but the fix is a judgement call, a scope increase, or
   touches something you should not decide alone. Leave the code untouched.
 

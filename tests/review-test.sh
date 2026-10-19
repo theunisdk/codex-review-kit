@@ -3315,6 +3315,8 @@ test_postmortem_docs_score_per_finding_and_cite_lens_evidence() {
   assert "pp2: … and a file added after the verdict is added_after, not a failure" grep -qF "for \`added_after\`, not a failed compare" "$pm"
   assert "pp2: … once a rename is ruled out" grep -qF 'git diff -M --name-status <verdict-sha> <finding-commit>' "$pm"
   assert "pp2: a rejection is judged by the adjudication REJECT rules" grep -qF "Judge it by the REJECT rules of" "$pm"
+  assert "pp2: … where deliberate behaviour excuses no rejection or part-fix" grep -qF "deliberate behaviour, is not a reason to reject or part-fix" "$pm"
+  assert "pp2: … as adjudication §3 says" grep -qF "is no reason to REJECT a verified finding, or to fix only part of" "$KIT/.review/adjudication.md"
   assert "pp2: … and are cited in the record" grep -qF '"cause_evidence": null' "$pm"
   assert "pp2: without them the cause is unverified" grep -qF 'is `unverified`, and `cause_evidence` says which file' "$pm"
   assert "pp2: … counted apart from the four causes" grep -qF '/ structural d / unverified e)' "$pm"
