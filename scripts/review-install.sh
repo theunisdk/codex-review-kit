@@ -35,7 +35,7 @@ warn(){ printf '  \033[33m!\033[0m %s\n' "$*"; }
 
 # Print the top-level `model` value of a Codex profile. Returns 1 when it has
 # no top-level model line, 3 when that line holds no quoted name (it is then
-# printed raw), 2 when the file cannot be read.
+# printed raw), 2 when the file cannot be read or awk fails.
 profile_model() {
   local rc
   [ -r "$1" ] || return 2
@@ -182,13 +182,14 @@ TOML
   then
     ok "created: $PROFILE_FILE (pins $RECOMMENDED_MODEL)"
   else
+    rm -f "$PROFILE_FILE"
     no "could not write $PROFILE_FILE"
   fi
 fi
 if [ -f "$PROFILE_FILE" ]; then
   pinned="$(profile_model "$PROFILE_FILE")"; pin_rc=$?
   if [ "$pin_rc" -eq 2 ]; then
-    no "cannot read $PROFILE_FILE — which model it pins is unknown"
+    no "cannot read or parse $PROFILE_FILE — which model it pins is unknown"
   elif [ "$pin_rc" -eq 3 ]; then
     no "cannot parse the model line in $PROFILE_FILE ($pinned) — set it to: model = \"$RECOMMENDED_MODEL\""
   elif [ "$pin_rc" -eq 1 ]; then

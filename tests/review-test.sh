@@ -2994,8 +2994,8 @@ test_install_check_reports_profile_model() {
   assert     "i18: … and says no model is pinned" grep -qF 'profile pins no model' "$LOG"
   assert_not "i18: … not that a different one is" grep -qF 'not the fleet standard' "$LOG"
 
-  # Only a top-level key counts, in any TOML key and string spelling.
-  for pin in "model='gpt-6.1-sol'" '  "model" = "gpt-6.1-sol"   # pinned' 'model = """gpt-6.1-sol"""'; do
+  # Only a top-level key counts, in any single-line TOML key and string spelling.
+  for pin in "model='gpt-6.1-sol'" "'model' = 'gpt-6.1-sol'" '  "model" = "gpt-6.1-sol"   # pinned' 'model = """gpt-6.1-sol"""'; do
     { printf '%s\n' "$pin"; cat "$base"; } > "$profile"
     install_as --check
     assert   "i18: [$pin] reads as the fleet standard" grep -qF '(the fleet standard)' "$LOG"
@@ -3019,12 +3019,23 @@ test_install_check_reports_profile_model() {
     install_as --check; rc=$?
     chmod 644 "$profile"
     assert     "i18: an unreadable profile fails --check" test "$rc" -ne 0
-    assert     "i18: … and says it cannot be read" grep -qF "cannot read $profile" "$LOG"
+    assert     "i18: … and says it cannot be read" grep -qF "cannot read or parse $profile" "$LOG"
     assert_not "i18: … not that it pins no model" grep -qF 'profile pins no model' "$LOG"
     assert_not "i18: … nor that it matches" grep -qF '(the fleet standard)' "$LOG"
   else
     skip_test "i18: unreadable profile (running as root)"
   fi
+
+  # busybox awk exits 1 on a fatal error, the code a no-match once used.
+  local awkbin="$WORK/i18-awk"
+  mkdir -p "$awkbin"
+  printf '#!/bin/sh\ncase "$*" in *deep-review*) exit 1 ;; esac\nexec %s "$@"\n' "$(command -v awk)" > "$awkbin/awk"
+  chmod +x "$awkbin/awk"
+  ( cd "$spoke" && env -i HOME="$home" PATH="$awkbin:$WORK/bin:$PATH" \
+      bash scripts/review-install.sh --check ) > "$LOG" 2>&1; rc=$?
+  assert     "i18: an awk failure fails --check" test "$rc" -ne 0
+  assert     "i18: … as unreadable" grep -qF "cannot read or parse $profile" "$LOG"
+  assert_not "i18: … not as no model line" grep -qF 'profile pins no model' "$LOG"
 
   rm -f "$profile"
   install_as --check; rc=$?
@@ -3042,6 +3053,16 @@ test_install_check_reports_profile_model() {
   else
     skip_test "i18: unwritable profile (running as root)"
   fi
+
+  # Through a pipe: the file-size limit would also stop the log being written.
+  ( cd "$spoke" && ulimit -f 0 && trap '' XFSZ && env -i HOME="$home" PATH="$WORK/bin:$PATH" \
+      bash scripts/review-install.sh 2>&1; echo "rc=$?" ) | cat > "$LOG"
+  assert     "i18: a truncated write fails install" grep -qx 'rc=1' "$LOG"
+  assert     "i18: … and says so" grep -qF "could not write $profile" "$LOG"
+  assert     "i18: … and leaves no partial profile" test ! -e "$profile"
+  assert_not "i18: … nor a model verdict on one" grep -qE 'pins no model|fleet standard' "$LOG"
+  install_as
+  assert     "i18: … so the next install writes it" grep -qx 'model = "gpt-6.1-sol"' "$profile"
 }
 
 # Setting core.hooksPath over live .git/hooks hooks silently disables them.
