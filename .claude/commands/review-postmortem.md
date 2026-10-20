@@ -61,8 +61,8 @@ reports its own update of the record on a third line,
    commit; a clean pass may leave only that status. `Review rate limited` and
    `pending` are not reviews. With no non-empty review and no completed
    status, report `skipped — CodeRabbit has not reviewed PR #<n>`. If its
-   summary comment says the review was skipped or paused, report
-   `skipped — CodeRabbit skipped PR #<n>`.
+   status reads `Review skipped`, or its summary comment says the review was
+   skipped or paused, report `skipped — CodeRabbit skipped PR #<n>`.
 
 2. **Find the local verdict for the commit CodeRabbit first reviewed.** The
    comparison commit is the **first head CodeRabbit reviewed**: of its

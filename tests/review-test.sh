@@ -2469,6 +2469,7 @@ test_sync_behind_opens_one_pr() {
   assert_not "s2: the installed release's notes are not asked for" grep -q 'release view v0.9.0' "$GH_STUB/calls"
   assert     "s2: body carries the review-update.sh output" grep -q 'synced from kit @ v0.11.0' "$body"
   assert     "s2: body says it never merges" grep -q 'It never merges' "$body"
+  assert     "s2: the created PR's body asks CodeRabbit to skip it" grep -qx '@coderabbitai ignore' "$body"
 }
 
 # A sync PR already open: the same release leaves it alone; a newer release
@@ -2486,6 +2487,7 @@ test_sync_updates_the_open_pr() {
 
   hub_release "$SHUB" v0.12.0
   printf '{"headRefOid":"%s","commits":[{"oid":"%s","messageBody":"Review-Kit-Sync: v0.11.0"}]}\n' "$oid" "$oid" > "$GH_STUB/commits.json"
+  rm -f "$GH_STUB/body.md"
   run_sync; rc=$?
   assert "s3: a newer release exits 0" test "$rc" -eq 0
   assert "s3: the open PR is edited, base included" grep -q -- 'pr edit 12 --base main --title sync review kit to v0.12.0' "$GH_STUB/calls"
@@ -2495,6 +2497,7 @@ test_sync_updates_the_open_pr() {
   assert "s3: the new body still counts from the installed release" grep -q 'ten things' "$GH_STUB/body.md"
   assert "s3: a tag with no GitHub release says so in the body" \
     grep -q 'v0.12.0 is a tag with no GitHub release' "$GH_STUB/body.md"
+  assert "s3: the edited PR's body still asks CodeRabbit to skip it" grep -qx '@coderabbitai ignore' "$GH_STUB/body.md"
 
   hub_release "$SHUB" v0.13.0
   oid="$(git --git-dir="$SORIGIN" rev-parse review-kit-sync)"
