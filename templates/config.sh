@@ -4,8 +4,9 @@
 # Which lenses to run, in order. Drop one to go faster.
 # LENSES="correctness,security,contracts,resources,tests,scope"
 
-# Reasoning effort per lens (vocabulary is model-dependent; gpt-5.6-sol
-# accepts: none | low | medium | high | xhigh | max)
+# Reasoning effort per lens (vocabulary is model-dependent; gpt-6.1-sol
+# accepts: low | medium | high | xhigh | max | ultra). ultra adds automatic
+# task delegation — not for these headless, read-only lenses.
 # Start at high. Drop to medium if reviews feel slow before they feel shallow.
 # EFFORT="high"
 

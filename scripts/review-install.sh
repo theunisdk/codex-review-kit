@@ -22,6 +22,7 @@ cd "$REPO_ROOT" || exit 1
 
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 PROFILE_FILE="$CODEX_HOME/deep-review.config.toml"
+RECOMMENDED_MODEL="gpt-6.1-sol"
 MARK_START="<!-- BEGIN codex-review-kit -->"
 MARK_END="<!-- END codex-review-kit -->"
 fail=0
@@ -30,6 +31,27 @@ hdr() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 ok()  { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 no()  { printf '  \033[31m✗\033[0m %s\n' "$*"; fail=1; }
 skip(){ printf '  \033[2m·\033[0m %s\n' "$*"; }
+warn(){ printf '  \033[33m!\033[0m %s\n' "$*"; }
+
+# Print the top-level `model` value of a Codex profile. Returns 1 when it has
+# no top-level model line, 2 when it cannot be read.
+profile_model() {
+  local rc
+  [ -r "$1" ] || return 2
+  awk -v q="'" '
+    /^[[:space:]]*\[/ { exit }
+    /^[[:space:]]*model[[:space:]]*=/ {
+      v = $0; sub(/^[^=]*=[[:space:]]*/, "", v)
+      c = substr(v, 1, 1)
+      if (c == "\"" || c == q) { v = substr(v, 2); v = substr(v, 1, index(v, c) - 1) }
+      else { sub(/[[:space:]]*#.*/, "", v); sub(/[[:space:]]+$/, "", v) }
+      print v; found = 1; exit
+    }
+    END { exit !found }' "$1" && return 0
+  rc=$?
+  [ "$rc" -eq 1 ] && return 1
+  return 2
+}
 
 # From /, so a repo-local yaml.py is never the module imported.
 have_yaml_parser() { ( cd / && python3 -c 'import yaml' ) 2>/dev/null; }
@@ -133,7 +155,7 @@ elif [ "$CHECK_ONLY" -eq 1 ]; then
   no "missing: $PROFILE_FILE"
 else
   mkdir -p "$CODEX_HOME"
-  cat > "$PROFILE_FILE" <<'TOML'
+  cat > "$PROFILE_FILE" <<TOML
 # Codex profile for adversarial code review.
 # Selected with: codex --profile deep-review
 #
@@ -141,21 +163,32 @@ else
 # Do NOT wrap these in a [profiles.deep-review] table — that form is no longer read.
 
 # Pinned for now: the model everyone is using for code reviews. Model names
-# churn — when this stops resolving, check `/model` in the Codex TUI for what
+# churn — when this stops resolving, check \`/model\` in the Codex TUI for what
 # your plan exposes and re-pin.
-model = "gpt-5.6-sol"
+model = "$RECOMMENDED_MODEL"
 
-model_reasoning_effort = "high"   # sol accepts: none | low | medium | high | xhigh | max
+# sol accepts: low | medium | high | xhigh | max | ultra. ultra adds automatic
+# task delegation — not for these headless, read-only review lenses.
+model_reasoning_effort = "high"
 model_reasoning_summary = "none"  # we only want the final JSON
 model_verbosity = "low"
 
 approval_policy = "never"         # required for headless runs
 sandbox_mode = "read-only"        # reviewers never touch the working tree
 TOML
-  ok "created: $PROFILE_FILE (pins gpt-5.6-sol)"
+  ok "created: $PROFILE_FILE (pins $RECOMMENDED_MODEL)"
 fi
-if [ -f "$PROFILE_FILE" ] && ! grep -q '^model *=' "$PROFILE_FILE"; then
-  skip "profile pins no model — the fleet standard is gpt-5.6-sol; add: model = \"gpt-5.6-sol\""
+if [ -f "$PROFILE_FILE" ]; then
+  pinned="$(profile_model "$PROFILE_FILE")"; pin_rc=$?
+  if [ "$pin_rc" -eq 2 ]; then
+    no "cannot read $PROFILE_FILE — which model it pins is unknown, and codex cannot load it either"
+  elif [ "$pin_rc" -eq 1 ]; then
+    warn "profile pins no model — the fleet standard is $RECOMMENDED_MODEL; add: model = \"$RECOMMENDED_MODEL\""
+  elif [ "$pinned" = "$RECOMMENDED_MODEL" ]; then
+    ok "pins $RECOMMENDED_MODEL (the fleet standard)"
+  else
+    warn "profile pins model \"$pinned\", not the fleet standard $RECOMMENDED_MODEL — fine if deliberate; to switch, set this line in $PROFILE_FILE: model = \"$RECOMMENDED_MODEL\""
+  fi
 fi
 
 # --- 4. executables --------------------------------------------------------

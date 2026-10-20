@@ -2957,6 +2957,59 @@ test_install_check_foreign_hooks_path() {
   assert "i16: … reported as chained" grep -qF '.husky/pre-push chains .githooks/pre-push' "$LOG"
 }
 
+# An existing profile is never rewritten, so --check is what tells a machine
+# its pin has drifted from the fleet standard. Each state must read differently.
+test_install_check_reports_profile_model() {
+  local spoke="$WORK/i18-spoke" home="$WORK/i18-home" rc
+  local profile="$WORK/i18-home/.codex/deep-review.config.toml"
+  make_installed_spoke "$spoke"
+  mkdir -p "$home"
+  LOG="$spoke.install.log"
+  install_as() { ( cd "$spoke" && env -i HOME="$home" PATH="$WORK/bin:$PATH" \
+      bash scripts/review-install.sh "$@" ) > "$LOG" 2>&1; }
+
+  install_as; rc=$?
+  assert     "i18: a new profile pins gpt-6.1-sol" grep -qx 'model = "gpt-6.1-sol"' "$profile"
+  assert     "i18: … and is created" grep -qF 'pins gpt-6.1-sol' "$LOG"
+  install_as --check; rc=$?
+  assert     "i18: a matching pin passes --check" test "$rc" -eq 0
+  assert     "i18: … reported as the fleet standard" grep -qF 'pins gpt-6.1-sol (the fleet standard)' "$LOG"
+
+  sed 's/^model = .*/model = "gpt-5.6-sol"   # old/' "$profile" > "$profile.new" && mv "$profile.new" "$profile"
+  install_as --check; rc=$?
+  assert     "i18: a different pin does not fail --check" test "$rc" -eq 0
+  assert     "i18: … but warns with the pinned model" grep -qF 'pins model "gpt-5.6-sol", not the fleet standard gpt-6.1-sol' "$LOG"
+  assert     "i18: … and names the line to set" grep -qF "set this line in $profile: model = \"gpt-6.1-sol\"" "$LOG"
+  assert_not "i18: … and is not reported as matching" grep -qF '(the fleet standard)' "$LOG"
+  install_as
+  assert     "i18: install warns too and leaves the pin alone" \
+    sh -c 'grep -qF "not the fleet standard" "$1" && grep -q "^model = \"gpt-5.6-sol\"" "$2"' _ "$LOG" "$profile"
+
+  sed '/^model = /d' "$profile" > "$profile.new" && mv "$profile.new" "$profile"
+  install_as --check; rc=$?
+  assert     "i18: no model line does not fail --check" test "$rc" -eq 0
+  assert     "i18: … and says no model is pinned" grep -qF 'profile pins no model' "$LOG"
+  assert_not "i18: … not that a different one is" grep -qF 'not the fleet standard' "$LOG"
+
+  if [ "$(id -u)" != 0 ]; then
+    chmod 000 "$profile"
+    install_as --check; rc=$?
+    chmod 644 "$profile"
+    assert     "i18: an unreadable profile fails --check" test "$rc" -ne 0
+    assert     "i18: … and says it cannot be read" grep -qF "cannot read $profile" "$LOG"
+    assert_not "i18: … not that it pins no model" grep -qF 'profile pins no model' "$LOG"
+    assert_not "i18: … nor that it matches" grep -qF '(the fleet standard)' "$LOG"
+  else
+    skip_test "i18: unreadable profile (running as root)"
+  fi
+
+  rm -f "$profile"
+  install_as --check; rc=$?
+  assert     "i18: a missing profile fails --check" test "$rc" -ne 0
+  assert     "i18: … reported missing" grep -qF "missing: $profile" "$LOG"
+  assert_not "i18: … with no model verdict" grep -qE 'pins no model|fleet standard' "$LOG"
+}
+
 # Setting core.hooksPath over live .git/hooks hooks silently disables them.
 test_install_keeps_live_git_hooks() {
   local spoke="$WORK/i17-spoke" hooks rc
@@ -4898,6 +4951,7 @@ run_tests \
   test_install_check_reports_gate_state \
   test_install_check_fails_on_unwired_gate \
   test_install_check_foreign_hooks_path \
+  test_install_check_reports_profile_model \
   test_install_keeps_live_git_hooks \
   test_prepush_judges_destination_ref \
   test_prepush_reads_the_verdict_header \
