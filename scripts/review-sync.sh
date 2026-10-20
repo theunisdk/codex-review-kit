@@ -252,7 +252,7 @@ cp "$TMP/update.out" "$TMP/output"
 body() {
 {
   printf '> [!IMPORTANT]\n> Opened by `scripts/review-sync.sh`. It never merges: review and merge it yourself.\n\n'
-  printf 'CodeRabbit skips this PR: its synced files were reviewed in the hub PRs that shipped them, though against the hub'"'"'s path instructions, not this repo'"'"'s, so your review is the remaining check. Commits you push here are skipped too. To have CodeRabbit review it, delete the line below; the next release'"'"'s update of this PR adds it back.\n\n@coderabbitai ignore\n\n'
+  printf 'CodeRabbit skips this PR: its synced files were reviewed in the hub PRs that shipped them, though against the hub'"'"'s path instructions, not this repo'"'"'s, so your review is the remaining check. Commits you push here are skipped too. To have CodeRabbit review it, delete the line below, then comment `@coderabbitai review`; the next release'"'"'s update of this PR adds it back.\n\n@coderabbitai ignore\n\n'
   printf 'Syncs the review kit from `%s` to **%s**, from `%s`.\n\n' \
     "${INSTALLED:-${REF:-unknown}}" "$LATEST" "$REVIEW_KIT_URL"
   [ -n "$INSTALLED" ] || printf '**The installed kit is not a release.** If it carried hub changes that %s lacks, close this PR.\n\n' "$LATEST"

@@ -154,7 +154,9 @@ repo-owned files (rubric, learnings, `.coderabbit.yaml`, `config.sh`,
 graded the kit against the hub's `path_instructions`, not the spoke's, so the
 human who merges the sync PR is the remaining check, and commits pushed to the
 branch are skipped too. To have CodeRabbit review a sync PR, delete the line
-from its description; a newer release's update of that PR adds it back. The
+from its description, then comment `@coderabbitai review`: deleting it alone
+resumes reviews only from the next push. A newer release's update of that PR
+adds the line back after its push, so CodeRabbit reviews that one push. The
 spoke builds the body with its installed `review-sync.sh` (the script is read
 whole before the sync copies files), so the line first appears in the sync run
 after the sync PR that delivers it has merged.
