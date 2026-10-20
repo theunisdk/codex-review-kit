@@ -40,17 +40,18 @@ before this file dilutes the prompts it feeds.
 - 2026-10-18: an error path reported "nothing written" after a remote write
   threw, but a rejected or timed-out call can still have committed. Flag any
   message or rollback that assumes a thrown remote call had no effect, unless
-  the code first settles the outcome (a read-back, or a confirmed retry).
+  the code first settles the outcome (a read-back, or a retry that is
+  idempotent by key or condition).
 - 2026-10-18: a "changed since shown?" guard compared a parsed summary, so two
   different unparseable values compared equal and a reset could overwrite the
   wrong one. A guard deciding whether data changed must compare the raw bytes
   or a version/ETag, not a lossy parse.
 - 2026-10-18: an update's affected-row count was discarded, so a write that
   matched zero rows still redirected as saved; a recovery restart's exit status
-  went unread under "started again". At every write, restart or rollback call,
-  find the line that reads what it returned (count, exit status, flag); none
-  before a message, redirect or next step that presumes it changed a row or ran
-  is a finding.
+  went unread under "started again". At every write, restart or rollback call
+  whose API returns a status (a count, exit status or flag), find the line that
+  reads it; none before a message, redirect or next step that presumes it
+  changed a row or ran is a finding.
 - 2026-10-18: a confirmation gating a destructive action showed "none pending"
   for a count whose source failed to parse. At every count, list or "none" a
   user sees, trace its source through each state (absent, unreadable,

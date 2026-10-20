@@ -17,7 +17,12 @@ Hunt specifically for:
   reaching file paths, archive extraction without path sanitisation.
 - **Secrets and PII** — credentials, tokens, or keys in source, config, or test
   fixtures; secrets or personal data written to logs, error messages, telemetry,
-  or returned in API error responses; over-broad serialisers that leak fields.
+  or returned in API error responses; over-broad serialisers that leak fields;
+  a sanitiser or redaction guard that covers only part of what it protects:
+  caller-supplied keys copied or looked up unchecked (no bound, no redaction, no
+  own-property guard) while only the values are sanitised, or a redaction or
+  size check run over the joined output instead of on each segment before the
+  join, so one segment's result stands in for another's.
 - **Crypto misuse** — hand-rolled crypto, ECB mode, static or reused IVs, weak
   hashes for passwords, non-constant-time comparison of secrets, predictable
   randomness (`Math.random`, unseeded PRNG) used for tokens, IDs, or nonces.

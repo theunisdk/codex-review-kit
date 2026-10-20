@@ -20,3 +20,11 @@ roughly 60 lines it is diluting every prompt — consolidate.
   false positive there. A git feature newer than 2.31 is still a finding.
 
 ## WATCH
+- 2026-10-18: a shell value validated as digits was spliced into JSON (or passed
+  to `jq --argjson`) as-is. A leading zero (`07`) passes a `[0-9]` check but is
+  not a JSON number, and `00` passes a check against `0` but is zero, so the JSON
+  write failed and the run lost its record. Normalising with `$((10#$v))` then
+  wraps an oversized value (`18446744073709551617` is 1). When a validated string
+  reaches JSON or arithmetic, check every form the validation admits; strip
+  leading zeros as a string and bound the length, or pass it with `--arg` and
+  `tonumber`.
