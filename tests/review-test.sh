@@ -2969,8 +2969,9 @@ test_install_check_reports_profile_model() {
       bash scripts/review-install.sh "$@" ) > "$LOG" 2>&1; }
 
   install_as; rc=$?
+  assert     "i18: install succeeds" test "$rc" -eq 0
   assert     "i18: a new profile pins gpt-6.1-sol" grep -qx 'model = "gpt-6.1-sol"' "$profile"
-  assert     "i18: … and is created" grep -qF 'pins gpt-6.1-sol' "$LOG"
+  assert     "i18: … and is reported created" grep -qF "created: $profile (pins gpt-6.1-sol)" "$LOG"
   install_as --check; rc=$?
   assert     "i18: a matching pin passes --check" test "$rc" -eq 0
   assert     "i18: … reported as the fleet standard" grep -qF 'pins gpt-6.1-sol (the fleet standard)' "$LOG"
@@ -2985,11 +2986,33 @@ test_install_check_reports_profile_model() {
   assert     "i18: install warns too and leaves the pin alone" \
     sh -c 'grep -qF "not the fleet standard" "$1" && grep -q "^model = \"gpt-5.6-sol\"" "$2"' _ "$LOG" "$profile"
 
-  sed '/^model = /d' "$profile" > "$profile.new" && mv "$profile.new" "$profile"
+  local base="$WORK/i18-base.toml" pin want
+  sed '/^model = /d' "$profile" > "$base"
+  cp "$base" "$profile"
   install_as --check; rc=$?
   assert     "i18: no model line does not fail --check" test "$rc" -eq 0
   assert     "i18: … and says no model is pinned" grep -qF 'profile pins no model' "$LOG"
   assert_not "i18: … not that a different one is" grep -qF 'not the fleet standard' "$LOG"
+
+  # Only a top-level key counts, in any TOML key and string spelling.
+  for pin in "model='gpt-6.1-sol'" '  "model" = "gpt-6.1-sol"   # pinned' 'model = """gpt-6.1-sol"""'; do
+    { printf '%s\n' "$pin"; cat "$base"; } > "$profile"
+    install_as --check
+    assert   "i18: [$pin] reads as the fleet standard" grep -qF '(the fleet standard)' "$LOG"
+  done
+  { cat "$base"; printf '[other]\nmodel = "gpt-6.1-sol"\n'; } > "$profile"
+  install_as --check
+  assert     "i18: a model key inside a table is not the pin" grep -qF 'profile pins no model' "$LOG"
+
+  for pin in 'model = gpt-6.1-sol' 'model = "gpt-6.1-sol' 'model = ""'; do
+    { printf '%s\n' "$pin"; cat "$base"; } > "$profile"
+    install_as --check; rc=$?
+    want="cannot parse the model line in $profile ($pin)"
+    assert     "i18: [$pin] fails --check" test "$rc" -ne 0
+    assert     "i18: … as unparseable" grep -qF "$want" "$LOG"
+    assert_not "i18: … not as a verdict on a model" grep -qE 'fleet standard|pins no model' "$LOG"
+  done
+  cp "$base" "$profile"
 
   if [ "$(id -u)" != 0 ]; then
     chmod 000 "$profile"
@@ -3008,6 +3031,17 @@ test_install_check_reports_profile_model() {
   assert     "i18: a missing profile fails --check" test "$rc" -ne 0
   assert     "i18: … reported missing" grep -qF "missing: $profile" "$LOG"
   assert_not "i18: … with no model verdict" grep -qE 'pins no model|fleet standard' "$LOG"
+
+  if [ "$(id -u)" != 0 ]; then
+    chmod 555 "$home/.codex"
+    install_as; rc=$?
+    chmod 755 "$home/.codex"
+    assert     "i18: a profile that cannot be written fails install" test "$rc" -ne 0
+    assert     "i18: … and says so" grep -qF "could not write $profile" "$LOG"
+    assert_not "i18: … and is not reported created" grep -qF "created: $profile" "$LOG"
+  else
+    skip_test "i18: unwritable profile (running as root)"
+  fi
 }
 
 # Setting core.hooksPath over live .git/hooks hooks silently disables them.

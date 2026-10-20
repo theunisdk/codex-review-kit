@@ -429,7 +429,7 @@ templates/             hub only: seeds for the repo-owned files (--init)
   for code reviews. An existing profile is never rewritten; `review-install.sh
   --check` warns when it pins another model. When the pin stops resolving,
   check `/model` in the Codex TUI for what your plan exposes and re-pin; note
-  the effort vocabulary is model-specific (sol:
+  the effort vocabulary is model-specific (gpt-6.1-sol:
   `low|medium|high|xhigh|max|ultra`, no `none` or `minimal`; `ultra` adds
   automatic task delegation and is not for the headless, read-only lenses).
 - **Reviewers are read-only.** Every lens runs `--sandbox read-only`; the

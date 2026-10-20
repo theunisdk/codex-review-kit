@@ -34,22 +34,26 @@ skip(){ printf '  \033[2m·\033[0m %s\n' "$*"; }
 warn(){ printf '  \033[33m!\033[0m %s\n' "$*"; }
 
 # Print the top-level `model` value of a Codex profile. Returns 1 when it has
-# no top-level model line, 2 when it cannot be read.
+# no top-level model line, 3 when that line holds no quoted name (it is then
+# printed raw), 2 when the file cannot be read.
 profile_model() {
   local rc
   [ -r "$1" ] || return 2
   awk -v q="'" '
     /^[[:space:]]*\[/ { exit }
-    /^[[:space:]]*model[[:space:]]*=/ {
+    $0 ~ ("^[[:space:]]*(\"model\"|" q "model" q "|model)[[:space:]]*=") {
+      found = 1
       v = $0; sub(/^[^=]*=[[:space:]]*/, "", v)
-      c = substr(v, 1, 1)
-      if (c == "\"" || c == q) { v = substr(v, 2); v = substr(v, 1, index(v, c) - 1) }
-      else { sub(/[[:space:]]*#.*/, "", v); sub(/[[:space:]]+$/, "", v) }
-      print v; found = 1; exit
+      c = substr(v, 1, 1); d = c
+      if (substr(v, 1, 3) == c c c) d = c c c
+      v = substr(v, length(d) + 1); n = index(v, d)
+      if ((c != "\"" && c != q) || n < 2) { print $0; bad = 1; exit }
+      print substr(v, 1, n - 1); exit
     }
-    END { exit !found }' "$1" && return 0
+    END { if (bad) exit 13; if (!found) exit 11 }' "$1" && return 0
   rc=$?
-  [ "$rc" -eq 1 ] && return 1
+  [ "$rc" -eq 11 ] && return 1
+  [ "$rc" -eq 13 ] && return 3
   return 2
 }
 
@@ -154,8 +158,7 @@ if [ -f "$PROFILE_FILE" ]; then
 elif [ "$CHECK_ONLY" -eq 1 ]; then
   no "missing: $PROFILE_FILE"
 else
-  mkdir -p "$CODEX_HOME"
-  cat > "$PROFILE_FILE" <<TOML
+  if mkdir -p "$CODEX_HOME" && cat > "$PROFILE_FILE" <<TOML
 # Codex profile for adversarial code review.
 # Selected with: codex --profile deep-review
 #
@@ -167,8 +170,8 @@ else
 # your plan exposes and re-pin.
 model = "$RECOMMENDED_MODEL"
 
-# sol accepts: low | medium | high | xhigh | max | ultra. ultra adds automatic
-# task delegation — not for these headless, read-only review lenses.
+# $RECOMMENDED_MODEL accepts: low | medium | high | xhigh | max | ultra. ultra adds
+# automatic task delegation — not for these headless, read-only review lenses.
 model_reasoning_effort = "high"
 model_reasoning_summary = "none"  # we only want the final JSON
 model_verbosity = "low"
@@ -176,12 +179,18 @@ model_verbosity = "low"
 approval_policy = "never"         # required for headless runs
 sandbox_mode = "read-only"        # reviewers never touch the working tree
 TOML
-  ok "created: $PROFILE_FILE (pins $RECOMMENDED_MODEL)"
+  then
+    ok "created: $PROFILE_FILE (pins $RECOMMENDED_MODEL)"
+  else
+    no "could not write $PROFILE_FILE"
+  fi
 fi
 if [ -f "$PROFILE_FILE" ]; then
   pinned="$(profile_model "$PROFILE_FILE")"; pin_rc=$?
   if [ "$pin_rc" -eq 2 ]; then
-    no "cannot read $PROFILE_FILE — which model it pins is unknown, and codex cannot load it either"
+    no "cannot read $PROFILE_FILE — which model it pins is unknown"
+  elif [ "$pin_rc" -eq 3 ]; then
+    no "cannot parse the model line in $PROFILE_FILE ($pinned) — set it to: model = \"$RECOMMENDED_MODEL\""
   elif [ "$pin_rc" -eq 1 ]; then
     warn "profile pins no model — the fleet standard is $RECOMMENDED_MODEL; add: model = \"$RECOMMENDED_MODEL\""
   elif [ "$pinned" = "$RECOMMENDED_MODEL" ]; then

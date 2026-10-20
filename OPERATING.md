@@ -299,7 +299,7 @@ profile pins another model and names the line to change. The warning does not
 fail the check, since a deliberate pin to another model is allowed. Two things
 follow:
 
-- Effort vocabulary is model-specific: sol accepts
+- Effort vocabulary is model-specific: gpt-6.1-sol accepts
   `low | medium | high | xhigh | max | ultra` (no `none`, no `minimal`).
   `ultra` adds automatic task delegation, which the headless, read-only lenses
   must not use. An unsupported value fails the lens with a 400 — nothing
