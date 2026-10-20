@@ -10,7 +10,8 @@
 # review-update.sh pinned to the latest release on the branch review-kit-sync,
 # force-pushes it, and opens the one PR titled "sync review kit to vX.Y.Z" — or
 # retitles the open one when a newer release lands. It never merges, approves
-# or enables auto-merge: a sync PR always waits for a human.
+# or enables auto-merge: a sync PR always waits for a human. The PR body carries
+# `@coderabbitai ignore`: the hub's CodeRabbit already reviewed the kit.
 #
 # Every failure exits non-zero, never a green no-op: hub unreachable (1 from
 # --latest-release), no release tag (2), a failed or empty sync, a refused
@@ -251,6 +252,7 @@ cp "$TMP/update.out" "$TMP/output"
 body() {
 {
   printf '> [!IMPORTANT]\n> Opened by `scripts/review-sync.sh`. It never merges: review and merge it yourself.\n\n'
+  printf 'CodeRabbit skips this PR: its synced files were reviewed in the hub PRs that shipped them, though against the hub'"'"'s path instructions, not this repo'"'"'s, so your review is the remaining check. Commits you push here are skipped too. To have CodeRabbit review it, delete the line below, then comment `@coderabbitai review`; the next release'"'"'s update of this PR adds it back.\n\n@coderabbitai ignore\n\n'
   printf 'Syncs the review kit from `%s` to **%s**, from `%s`.\n\n' \
     "${INSTALLED:-${REF:-unknown}}" "$LATEST" "$REVIEW_KIT_URL"
   [ -n "$INSTALLED" ] || printf '**The installed kit is not a release.** If it carried hub changes that %s lacks, close this PR.\n\n' "$LATEST"

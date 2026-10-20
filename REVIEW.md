@@ -146,6 +146,21 @@ approves or enables auto-merge: a human reviews every sync. The PR body names
 synced files whose local edits the sync overwrote, lifts each skipped release's
 `## Upgrading` section to the top, and carries the full release notes.
 
+The sync PR body carries `@coderabbitai ignore`, so CodeRabbit skips it and
+spends none of the account's hourly review quota. A sync changes only synced
+files, which CodeRabbit already reviewed in the hub PRs that shipped them;
+repo-owned files (rubric, learnings, `.coderabbit.yaml`, `config.sh`,
+`analyzers.local.sh`, the sync workflow) never change in a sync. The hub review
+graded the kit against the hub's `path_instructions`, not the spoke's, so the
+human who merges the sync PR is the remaining check, and commits pushed to the
+branch are skipped too. To have CodeRabbit review a sync PR, delete the line
+from its description, then comment `@coderabbitai review`: deleting it alone
+resumes reviews only from the next push. A newer release's update of that PR
+adds the line back after its push, so CodeRabbit reviews that one push. The
+spoke builds the body with its installed `review-sync.sh` (the script is read
+whole before the sync copies files), so the line first appears in the sync run
+after the sync PR that delivers it has merged.
+
 Every failure fails the job: hub unreachable, no release tag, a failed or empty
 sync, a release-notes lookup that errors, a refused push, a `gh` error, a run
 from a branch other than the default. Actions must be allowed to open PRs:
