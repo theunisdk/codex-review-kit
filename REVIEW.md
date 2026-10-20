@@ -425,10 +425,13 @@ templates/             hub only: seeds for the repo-owned files (--init)
   `[profiles.name]` tables from `config.toml`. Each profile is its own file with
   top-level keys: `~/.codex/deep-review.config.toml`. If you copy a profile from
   an older blog post it will silently do nothing.
-- **Model names churn.** The profile pins `gpt-5.6-sol` — the current standard
-  for code reviews. When it stops resolving, check `/model` in the Codex TUI for
-  what your plan exposes and re-pin; note the effort vocabulary is
-  model-specific (sol: `none|low|medium|high|xhigh|max`, no `minimal`).
+- **Model names churn.** The profile pins `gpt-6.1-sol` — the current standard
+  for code reviews. An existing profile is never rewritten; `review-install.sh
+  --check` warns when it pins another model. When the pin stops resolving,
+  check `/model` in the Codex TUI for what your plan exposes and re-pin; note
+  the effort vocabulary is model-specific (gpt-6.1-sol:
+  `low|medium|high|xhigh|max|ultra`, no `none` or `minimal`; `ultra` adds
+  automatic task delegation and is not for the headless, read-only lenses).
 - **Reviewers are read-only.** Every lens runs `--sandbox read-only`; the
   deep-review profile supplies `approval_policy = "never"`, since codex 0.149
   removed `--ask-for-approval`. They can grep your repo for context but cannot

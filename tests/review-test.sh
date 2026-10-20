@@ -2957,6 +2957,114 @@ test_install_check_foreign_hooks_path() {
   assert "i16: … reported as chained" grep -qF '.husky/pre-push chains .githooks/pre-push' "$LOG"
 }
 
+# An existing profile is never rewritten, so --check is what tells a machine
+# its pin has drifted from the fleet standard. Each state must read differently.
+test_install_check_reports_profile_model() {
+  local spoke="$WORK/i18-spoke" home="$WORK/i18-home" rc
+  local profile="$WORK/i18-home/.codex/deep-review.config.toml"
+  make_installed_spoke "$spoke"
+  mkdir -p "$home"
+  LOG="$spoke.install.log"
+  install_as() { ( cd "$spoke" && env -i HOME="$home" PATH="$WORK/bin:$PATH" \
+      bash scripts/review-install.sh "$@" ) > "$LOG" 2>&1; }
+
+  install_as; rc=$?
+  assert     "i18: install succeeds" test "$rc" -eq 0
+  assert     "i18: a new profile pins gpt-6.1-sol" grep -qx 'model = "gpt-6.1-sol"' "$profile"
+  assert     "i18: … and is reported created" grep -qF "created: $profile (pins gpt-6.1-sol)" "$LOG"
+  install_as --check; rc=$?
+  assert     "i18: a matching pin passes --check" test "$rc" -eq 0
+  assert     "i18: … reported as the fleet standard" grep -qF 'pins gpt-6.1-sol (the fleet standard)' "$LOG"
+
+  sed 's/^model = .*/model = "gpt-5.6-sol"   # old/' "$profile" > "$profile.new" && mv "$profile.new" "$profile"
+  install_as --check; rc=$?
+  assert     "i18: a different pin does not fail --check" test "$rc" -eq 0
+  assert     "i18: … but warns with the pinned model" grep -qF 'pins model "gpt-5.6-sol", not the fleet standard gpt-6.1-sol' "$LOG"
+  assert     "i18: … and names the line to set" grep -qF "set this line in $profile: model = \"gpt-6.1-sol\"" "$LOG"
+  assert_not "i18: … and is not reported as matching" grep -qF '(the fleet standard)' "$LOG"
+  install_as
+  assert     "i18: install warns too and leaves the pin alone" \
+    sh -c 'grep -qF "not the fleet standard" "$1" && grep -q "^model = \"gpt-5.6-sol\"" "$2"' _ "$LOG" "$profile"
+
+  local base="$WORK/i18-base.toml" pin want
+  sed '/^model = /d' "$profile" > "$base"
+  cp "$base" "$profile"
+  install_as --check; rc=$?
+  assert     "i18: no model line does not fail --check" test "$rc" -eq 0
+  assert     "i18: … and says no model is pinned" grep -qF 'profile pins no model' "$LOG"
+  assert_not "i18: … not that a different one is" grep -qF 'not the fleet standard' "$LOG"
+
+  # Only a top-level key counts, in any single-line TOML key and string spelling.
+  for pin in "model='gpt-6.1-sol'" "'model' = 'gpt-6.1-sol'" '  "model" = "gpt-6.1-sol"   # pinned' 'model = """gpt-6.1-sol"""'; do
+    { printf '%s\n' "$pin"; cat "$base"; } > "$profile"
+    install_as --check
+    assert   "i18: [$pin] reads as the fleet standard" grep -qF '(the fleet standard)' "$LOG"
+  done
+  { cat "$base"; printf '[other]\nmodel = "gpt-6.1-sol"\n'; } > "$profile"
+  install_as --check
+  assert     "i18: a model key inside a table is not the pin" grep -qF 'profile pins no model' "$LOG"
+
+  for pin in 'model = gpt-6.1-sol' 'model = "gpt-6.1-sol' 'model = ""'; do
+    { printf '%s\n' "$pin"; cat "$base"; } > "$profile"
+    install_as --check; rc=$?
+    want="cannot parse the model line in $profile ($pin)"
+    assert     "i18: [$pin] fails --check" test "$rc" -ne 0
+    assert     "i18: … as unparseable" grep -qF "$want" "$LOG"
+    assert_not "i18: … not as a verdict on a model" grep -qE 'fleet standard|pins no model' "$LOG"
+  done
+  cp "$base" "$profile"
+
+  if [ "$(id -u)" != 0 ]; then
+    chmod 000 "$profile"
+    install_as --check; rc=$?
+    chmod 644 "$profile"
+    assert     "i18: an unreadable profile fails --check" test "$rc" -ne 0
+    assert     "i18: … and says it cannot be read" grep -qF "cannot read or parse $profile" "$LOG"
+    assert_not "i18: … not that it pins no model" grep -qF 'profile pins no model' "$LOG"
+    assert_not "i18: … nor that it matches" grep -qF '(the fleet standard)' "$LOG"
+  else
+    skip_test "i18: unreadable profile (running as root)"
+  fi
+
+  # busybox awk exits 1 on a fatal error, the code a no-match once used.
+  local awkbin="$WORK/i18-awk"
+  mkdir -p "$awkbin"
+  printf '#!/bin/sh\ncase "$*" in *deep-review*) exit 1 ;; esac\nexec %s "$@"\n' "$(command -v awk)" > "$awkbin/awk"
+  chmod +x "$awkbin/awk"
+  ( cd "$spoke" && env -i HOME="$home" PATH="$awkbin:$WORK/bin:$PATH" \
+      bash scripts/review-install.sh --check ) > "$LOG" 2>&1; rc=$?
+  assert     "i18: an awk failure fails --check" test "$rc" -ne 0
+  assert     "i18: … as unreadable" grep -qF "cannot read or parse $profile" "$LOG"
+  assert_not "i18: … not as no model line" grep -qF 'profile pins no model' "$LOG"
+
+  rm -f "$profile"
+  install_as --check; rc=$?
+  assert     "i18: a missing profile fails --check" test "$rc" -ne 0
+  assert     "i18: … reported missing" grep -qF "missing: $profile" "$LOG"
+  assert_not "i18: … with no model verdict" grep -qE 'pins no model|fleet standard' "$LOG"
+
+  if [ "$(id -u)" != 0 ]; then
+    chmod 555 "$home/.codex"
+    install_as; rc=$?
+    chmod 755 "$home/.codex"
+    assert     "i18: a profile that cannot be written fails install" test "$rc" -ne 0
+    assert     "i18: … and says so" grep -qF "could not write $profile" "$LOG"
+    assert_not "i18: … and is not reported created" grep -qF "created: $profile" "$LOG"
+  else
+    skip_test "i18: unwritable profile (running as root)"
+  fi
+
+  # Through a pipe: the file-size limit would also stop the log being written.
+  ( cd "$spoke" && ulimit -f 0 && trap '' XFSZ && env -i HOME="$home" PATH="$WORK/bin:$PATH" \
+      bash scripts/review-install.sh 2>&1; echo "rc=$?" ) | cat > "$LOG"
+  assert     "i18: a truncated write fails install" grep -qx 'rc=1' "$LOG"
+  assert     "i18: … and says so" grep -qF "could not write $profile" "$LOG"
+  assert     "i18: … and leaves no partial profile" test ! -e "$profile"
+  assert_not "i18: … nor a model verdict on one" grep -qE 'pins no model|fleet standard' "$LOG"
+  install_as
+  assert     "i18: … so the next install writes it" grep -qx 'model = "gpt-6.1-sol"' "$profile"
+}
+
 # Setting core.hooksPath over live .git/hooks hooks silently disables them.
 test_install_keeps_live_git_hooks() {
   local spoke="$WORK/i17-spoke" hooks rc
@@ -4898,6 +5006,7 @@ run_tests \
   test_install_check_reports_gate_state \
   test_install_check_fails_on_unwired_gate \
   test_install_check_foreign_hooks_path \
+  test_install_check_reports_profile_model \
   test_install_keeps_live_git_hooks \
   test_prepush_judges_destination_ref \
   test_prepush_reads_the_verdict_header \

@@ -292,13 +292,18 @@ that last one — more thinking is not reliably better.
 
 ### Model pinning
 
-The profile pins `gpt-5.6-sol` — the current standard for code reviews. Two
-things follow:
+The profile pins `gpt-6.1-sol` — the current standard for code reviews. The
+installer writes that pin only when it creates the profile, so an existing
+machine keeps its old one: `./scripts/review-install.sh --check` warns when the
+profile pins another model and names the line to change. The warning does not
+fail the check, since a deliberate pin to another model is allowed. Two things
+follow:
 
-- Effort vocabulary is model-specific: sol accepts
-  `none | low | medium | high | xhigh | max` (no `minimal`). An unsupported
-  value fails the lens with a 400 — nothing surfaces on the console, but the
-  response is in `.review/raw/log-<lens>.txt`.
+- Effort vocabulary is model-specific: gpt-6.1-sol accepts
+  `low | medium | high | xhigh | max | ultra` (no `none`, no `minimal`).
+  `ultra` adds automatic task delegation, which the headless, read-only lenses
+  must not use. An unsupported value fails the lens with a 400 — nothing
+  surfaces on the console, but the response is in `.review/raw/log-<lens>.txt`.
 - When the pin stops resolving or reviews suddenly feel shallow, check
   `/model` in the Codex TUI and re-pin in
   `~/.codex/deep-review.config.toml` before blaming the prompts.

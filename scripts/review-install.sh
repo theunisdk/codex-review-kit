@@ -22,6 +22,7 @@ cd "$REPO_ROOT" || exit 1
 
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 PROFILE_FILE="$CODEX_HOME/deep-review.config.toml"
+RECOMMENDED_MODEL="gpt-6.1-sol"
 MARK_START="<!-- BEGIN codex-review-kit -->"
 MARK_END="<!-- END codex-review-kit -->"
 fail=0
@@ -30,6 +31,31 @@ hdr() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 ok()  { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 no()  { printf '  \033[31m✗\033[0m %s\n' "$*"; fail=1; }
 skip(){ printf '  \033[2m·\033[0m %s\n' "$*"; }
+warn(){ printf '  \033[33m!\033[0m %s\n' "$*"; }
+
+# Print the top-level `model` value of a Codex profile. Returns 1 when it has
+# no top-level model line, 3 when that line holds no quoted name (it is then
+# printed raw), 2 when the file cannot be read or awk fails.
+profile_model() {
+  local rc
+  [ -r "$1" ] || return 2
+  awk -v q="'" '
+    /^[[:space:]]*\[/ { exit }
+    $0 ~ ("^[[:space:]]*(\"model\"|" q "model" q "|model)[[:space:]]*=") {
+      found = 1
+      v = $0; sub(/^[^=]*=[[:space:]]*/, "", v)
+      c = substr(v, 1, 1); d = c
+      if (substr(v, 1, 3) == c c c) d = c c c
+      v = substr(v, length(d) + 1); n = index(v, d)
+      if ((c != "\"" && c != q) || n < 2) { print $0; bad = 1; exit }
+      print substr(v, 1, n - 1); exit
+    }
+    END { if (bad) exit 13; if (!found) exit 11 }' "$1" && return 0
+  rc=$?
+  [ "$rc" -eq 11 ] && return 1
+  [ "$rc" -eq 13 ] && return 3
+  return 2
+}
 
 # From /, so a repo-local yaml.py is never the module imported.
 have_yaml_parser() { ( cd / && python3 -c 'import yaml' ) 2>/dev/null; }
@@ -132,8 +158,7 @@ if [ -f "$PROFILE_FILE" ]; then
 elif [ "$CHECK_ONLY" -eq 1 ]; then
   no "missing: $PROFILE_FILE"
 else
-  mkdir -p "$CODEX_HOME"
-  cat > "$PROFILE_FILE" <<'TOML'
+  if mkdir -p "$CODEX_HOME" && cat > "$PROFILE_FILE" <<TOML
 # Codex profile for adversarial code review.
 # Selected with: codex --profile deep-review
 #
@@ -141,21 +166,39 @@ else
 # Do NOT wrap these in a [profiles.deep-review] table — that form is no longer read.
 
 # Pinned for now: the model everyone is using for code reviews. Model names
-# churn — when this stops resolving, check `/model` in the Codex TUI for what
+# churn — when this stops resolving, check \`/model\` in the Codex TUI for what
 # your plan exposes and re-pin.
-model = "gpt-5.6-sol"
+model = "$RECOMMENDED_MODEL"
 
-model_reasoning_effort = "high"   # sol accepts: none | low | medium | high | xhigh | max
+# $RECOMMENDED_MODEL accepts: low | medium | high | xhigh | max | ultra. ultra adds
+# automatic task delegation — not for these headless, read-only review lenses.
+model_reasoning_effort = "high"
 model_reasoning_summary = "none"  # we only want the final JSON
 model_verbosity = "low"
 
 approval_policy = "never"         # required for headless runs
 sandbox_mode = "read-only"        # reviewers never touch the working tree
 TOML
-  ok "created: $PROFILE_FILE (pins gpt-5.6-sol)"
+  then
+    ok "created: $PROFILE_FILE (pins $RECOMMENDED_MODEL)"
+  else
+    rm -f "$PROFILE_FILE"
+    no "could not write $PROFILE_FILE"
+  fi
 fi
-if [ -f "$PROFILE_FILE" ] && ! grep -q '^model *=' "$PROFILE_FILE"; then
-  skip "profile pins no model — the fleet standard is gpt-5.6-sol; add: model = \"gpt-5.6-sol\""
+if [ -f "$PROFILE_FILE" ]; then
+  pinned="$(profile_model "$PROFILE_FILE")"; pin_rc=$?
+  if [ "$pin_rc" -eq 2 ]; then
+    no "cannot read or parse $PROFILE_FILE — which model it pins is unknown"
+  elif [ "$pin_rc" -eq 3 ]; then
+    no "cannot parse the model line in $PROFILE_FILE ($pinned) — set it to: model = \"$RECOMMENDED_MODEL\""
+  elif [ "$pin_rc" -eq 1 ]; then
+    warn "profile pins no model — the fleet standard is $RECOMMENDED_MODEL; add: model = \"$RECOMMENDED_MODEL\""
+  elif [ "$pinned" = "$RECOMMENDED_MODEL" ]; then
+    ok "pins $RECOMMENDED_MODEL (the fleet standard)"
+  else
+    warn "profile pins model \"$pinned\", not the fleet standard $RECOMMENDED_MODEL — fine if deliberate; to switch, set this line in $PROFILE_FILE: model = \"$RECOMMENDED_MODEL\""
+  fi
 fi
 
 # --- 4. executables --------------------------------------------------------
