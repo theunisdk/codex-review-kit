@@ -10,8 +10,8 @@
 # review-update.sh pinned to the latest release on the branch review-kit-sync,
 # force-pushes it, and opens the one PR titled "sync review kit to vX.Y.Z" — or
 # retitles the open one when a newer release lands. It never merges, approves
-# or enables auto-merge: a sync PR always waits for a human. The PR body opens
-# with `@coderabbitai ignore`: the hub's CodeRabbit already reviewed the kit.
+# or enables auto-merge: a sync PR always waits for a human. The PR body carries
+# `@coderabbitai ignore`: the hub's CodeRabbit already reviewed the kit.
 #
 # Every failure exits non-zero, never a green no-op: hub unreachable (1 from
 # --latest-release), no release tag (2), a failed or empty sync, a refused

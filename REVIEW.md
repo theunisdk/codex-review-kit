@@ -146,7 +146,7 @@ approves or enables auto-merge: a human reviews every sync. The PR body names
 synced files whose local edits the sync overwrote, lifts each skipped release's
 `## Upgrading` section to the top, and carries the full release notes.
 
-The sync PR body opens with `@coderabbitai ignore`, so CodeRabbit skips it and
+The sync PR body carries `@coderabbitai ignore`, so CodeRabbit skips it and
 spends none of the account's hourly review quota. A sync changes only synced
 files, which CodeRabbit already reviewed in the hub PRs that shipped them;
 repo-owned files (rubric, learnings, `.coderabbit.yaml`, `config.sh`,
