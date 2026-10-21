@@ -5074,8 +5074,9 @@ test_install_refreshes_the_review_block() {
     chmod 755 "$d"
     assert "rb4b: a rewrite that cannot land is a failure" grep -qF 'could not rewrite the review block in AGENTS.md' "$LOG"
     assert "rb4b: … and the file is whole" test "$(cksum < "$d/AGENTS.md")" = "$before"
-    mkdir -p "$WORK/rb-nomv"; printf '#!/bin/sh\nexit 1\n' > "$WORK/rb-nomv/mv"; chmod +x "$WORK/rb-nomv/mv"
+    mkdir -p "$WORK/rb-nomv"; printf '#!/bin/sh\ntouch "%s/rb-nomv/ran"\nexit 1\n' "$WORK" > "$WORK/rb-nomv/mv"; chmod +x "$WORK/rb-nomv/mv"
     ( cd "$d" && env -i HOME="$WORK/nohome" PATH="$WORK/rb-nomv:$WORK/bin:$PATH" bash scripts/review-install.sh ) > "$LOG" 2>&1
+    assert "rb4b: the rewrite reached its rename" test -e "$WORK/rb-nomv/ran"
     assert "rb4b: a staged rewrite whose rename fails is a failure" grep -qF 'could not rewrite the review block in AGENTS.md' "$LOG"
     assert "rb4b: … the file is whole" test "$(cksum < "$d/AGENTS.md")" = "$before"
     assert "rb4b: … and no staged copy is left" sh -c '! ls "$1"/AGENTS.md.review-install.* >/dev/null 2>&1' _ "$d"
@@ -5119,6 +5120,13 @@ test_install_refreshes_the_review_block() {
   run_install_full "$d"; run_install_full "$d"
   assert "rb5e: a fence left open gets one block, not one per run" \
     test "$(grep -c 'BEGIN codex-review-kit' "$d/CLAUDE.md")" -eq 1
+  printf '# A\n%s\n<!-- BEGIN codex-review-kit -->\nexample\n<!-- END codex-review-kit -->\n%s\n%s\nopen\n' \
+    "$fence3" "$fence3" "$fence3" > "$d/CLAUDE.md"
+  run_install_full "$d"
+  assert "rb5f: a closed fenced example stays an example past an open fence" grep -qx 'example' "$d/CLAUDE.md"
+  assert "rb5f: … and one real block is appended" test "$(grep -c 'BEGIN codex-review-kit' "$d/CLAUDE.md")" -eq 2
+  run_install_full "$d"
+  assert "rb5f: … once" test "$(grep -c 'BEGIN codex-review-kit' "$d/CLAUDE.md")" -eq 2
   rm "$d/CLAUDE.md"
 
   # two pairs, a BEGIN with no END, and END before BEGIN: all left alone

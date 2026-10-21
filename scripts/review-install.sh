@@ -267,15 +267,21 @@ block_span() {
       if (index(l, s)) { ns[k]++; sl[k] = NR; crlf[k] = substr(l, length(l)) == cr; if (bare(l) != s) bad[k] = 1 }
       if (index(l, e)) { ne[k]++; el[k] = NR; if (bare(l) != e) bad[k] = 1 }
     }
-    { mark("all", $0) }
-    !fence && /^[[:space:]]*(```|~~~)/ { match($0, /`+|~+/); fence = substr($0, RSTART, RLENGTH); next }
+    !fence && /^[[:space:]]*(```|~~~)/ {
+      match($0, /`+|~+/); fence = substr($0, RSTART, RLENGTH)
+      ns["in"] = ne["in"] = bad["in"] = 0; next
+    }
     fence && $0 ~ "^[[:space:]]*" fence "+[[:space:]]*$" { fence = ""; next }
-    fence { next }
-    { mark("open", $0) }
+    fence { mark("in", $0); next }
+    { mark("out", $0) }
     END {
-      k = fence ? "all" : "open"
-      if (!ns[k] && !ne[k]) print "none"
-      else if (ns[k] == 1 && ne[k] == 1 && !bad[k] && sl[k] < el[k]) print "one", sl[k], el[k], (crlf[k] ? 1 : 0)
+      if (fence) {
+        if (ns["in"]) { sl["out"] = sl["in"]; crlf["out"] = crlf["in"] }
+        if (ne["in"]) el["out"] = el["in"]
+        ns["out"] += ns["in"]; ne["out"] += ne["in"]; bad["out"] = bad["out"] || bad["in"]
+      }
+      if (!ns["out"] && !ne["out"]) print "none"
+      else if (ns["out"] == 1 && ne["out"] == 1 && !bad["out"] && sl["out"] < el["out"]) print "one", sl["out"], el["out"], (crlf["out"] ? 1 : 0)
       else print "bad"
     }' "$1"
 }
