@@ -25,6 +25,7 @@ roughly 60 lines it is diluting every prompt — consolidate.
   not a JSON number, and `00` passes a check against `0` but is zero, so the JSON
   write failed and the run lost its record. Normalising with `$((10#$v))` then
   wraps an oversized value (`18446744073709551617` is 1). When a validated string
-  reaches JSON or arithmetic, check every form the validation admits; strip
-  leading zeros as a string and bound the length, or pass it with `--arg` and
-  `tonumber`.
+  reaches JSON or arithmetic, check every form the validation admits: strip
+  leading zeros as a string and check the result against the consumer's numeric
+  range. `--arg` with `tonumber` changes only the parsing and needs that check
+  too; keep the value a string where no number is required.
