@@ -118,6 +118,38 @@ hook_wiring() {
   return 1
 }
 
+# Does this repo declare that it has no CodeRabbit? The declaration is the line
+# `CodeRabbit: none` on its own, in the root AGENTS.md or CLAUDE.md, outside
+# fenced code and outside the kit's managed block, so the kit's own text never
+# declares for the repo. Run from the repo root. Returns 0 declared (CR_DECL_FILE
+# names the file), 1 not declared, 2 unknown: nothing declares it and a file that
+# exists cannot be read (CR_DECL_BAD names it).
+coderabbit_declared() {
+  local f
+  CR_DECL_FILE=""; CR_DECL_BAD=""
+  for f in AGENTS.md CLAUDE.md; do
+    if [ ! -e "$f" ] && [ ! -L "$f" ]; then continue; fi
+    # gawk skips a directory and exits as if the file were empty
+    [ -f "$f" ] && [ -r "$f" ] || { CR_DECL_BAD="$f"; continue; }
+    # a BEGIN marker with no END hides nothing: a line held after it counts at EOF
+    awk '!fence && /^[[:space:]]*(```|~~~)/ { match($0, /`+|~+/); fence = substr($0, RSTART, RLENGTH); next }
+      fence && $0 ~ "^[[:space:]]*" fence "+[[:space:]]*$" { fence = ""; next }
+      fence { next }
+      /^[[:space:]]*<!-- BEGIN codex-review-kit -->[[:space:]]*$/ { blk = 1; held = 0; next }
+      blk && /^[[:space:]]*<!-- END codex-review-kit -->[[:space:]]*$/ { blk = 0; held = 0; next }
+      /^CodeRabbit: none[[:space:]]*$/ { if (blk) held = 1; else m = 1 }
+      END { exit !(m || held) }' "$f" 2>/dev/null
+    case $? in
+      0) [ -n "$CR_DECL_FILE" ] || CR_DECL_FILE="$f" ;;
+      1) ;;
+      *) CR_DECL_BAD="$f" ;;
+    esac
+  done
+  [ -z "$CR_DECL_FILE" ] || return 0
+  [ -z "$CR_DECL_BAD" ] || return 2
+  return 1
+}
+
 # Copy the verdicts into the clone's review history: under the git common dir, so
 # every worktree shares it, it outlives worktree removal, and it is never committed.
 # Keyed <mode>-<date>-<sha>-<cksum>.md, <sha> keeping a code verdict's +uncommitted

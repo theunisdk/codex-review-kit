@@ -2,9 +2,10 @@
 # ---------------------------------------------------------------------------
 # review-install.sh — set up the Codex review pipeline on this machine + repo.
 #
-# Idempotent and non-destructive: it never overwrites an existing config, an
-# existing AGENTS.md, or an existing CLAUDE.md. Safe to re-run after a git pull
-# and safe to run on every machine you work from.
+# Idempotent and non-destructive: it never overwrites an existing config, and in
+# AGENTS.md and CLAUDE.md it touches nothing outside the kit's managed block,
+# which it appends when missing and rewrites when its text is out of date.
+# Safe to re-run after a git pull and safe to run on every machine you work from.
 #
 #   ./scripts/review-install.sh            # install
 #   ./scripts/review-install.sh --check    # verify only, change nothing
@@ -19,6 +20,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   exit 1; }
 cd "$REPO_ROOT" || exit 1
 . "$REPO_ROOT/scripts/lib/common.sh"
+. "$REPO_ROOT/scripts/lib/path-rules.sh"
 
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 PROFILE_FILE="$CODEX_HOME/deep-review.config.toml"
@@ -227,6 +229,7 @@ fi
 
 # --- 6. agent pointer files ------------------------------------------------
 hdr "Agent instruction files"
+coderabbit_declared; cr_decl=$?
 block() {
   cat <<EOF
 $MARK_START
@@ -236,26 +239,80 @@ This repository uses a shared review rubric at \`.review/rubric.md\`. Read it
 before reviewing or writing code here. Accumulated review memory — suppressions
 and known blind spots — is in \`.review/learnings.md\`.
 
+EOF
+  if [ "$cr_decl" -eq 0 ]; then
+    cat <<EOF
+Pre-PR review runs via \`./scripts/review.sh\` (parallel Codex lenses). The
+adjudication procedure is \`.review/adjudication.md\` — follow it rather than
+reviewing a diff ad hoc. This repository declares no CodeRabbit, so the
+adjudicated \`/review\` verdict on the PR's head commit is the gate.
+EOF
+  else
+    cat <<EOF
 Pre-PR review runs via \`./scripts/review.sh\` (parallel Codex lenses). The
 adjudication procedure is \`.review/adjudication.md\` — follow it rather than
 reviewing a diff ad hoc. CodeRabbit is the final gate on the PR.
-$MARK_END
 EOF
-}
-for f in AGENTS.md CLAUDE.md; do
-  if [ -f "$f" ] && grep -q "$MARK_START" "$f" 2>/dev/null; then
-    ok "$f already references the rubric"
-  elif [ "$CHECK_ONLY" -eq 1 ]; then
-    no "$f does not reference .review/rubric.md"
-  else
-    if [ -f "$f" ]; then printf '\n' >> "$f"; else printf '# %s\n\n' "${f%.md}" > "$f"; fi
-    block >> "$f"
-    ok "appended rubric pointer to $f"
   fi
-done
+  printf '%s\n' "$MARK_END"
+}
+# Prints "none", "one <begin line> <end line>", or "bad" (markers, but not one
+# BEGIN line followed by one END line).
+block_span() {
+  awk -v s="$MARK_START" -v e="$MARK_END" '
+    function bare(l) { sub(/^[[:space:]]+/, "", l); sub(/[[:space:]]+$/, "", l); return l }
+    index($0, s) { ns++; sl = NR; if (bare($0) != s) bad = 1 }
+    index($0, e) { ne++; el = NR; if (bare($0) != e) bad = 1 }
+    END {
+      if (!ns && !ne) print "none"
+      else if (ns == 1 && ne == 1 && !bad && sl < el) print "one", sl, el
+      else print "bad"
+    }' "$1"
+}
+if [ "$cr_decl" -eq 2 ]; then
+  no "cannot read $CR_DECL_BAD, so whether this repo declares CodeRabbit: none is unknown — review blocks left as they are; fix its permissions and re-run"
+else
+  [ "$cr_decl" -ne 0 ] || skip "$CR_DECL_FILE declares CodeRabbit: none — the review block names the /review verdict as the gate"
+  for f in AGENTS.md CLAUDE.md; do
+    if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+      span=none
+    elif [ ! -f "$f" ] || [ ! -r "$f" ] || ! span="$(block_span "$f")"; then
+      no "$f cannot be read — cannot tell whether it references the rubric"; continue
+    fi
+    case "$span" in
+      none)
+        if [ "$CHECK_ONLY" -eq 1 ]; then
+          no "$f does not reference .review/rubric.md"
+        elif { if [ -e "$f" ]; then printf '\n'; else printf '# %s\n\n' "${f%.md}"; fi; block; } >> "$f"; then
+          ok "appended rubric pointer to $f"
+        else
+          no "could not write $f"
+        fi ;;
+      one\ *)
+        read -r _ blk_from blk_to <<< "$span"
+        if [ "$(sed -n "${blk_from},${blk_to}p" "$f")" = "$(block)" ]; then
+          ok "$f has the current review block"
+        elif [ "$CHECK_ONLY" -eq 1 ]; then
+          warn "$f has an out-of-date review block — ./scripts/review-install.sh rewrites it"
+        elif blk_tmp="$(mktemp)" && { head -n "$((blk_from - 1))" "$f"; block; tail -n "+$((blk_to + 1))" "$f"; } > "$blk_tmp" \
+            && cat "$blk_tmp" > "$f"; then
+          warn "replaced the review block in $f — check git diff before committing: an edit made inside the block is gone"
+        else
+          no "could not rewrite the review block in $f"
+        fi
+        [ -z "${blk_tmp:-}" ] || rm -f "$blk_tmp"; blk_tmp="" ;;
+      *)
+        warn "$f has codex-review-kit markers, but not one BEGIN line followed by one END line — left alone; fix the markers by hand and re-run" ;;
+    esac
+  done
+fi
 
 # --- 7. PR gate ------------------------------------------------------------
-hdr "PR gate (CodeRabbit)"
+case "$cr_decl" in
+  0) hdr "PR gate (local /review verdict — $CR_DECL_FILE declares CodeRabbit: none)" ;;
+  2) hdr "PR gate (CodeRabbit — assumed: $CR_DECL_BAD cannot be read for a declaration)" ;;
+  *) hdr "PR gate (CodeRabbit)" ;;
+esac
 cr_cfg=""
 for f in .coderabbit.yaml .coderabbit.yml .coderabbit.config.ts; do
   [ -f "$f" ] && { cr_cfg="$f"; break; }
@@ -264,7 +321,38 @@ cr_undoc=""
 for f in coderabbit.yaml coderabbit.yml; do
   [ -f "$f" ] && { cr_undoc="$f"; break; }
 done
-if [ -z "$cr_cfg" ] && [ -n "$cr_undoc" ]; then
+if [ "$cr_decl" -eq 0 ]; then
+  cr_why="informational: $CR_DECL_FILE declares CodeRabbit: none"
+  if [ -z "$cr_cfg$cr_undoc" ]; then
+    skip "no CodeRabbit config — none needed ($cr_why)"
+  elif ! cr_tmp="$(mktemp -d)"; then
+    no "no temp dir to read ${cr_cfg:-$cr_undoc}'s path_instructions"
+  else
+    # the lenses still read path_instructions from it, so its parse is checked as they run it
+    : > "$cr_tmp/changed"
+    collect_path_rules "$cr_tmp/changed" "$cr_tmp/section"
+    rm -rf "$cr_tmp"
+    case "$PATH_RULES_STATUS" in
+      no_rules) ok "${cr_cfg:-$cr_undoc} parses; it sets no path_instructions for the lenses" ;;
+      no_match|applied)
+        ok "${cr_cfg:-$cr_undoc} parses; its $(jq -r '.rules // 0' <<< "$PATH_RULES_JSON") path_instructions reach the lenses" ;;
+      unparseable|failed)
+        if [ "$CHECK_ONLY" -eq 1 ]; then no "$PATH_RULES_WARNING"; else skip "$PATH_RULES_WARNING"; fi ;;
+      *) warn "${PATH_RULES_WARNING:-${cr_cfg:-$cr_undoc}: path rules status $PATH_RULES_STATUS}" ;;
+    esac
+    if [ "$PATH_RULES_STATUS" != unparseable ] && [ "$PATH_RULES_STATUS" != failed ] \
+        && [ -n "$cr_cfg" ] && [ "$cr_cfg" != .coderabbit.config.ts ] && have_yaml_parser; then
+      cr_problems="$(cfg_diagnose "$cr_cfg")" \
+        || cr_problems="could not be inspected — the wiring check failed on its contents"
+      while IFS= read -r cr_line; do
+        [ -n "$cr_line" ] || continue
+        skip "$cr_cfg $cr_line ($cr_why)"
+      done <<EOF
+$cr_problems
+EOF
+    fi
+  fi
+elif [ -z "$cr_cfg" ] && [ -n "$cr_undoc" ]; then
   skip "$cr_undoc present — not one of CodeRabbit's documented config names, so it is not inspected here; if it is your active config verify its wiring by hand. --init will not seed alongside it"
 elif [ -z "$cr_cfg" ]; then
   skip "no CodeRabbit config — the gate runs on its defaults, not this repo's rubric; seed one with scripts/review-update.sh --init"
@@ -333,9 +421,20 @@ cat <<'EOF'
     1. Edit .review/rubric.md      — your house rules, replacing the examples.
     2. Edit .review/config.sh      — posture per repo (all values are commented out).
     3. Optionally pin a model in ~/.codex/deep-review.config.toml.
+EOF
+if [ "$cr_decl" -eq 0 ]; then
+  cat <<'EOF'
+    4. The PR gate is the adjudicated /review verdict (CodeRabbit: none). A
+       .coderabbit.yaml, if kept, still feeds its path_instructions to the lenses.
+EOF
+else
+  cat <<'EOF'
     4. Edit the CodeRabbit config named above — the PR gate; /review-onboard
        wires it to .review/rubric.md. Do not add a second one: YAML in either
        spelling overrides .coderabbit.config.ts outright.
+EOF
+fi
+cat <<'EOF'
     5. Commit .review/, scripts/, .claude/, .codex/, .githooks/,
        .claude-plugin/, AGENTS.md, CLAUDE.md, that config file, and
        .github/workflows/review-kit-sync.yml if --init seeded it.

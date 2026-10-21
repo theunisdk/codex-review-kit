@@ -1,7 +1,9 @@
 # Codex pre-PR review kit
 
 Six narrow, parallel Codex review passes over your branch diff, merged into
-structured findings, adjudicated by Claude Code, gated by CodeRabbit on the PR.
+structured findings, adjudicated by Claude Code, gated by CodeRabbit on the PR —
+or, in a repo that declares `CodeRabbit: none`, by the adjudicated verdict
+itself (see [No CodeRabbit](#no-coderabbit)).
 Once it's wired up, read **OPERATING.md** — how to prove the pipeline works
 (scorecard, fire drills) and the quiet failure modes to watch.
 
@@ -27,7 +29,8 @@ diff into callers, tests, and config.
         │     → FIX / LOG(issue) / REJECT(reason) / ESCALATE
         │     → .review/verdict.md
         │
-        ├─ push → PR → CodeRabbit (final gate)
+        ├─ push → PR → CodeRabbit (final gate; with `CodeRabbit: none`,
+        │                 the /review verdict on the head is the gate)
         │
         └─ /review-postmortem <PR>
               what CodeRabbit caught that we missed → .review/learnings.md
@@ -134,6 +137,9 @@ machinery bug or add a generic lesson once, in the hub; every repo inherits it
 on its first sync after that fix ships in a release tag. `--local` installs a
 hub clone's working tree instead, recorded as `unreleased`.
 `--latest-release` prints the latest tag and installs nothing.
+The sync never touches `AGENTS.md` or `CLAUDE.md`: run
+`./scripts/review-install.sh` after it to bring the managed block's text up to
+date, and `--check` warns while it is out of date.
 
 `--init` also seeds `.github/workflows/review-kit-sync.yml`, which runs
 `scripts/review-sync.sh` weekly (minute, hour and weekday derived from the repo
@@ -207,6 +213,26 @@ never by repo name or path.
 `make-plugin.sh` still exists for a Claude Code plugin build, but the runner
 reads prompts from the repo, not `${CLAUDE_PLUGIN_ROOT}` — the vendored spoke
 layout is the supported path; the plugin is untested sugar.
+
+## No CodeRabbit
+
+A repo without CodeRabbit declares it with the line `CodeRabbit: none` on a
+line of its own in its root `AGENTS.md` or `CLAUDE.md`, outside fenced code
+and outside the kit's managed block. Prose saying the same thing does not
+count. `coderabbit_declared` in `scripts/lib/common.sh` reads it, and a file
+it cannot read leaves the answer unknown rather than "not declared". With the
+line in place:
+
+- The managed block `review-install.sh` writes names the adjudicated `/review`
+  verdict on the PR's head as the gate, with no CodeRabbit sentence. The
+  installer rewrites that block in place whenever its text is out of date; it
+  touches nothing outside the markers, and an edit made inside them is lost.
+- `review-install.sh --check` reports CodeRabbit's wiring keys (`inheritance`,
+  the `knowledge_base.code_guidelines` mappings) as information, not failures.
+  It still parses `.coderabbit.yaml` the way the lenses do, and an unparseable
+  one still fails: its `reviews.path_instructions` reach the lenses either way.
+- `/review-postmortem` has no CodeRabbit review to score a new PR against and
+  reports it skipped.
 
 ## Use
 

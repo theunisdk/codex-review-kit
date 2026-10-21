@@ -123,6 +123,11 @@ only when a diff touches them).
 
 ## 6 — `.coderabbit.yaml` the PR gate
 
+If the root `AGENTS.md` or `CLAUDE.md` declares `CodeRabbit: none` (its own
+line, outside fenced code), the PR gate is the adjudicated `/review` verdict:
+skip the gate wiring below. Keep a `.coderabbit.yaml` only if its
+`reviews.path_instructions` should reach the lenses.
+
 **First check which case you are in.** `--init` seeds `.coderabbit.yaml` only
 when the repo has no CodeRabbit config at all; it deliberately leaves an
 existing `.coderabbit.yaml`, `.coderabbit.yml`, or `.coderabbit.config.ts`

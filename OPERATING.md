@@ -10,6 +10,10 @@ Two mechanisms, one you already own and one you run deliberately.
 
 ### The postmortem scorecard (the designed proof)
 
+In a repo that declares `CodeRabbit: none` there is no CodeRabbit review to
+score against, so this scorecard stops at the last PR CodeRabbit reviewed;
+the fire drills below are what proves the pipeline there.
+
 After CodeRabbit reviews each PR, run `/review-postmortem <PR>`. It yields
 `caught N / missed M / rejected-wrongly R / noise X / unscored U`, with
 `missed` split by cause. That is the metric:

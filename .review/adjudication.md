@@ -171,7 +171,8 @@ In chat: the counts, every ESCALATE in full, and any REJECT you are less than
 certain about. Do not re-narrate the fixes — the verdict file has them.
 
 CodeRabbit still runs as the final gate on the PR. The goal is for it to find
-nothing, not to substitute for it.
+nothing, not to substitute for it. In a repo that declares `CodeRabbit: none`
+there is no later gate: this verdict, on the head commit, is the gate.
 
 ## Replay mode
 

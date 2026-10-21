@@ -2,7 +2,8 @@
 
 A multi-lens pre-PR code-review pipeline: six narrow, parallel Codex review
 passes over a branch diff, merged into structured findings, adjudicated by
-Claude Code, gated by CodeRabbit on the PR.
+Claude Code, gated by CodeRabbit on the PR — or, in a repo that declares
+`CodeRabbit: none`, by the adjudicated `/review` verdict itself.
 
 This repository is the **hub**. Consuming repos are spokes: they vendor the
 shared machinery via `scripts/review-update.sh` and keep their own rubric,
