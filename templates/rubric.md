@@ -35,6 +35,7 @@ speculative refactors, and anything a linter or formatter already enforces.
 
 1. `/review` — six parallel Codex lenses, then Claude Code adjudicates each finding.
 2. Push and open the PR.
-3. CodeRabbit runs as the final gate.
+3. CodeRabbit runs as the final gate. A repo that declares `CodeRabbit: none`
+   has no step 3 or 4: the `/review` verdict on the head commit is the gate.
 4. `/review-postmortem` — feed anything CodeRabbit caught that we missed back into
    `learnings.md`, so the local pass closes the gap over time.
