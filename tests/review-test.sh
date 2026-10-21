@@ -4939,7 +4939,7 @@ test_coderabbit_declaration_reader() {
   assert "cd5: prose, indented or extended lines do not declare" test "$(decl_rc "$d")" = "1 "
   printf '%s\nCodeRabbit: none\n%s\n' "$fence3" "$fence3" > "$d/AGENTS.md"
   assert "cd6: a backtick-fenced line does not declare" test "$(decl_rc "$d")" = "1 "
-  printf '~~~~ md\nCodeRabbit: none\n~~~\n~~~~\n' > "$d/AGENTS.md"
+  printf '~~~~ md\nx\n~~~\nCodeRabbit: none\n~~~~\n' > "$d/AGENTS.md"
   assert "cd7: a tilde fence closes only on its own length or longer" test "$(decl_rc "$d")" = "1 "
   printf '%s\nx\n%s\nCodeRabbit: none\n' "$fence3" "$fence3" > "$d/AGENTS.md"
   assert "cd8: the line after a closed fence declares" test "$(decl_rc "$d")" = "0 AGENTS.md"
@@ -5040,11 +5040,11 @@ test_install_refreshes_the_review_block() {
   awk '{ print } NR == 1 { print ""; print "CodeRabbit: none" }' "$d/AGENTS.md" > "$d/AGENTS.tmp" && mv "$d/AGENTS.tmp" "$d/AGENTS.md"
   assert "rb1: fixture declares" grep -qx 'CodeRabbit: none' "$d/AGENTS.md"
 
-  before="$(cksum < "$d/AGENTS.md")"
+  before="$(cksum < "$d/AGENTS.md")$(cksum < "$d/CLAUDE.md")"
   run_install_check "$d"; rc=$?
   assert "rb2: --check warns on a stale block" grep -qF 'AGENTS.md has an out-of-date review block' "$LOG"
   assert "rb2: … without failing on it" test "$rc" -eq 0
-  assert "rb2: … and changes nothing" test "$(cksum < "$d/AGENTS.md")" = "$before"
+  assert "rb2: … and changes nothing" test "$(cksum < "$d/AGENTS.md")$(cksum < "$d/CLAUDE.md")" = "$before"
 
   LOG="$d.install.log"
   ( cd "$d" && env -i HOME="$WORK/nohome" PATH="$WORK/bin:$PATH" bash scripts/review-install.sh ) > "$LOG" 2>&1
@@ -5054,6 +5054,10 @@ test_install_refreshes_the_review_block() {
   assert     "rb3: text outside the block is kept" grep -qx 'own text after' "$d/AGENTS.md"
   assert     "rb3: … and the declaration" grep -qx 'CodeRabbit: none' "$d/AGENTS.md"
   assert     "rb3: exactly one block" test "$(grep -c 'BEGIN codex-review-kit' "$d/AGENTS.md")" -eq 1
+  assert     "rb3: the lines before the block are kept exactly" \
+    test "$(head -n 5 "$d/AGENTS.md")" = "$(printf '# AGENTS\n\nCodeRabbit: none\n\n<!-- BEGIN codex-review-kit -->')"
+  assert     "rb3: … and the lines after it" \
+    test "$(tail -n 2 "$d/AGENTS.md")" = "$(printf '<!-- END codex-review-kit -->\nown text after')"
 
   before="$(cksum < "$d/AGENTS.md")"
   ( cd "$d" && env -i HOME="$WORK/nohome" PATH="$WORK/bin:$PATH" bash scripts/review-install.sh ) > "$LOG" 2>&1
@@ -5061,12 +5065,51 @@ test_install_refreshes_the_review_block() {
   assert     "rb4: … it is reported current" grep -qF 'AGENTS.md has the current review block' "$LOG"
   assert     "rb4: … and the file is untouched" test "$(cksum < "$d/AGENTS.md")" = "$before"
 
-  # CLAUDE.md as a symlink to AGENTS.md stays a symlink
-  rm "$d/CLAUDE.md"; ln -s AGENTS.md "$d/CLAUDE.md"
-  sed 's/declares no CodeRabbit, so the/has a hand-edited/' "$d/AGENTS.md" > "$d/AGENTS.tmp" && cat "$d/AGENTS.tmp" > "$d/AGENTS.md"
-  run_install_full "$d"
-  assert "rb5: a symlinked CLAUDE.md stays a symlink" test -L "$d/CLAUDE.md"
-  assert "rb5: … and its target is rewritten" grep -qF 'declares no CodeRabbit' "$d/AGENTS.md"
+  # a rewrite that cannot land leaves the file whole, and one that lands keeps its mode
+  if [ "$(id -u)" != 0 ]; then
+    sed 's/declares no CodeRabbit, so the/has a hand-edited/' "$d/AGENTS.md" > "$d/AGENTS.tmp" && cat "$d/AGENTS.tmp" > "$d/AGENTS.md"
+    rm "$d/AGENTS.tmp"; chmod 600 "$d/AGENTS.md"; before="$(cksum < "$d/AGENTS.md")"
+    chmod 555 "$d"
+    ( cd "$d" && env -i HOME="$WORK/nohome" PATH="$WORK/bin:$PATH" bash scripts/review-install.sh ) > "$LOG" 2>&1
+    chmod 755 "$d"
+    assert "rb4b: a rewrite that cannot land is a failure" grep -qF 'could not rewrite the review block in AGENTS.md' "$LOG"
+    assert "rb4b: … and the file is whole" test "$(cksum < "$d/AGENTS.md")" = "$before"
+    run_install_full "$d"
+    assert "rb4b: a landed rewrite keeps the file's mode" test "$(ls -l "$d/AGENTS.md" | cut -c1-10)" = "-rw-------"
+    assert "rb4b: … and its new text" grep -qF 'declares no CodeRabbit' "$d/AGENTS.md"
+    chmod 644 "$d/AGENTS.md"
+  else
+    skip_test "rb4b: running as root, a read-only directory does not stop writes"
+  fi
+
+  # AGENTS.md as a symlink to CLAUDE.md: rewritten through the link, which stays a link
+  sed 's/declares no CodeRabbit, so the/has a hand-edited/' "$d/AGENTS.md" > "$d/CLAUDE.md"
+  rm "$d/AGENTS.md"; ln -s CLAUDE.md "$d/AGENTS.md"
+  ( cd "$d" && env -i HOME="$WORK/nohome" PATH="$WORK/bin:$PATH" bash scripts/review-install.sh ) > "$LOG" 2>&1
+  assert "rb5: the rewrite goes through the symlinked AGENTS.md" grep -qF 'replaced the review block in AGENTS.md' "$LOG"
+  assert "rb5: … which stays a symlink" test -L "$d/AGENTS.md"
+  assert "rb5: … and its target holds the new text" grep -qF 'declares no CodeRabbit' "$d/CLAUDE.md"
+  rm "$d/AGENTS.md" "$d/CLAUDE.md"
+
+  # a block on line 1, a CRLF file, a fenced example of the markers
+  ( cd "$d" && env -i HOME="$WORK/nohome" PATH="$WORK/bin:$PATH" bash scripts/review-install.sh ) >/dev/null 2>&1
+  awk '/BEGIN codex-review-kit/ { p = 1 } p' "$d/CLAUDE.md" > "$d/CLAUDE.tmp" && mv "$d/CLAUDE.tmp" "$d/CLAUDE.md"
+  printf 'CodeRabbit: none\n' > "$d/AGENTS.md"
+  ( cd "$d" && env -i HOME="$WORK/nohome" PATH="$WORK/bin:$PATH" bash scripts/review-install.sh ) > "$LOG" 2>&1
+  assert "rb5b: a block on line 1 is rewritten" grep -qF 'replaced the review block in CLAUDE.md' "$LOG"
+  assert "rb5b: … starting on line 1" test "$(head -n 1 "$d/CLAUDE.md")" = '<!-- BEGIN codex-review-kit -->'
+  assert "rb5b: … with the new text" grep -qF 'declares no CodeRabbit' "$d/CLAUDE.md"
+  awk '{ printf "%s\r\n", $0 }' "$d/CLAUDE.md" > "$d/CLAUDE.tmp" && mv "$d/CLAUDE.tmp" "$d/CLAUDE.md"
+  ( cd "$d" && env -i HOME="$WORK/nohome" PATH="$WORK/bin:$PATH" bash scripts/review-install.sh ) > "$LOG" 2>&1
+  assert "rb5c: a current CRLF block is current" grep -qF 'CLAUDE.md has the current review block' "$LOG"
+  sed 's/declares no CodeRabbit, so the/has a hand-edited/' "$d/CLAUDE.md" > "$d/CLAUDE.tmp" && mv "$d/CLAUDE.tmp" "$d/CLAUDE.md"
+  ( cd "$d" && env -i HOME="$WORK/nohome" PATH="$WORK/bin:$PATH" bash scripts/review-install.sh ) > "$LOG" 2>&1
+  assert "rb5c: a stale CRLF block is rewritten" grep -qF 'replaced the review block in CLAUDE.md' "$LOG"
+  assert "rb5c: … keeping CRLF on every line" test "$(grep -c "$(printf '\r')\$" "$d/CLAUDE.md")" -eq "$(wc -l < "$d/CLAUDE.md")"
+  printf '# A\n%s\n<!-- BEGIN codex-review-kit -->\nexample\n<!-- END codex-review-kit -->\n%s\n' "$fence3" "$fence3" > "$d/CLAUDE.md"
+  ( cd "$d" && env -i HOME="$WORK/nohome" PATH="$WORK/bin:$PATH" bash scripts/review-install.sh ) > "$LOG" 2>&1
+  assert "rb5d: a fenced example of the markers is not the block" grep -qF 'appended rubric pointer to CLAUDE.md' "$LOG"
+  assert "rb5d: … and is left as written" grep -qx 'example' "$d/CLAUDE.md"
   rm "$d/CLAUDE.md"
 
   # two pairs, a BEGIN with no END, and END before BEGIN: all left alone
@@ -5086,11 +5129,15 @@ test_install_refreshes_the_review_block() {
 
   # an AGENTS.md that cannot be read: no block is written, and --check fails
   if [ "$(id -u)" != 0 ]; then
+    rm -f "$d/CLAUDE.md"
     printf 'CodeRabbit: none\n' > "$d/AGENTS.md"; chmod 000 "$d/AGENTS.md"
     run_install_check "$d"; rc=$?
     assert     "rb7: unreadable AGENTS.md fails --check" test "$rc" -ne 0
     assert     "rb7: … named as unreadable" grep -qF 'cannot read AGENTS.md, so whether this repo declares CodeRabbit: none is unknown' "$LOG"
     assert_not "rb7: … never read as declared" grep -qF 'local /review verdict' "$LOG"
+    ( cd "$d" && env -i HOME="$WORK/nohome" PATH="$WORK/bin:$PATH" bash scripts/review-install.sh ) > "$LOG" 2>&1; rc=$?
+    assert     "rb7: install fails too" test "$rc" -ne 0
+    assert_not "rb7: … and writes no block anywhere" test -e "$d/CLAUDE.md"
     chmod 644 "$d/AGENTS.md"
   else
     skip_test "rb7: running as root, chmod 000 does not stop reads"

@@ -256,18 +256,44 @@ EOF
   fi
   printf '%s\n' "$MARK_END"
 }
-# Prints "none", "one <begin line> <end line>", or "bad" (markers, but not one
-# BEGIN line followed by one END line).
+CR="$(printf '\r')"
+# Prints "none", "one <begin line> <end line> <crlf 0|1>", or "bad" (markers, but
+# not one BEGIN line followed by one END line). Fenced lines are not markers.
 block_span() {
-  awk -v s="$MARK_START" -v e="$MARK_END" '
+  awk -v s="$MARK_START" -v e="$MARK_END" -v cr="$CR" '
     function bare(l) { sub(/^[[:space:]]+/, "", l); sub(/[[:space:]]+$/, "", l); return l }
-    index($0, s) { ns++; sl = NR; if (bare($0) != s) bad = 1 }
+    !fence && /^[[:space:]]*(```|~~~)/ { match($0, /`+|~+/); fence = substr($0, RSTART, RLENGTH); next }
+    fence && $0 ~ "^[[:space:]]*" fence "+[[:space:]]*$" { fence = ""; next }
+    fence { next }
+    index($0, s) { ns++; sl = NR; crlf = substr($0, length($0)) == cr; if (bare($0) != s) bad = 1 }
     index($0, e) { ne++; el = NR; if (bare($0) != e) bad = 1 }
     END {
       if (!ns && !ne) print "none"
-      else if (ns == 1 && ne == 1 && !bad && sl < el) print "one", sl, el
+      else if (ns == 1 && ne == 1 && !bad && sl < el) print "one", sl, el, (crlf ? 1 : 0)
       else print "bad"
     }' "$1"
+}
+# The block as the file holds it, lines <begin>..<end>, CRs dropped.
+block_text() { awk -v a="$2" -v b="$3" -v cr="$CR" 'NR >= a && NR <= b {
+  if (substr($0, length($0)) == cr) $0 = substr($0, 1, length($0) - 1); print }' "$1"; }
+# rewrite_block <file> <begin line> <end line> <crlf> — writes the current block
+# beside the symlink-resolved target and renames it over, so a failed write
+# leaves the file whole.
+rewrite_block() {
+  local t="$1" l n=0 tmp
+  while [ -L "$t" ] && [ "$n" -lt 16 ]; do
+    l="$(readlink "$t")" || return 1
+    case "$l" in /*) t="$l" ;; *) t="$(dirname "$t")/$l" ;; esac
+    n=$((n + 1))
+  done
+  [ -f "$t" ] && [ ! -L "$t" ] || return 1
+  tmp="$t.review-install.$$"
+  if cp -p "$t" "$tmp" && awk -v n="$2" 'NR < n' "$t" > "$tmp" \
+      && if [ "$4" = 1 ]; then block | awk -v cr="$CR" '{ printf "%s%s\n", $0, cr }'; else block; fi >> "$tmp" \
+      && awk -v n="$3" 'NR > n' "$t" >> "$tmp" && mv -f "$tmp" "$t"; then
+    return 0
+  fi
+  rm -f "$tmp"; return 1
 }
 if [ "$cr_decl" -eq 2 ]; then
   no "cannot read $CR_DECL_BAD, so whether this repo declares CodeRabbit: none is unknown — review blocks left as they are; fix its permissions and re-run"
@@ -283,24 +309,25 @@ else
       none)
         if [ "$CHECK_ONLY" -eq 1 ]; then
           no "$f does not reference .review/rubric.md"
-        elif { if [ -e "$f" ]; then printf '\n'; else printf '# %s\n\n' "${f%.md}"; fi; block; } >> "$f"; then
+        elif if [ -e "$f" ]; then blk_lead='\n'; else blk_lead="# ${f%.md}\n\n"; fi \
+            && { printf '%b' "$blk_lead"; block; } >> "$f"; then
           ok "appended rubric pointer to $f"
         else
           no "could not write $f"
         fi ;;
       one\ *)
-        read -r _ blk_from blk_to <<< "$span"
-        if [ "$(sed -n "${blk_from},${blk_to}p" "$f")" = "$(block)" ]; then
+        read -r _ blk_from blk_to blk_crlf <<< "$span"
+        if ! blk_cur="$(block_text "$f" "$blk_from" "$blk_to")"; then
+          no "$f cannot be read — cannot tell whether its review block is current"
+        elif [ "$blk_cur" = "$(block)" ]; then
           ok "$f has the current review block"
         elif [ "$CHECK_ONLY" -eq 1 ]; then
           warn "$f has an out-of-date review block — ./scripts/review-install.sh rewrites it"
-        elif blk_tmp="$(mktemp)" && { head -n "$((blk_from - 1))" "$f"; block; tail -n "+$((blk_to + 1))" "$f"; } > "$blk_tmp" \
-            && cat "$blk_tmp" > "$f"; then
+        elif rewrite_block "$f" "$blk_from" "$blk_to" "$blk_crlf"; then
           warn "replaced the review block in $f — check git diff before committing: an edit made inside the block is gone"
         else
-          no "could not rewrite the review block in $f"
-        fi
-        [ -z "${blk_tmp:-}" ] || rm -f "$blk_tmp"; blk_tmp="" ;;
+          no "could not rewrite the review block in $f — left as it was"
+        fi ;;
       *)
         warn "$f has codex-review-kit markers, but not one BEGIN line followed by one END line — left alone; fix the markers by hand and re-run" ;;
     esac
