@@ -258,18 +258,24 @@ EOF
 }
 CR="$(printf '\r')"
 # Prints "none", "one <begin line> <end line> <crlf 0|1>", or "bad" (markers, but
-# not one BEGIN line followed by one END line). Fenced lines are not markers.
+# not one BEGIN line followed by one END line). Lines in a closed fence are not
+# markers; a fence left open to EOF hides nothing, or an appended block would.
 block_span() {
   awk -v s="$MARK_START" -v e="$MARK_END" -v cr="$CR" '
     function bare(l) { sub(/^[[:space:]]+/, "", l); sub(/[[:space:]]+$/, "", l); return l }
+    function mark(k, l) {
+      if (index(l, s)) { ns[k]++; sl[k] = NR; crlf[k] = substr(l, length(l)) == cr; if (bare(l) != s) bad[k] = 1 }
+      if (index(l, e)) { ne[k]++; el[k] = NR; if (bare(l) != e) bad[k] = 1 }
+    }
+    { mark("all", $0) }
     !fence && /^[[:space:]]*(```|~~~)/ { match($0, /`+|~+/); fence = substr($0, RSTART, RLENGTH); next }
     fence && $0 ~ "^[[:space:]]*" fence "+[[:space:]]*$" { fence = ""; next }
     fence { next }
-    index($0, s) { ns++; sl = NR; crlf = substr($0, length($0)) == cr; if (bare($0) != s) bad = 1 }
-    index($0, e) { ne++; el = NR; if (bare($0) != e) bad = 1 }
+    { mark("open", $0) }
     END {
-      if (!ns && !ne) print "none"
-      else if (ns == 1 && ne == 1 && !bad && sl < el) print "one", sl, el, (crlf ? 1 : 0)
+      k = fence ? "all" : "open"
+      if (!ns[k] && !ne[k]) print "none"
+      else if (ns[k] == 1 && ne[k] == 1 && !bad[k] && sl[k] < el[k]) print "one", sl[k], el[k], (crlf[k] ? 1 : 0)
       else print "bad"
     }' "$1"
 }

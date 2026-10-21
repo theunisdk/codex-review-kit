@@ -5074,6 +5074,11 @@ test_install_refreshes_the_review_block() {
     chmod 755 "$d"
     assert "rb4b: a rewrite that cannot land is a failure" grep -qF 'could not rewrite the review block in AGENTS.md' "$LOG"
     assert "rb4b: … and the file is whole" test "$(cksum < "$d/AGENTS.md")" = "$before"
+    mkdir -p "$WORK/rb-nomv"; printf '#!/bin/sh\nexit 1\n' > "$WORK/rb-nomv/mv"; chmod +x "$WORK/rb-nomv/mv"
+    ( cd "$d" && env -i HOME="$WORK/nohome" PATH="$WORK/rb-nomv:$WORK/bin:$PATH" bash scripts/review-install.sh ) > "$LOG" 2>&1
+    assert "rb4b: a staged rewrite whose rename fails is a failure" grep -qF 'could not rewrite the review block in AGENTS.md' "$LOG"
+    assert "rb4b: … the file is whole" test "$(cksum < "$d/AGENTS.md")" = "$before"
+    assert "rb4b: … and no staged copy is left" sh -c '! ls "$1"/AGENTS.md.review-install.* >/dev/null 2>&1' _ "$d"
     run_install_full "$d"
     assert "rb4b: a landed rewrite keeps the file's mode" test "$(ls -l "$d/AGENTS.md" | cut -c1-10)" = "-rw-------"
     assert "rb4b: … and its new text" grep -qF 'declares no CodeRabbit' "$d/AGENTS.md"
@@ -5110,6 +5115,10 @@ test_install_refreshes_the_review_block() {
   ( cd "$d" && env -i HOME="$WORK/nohome" PATH="$WORK/bin:$PATH" bash scripts/review-install.sh ) > "$LOG" 2>&1
   assert "rb5d: a fenced example of the markers is not the block" grep -qF 'appended rubric pointer to CLAUDE.md' "$LOG"
   assert "rb5d: … and is left as written" grep -qx 'example' "$d/CLAUDE.md"
+  printf '# A\n%s\nnever closed\n' "$fence3" > "$d/CLAUDE.md"
+  run_install_full "$d"; run_install_full "$d"
+  assert "rb5e: a fence left open gets one block, not one per run" \
+    test "$(grep -c 'BEGIN codex-review-kit' "$d/CLAUDE.md")" -eq 1
   rm "$d/CLAUDE.md"
 
   # two pairs, a BEGIN with no END, and END before BEGIN: all left alone
