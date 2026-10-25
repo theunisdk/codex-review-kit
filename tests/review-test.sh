@@ -3408,6 +3408,129 @@ test_verdict_archive_keys_an_uncommitted_verdict() {
     sh -c 'ls "$1"/spec-unparsed-*.md' _ "$hist"
 }
 
+# Each run wiped .review/raw/, so a scoped re-review over a fix commit erased the
+# full run's lens logs before /review-postmortem could read them, and every miss
+# on that PR was unverified. Each run now keeps a copy under the review history.
+runs_dir() { echo "$(history_dir "$1")/runs"; }
+postmortem_runs_cmd() { # postmortem_runs_cmd <first> <pr-commit-file> — the doc's run-listing command, filled in
+  grep -m1 -F 'review_runs <first> <pr-commit-file>' "$KIT/.claude/commands/review-postmortem.md" \
+    | sed "s/^ *//; s|<first>|$1|; s|<pr-commit-file>|$2|"
+}
+
+test_review_keeps_each_runs_raw_output() {
+  local repo="$WORK/rr1" stub="$WORK/rr1-stub" wt="$WORK/rr1-wt" prs="$WORK/rr1.commits" out="$WORK/rr1.out"
+  local runs a b full scoped rc
+  make_repo "$repo"; mkdir -p "$stub"
+  finding "full-run finding" > "$stub/security.json"
+  printf 'SECURITY-TRANSCRIPT-5e1d' > "$stub/security.tokens"
+  printf '{"findings":[]}' > "$stub/correctness.json"
+  git -C "$repo" worktree add -q -b feat "$wt" main
+  ( cd "$wt" && printf 'full\n' >> src.txt && git commit -qam full )
+  a=$(git -C "$wt" rev-parse HEAD)
+  run_review "$wt" "$stub" --lenses correctness,security
+  sleep 1
+  ( cd "$wt" && printf 'fix\n' >> src.txt && git commit -qam fix )
+  b=$(git -C "$wt" rev-parse HEAD)
+  ( cd "$wt" && PATH="$WORK/bin:$PATH" CODEX_STUB_DIR="$stub" REVIEW_SKIP_AUTH_CHECK=1 \
+      bash scripts/review.sh --no-analyzers --lenses correctness "$a" ) > "$WORK/rr1.log" 2>&1
+  runs="$(runs_dir "$repo")"
+  full="$(grep -lx "{.*\"head\":\"$a\".*}" "$runs"/*/run.json 2>/dev/null)"; full="${full%/run.json}"
+  scoped="$(grep -lx "{.*\"head\":\"$b\".*}" "$runs"/*/run.json 2>/dev/null)"; scoped="${scoped%/run.json}"
+
+  assert "rr1: both runs are archived" test "$(ls "$runs" | grep -c .)" -eq 2
+  assert "rr1: the live .review/raw/ is the scoped run's" \
+    sh -c '[ -f "$1/log-correctness.txt" ] && [ ! -e "$1/log-security.txt" ]' _ "$wt/.review/raw"
+  assert "rr1: the full run's lens output survives the scoped run" \
+    sh -c 'grep -qF "full-run finding" "$1/raw/out-security.json" && grep -qF SECURITY-TRANSCRIPT-5e1d "$1/raw/log-security.txt"' _ "$full"
+  assert "rr1: … with its report and the files its diff covered" \
+    sh -c 'jq -e ".mode == \"branch\"" "$1/findings.json" && grep -qxF src.txt "$1/raw/changed-files.txt"' _ "$full"
+  assert "rr1: run.json names the full run's head, mode, base and lenses" \
+    jq -e --arg mb "$(git -C "$repo" rev-parse main)" \
+      '.mode == "branch" and .base == "main" and .merge_base == $mb and .lenses == ["correctness","security"] and (.finished | test("Z$")) and .rc == 0' \
+      "$full/run.json"
+  assert "rr1: … and the scoped run's base" jq -e --arg a "$a" '.base == $a and .merge_base == $a' "$scoped/run.json"
+  assert_not "rr1: the archive is never in the working tree" \
+    sh -c 'git -C "$1" status --porcelain --ignored | grep -q review-history' _ "$wt"
+
+  git -C "$repo" worktree remove --force "$wt"
+  git -C "$repo" rev-list main..feat > "$prs"
+  assert "rr1: the postmortem names the run-listing command" test -n "$(postmortem_runs_cmd "$b" "$prs")"
+  ( cd "$repo" && bash -c "$(postmortem_runs_cmd "$b" "$prs")" ) > "$out" 2>&1; rc=$?
+  assert "rr1: the postmortem's command lists the runs after the worktree is removed" \
+    sh -c '[ "$1" -eq 0 ] && [ "$(grep -c . "$2")" -eq 2 ]' _ "$rc" "$out"
+  assert "rr1: the full run is an ancestor of the commit CodeRabbit reviewed" \
+    grep -qxF "ancestor $a branch $(jq -r .finished "$full/run.json") $full" "$out"
+  assert "rr1: … and the scoped run is on it" grep -q "^same $b branch .* $scoped\$" "$out"
+  ( cd "$repo" && . scripts/lib/common.sh && review_runs "$a" "$prs" ) > "$out" 2>&1
+  assert "rr1: a run after the compared commit is other" grep -q "^other $b " "$out"
+
+  mkdir "$runs/20260101T000000Z-bad-1" && printf 'not json\n' > "$runs/20260101T000000Z-bad-1/run.json"
+  ( cd "$repo" && . scripts/lib/common.sh && review_runs "$b" "$prs" ) > "$out" 2>&1; rc=$?
+  assert "rr1: an unreadable run.json is named, not dropped or fatal" \
+    sh -c '[ "$1" -eq 0 ] && grep -q "^unread .*20260101T000000Z-bad-1" "$2" && grep -q "^same " "$2"' _ "$rc" "$out"
+  ( cd "$repo" && . scripts/lib/common.sh && review_runs "$b" "$WORK/rr1.none" ) > "$out" 2>&1; rc=$?
+  assert "rr1: a missing PR commit list fails" sh -c '[ "$1" -ne 0 ] && grep -q "^failed:" "$2"' _ "$rc" "$out"
+  rm -rf "$runs"
+  ( cd "$repo" && . scripts/lib/common.sh && review_runs "$b" "$prs" ) > "$out" 2>&1; rc=$?
+  assert "rr1: no archive is no runs, not a failure" sh -c '[ "$1" -eq 0 ] && [ ! -s "$2" ]' _ "$rc" "$out"
+  printf 'not a directory\n' > "$runs"
+  ( cd "$repo" && . scripts/lib/common.sh && review_runs "$b" "$prs" ) > "$out" 2>&1; rc=$?
+  assert "rr1: … but an archive that is not a directory fails" sh -c '[ "$1" -ne 0 ] && grep -q "^failed:" "$2"' _ "$rc" "$out"
+}
+
+test_run_archive_retention() {
+  local repo="$WORK/rr2" stub="$WORK/rr2-stub" runs first rc
+  make_repo "$repo"; mkdir -p "$stub"
+  printf '{"findings":[]}' > "$stub/correctness.json"
+  ( cd "$repo" && printf 'change\n' >> src.txt && git add -A && git commit -qm change )
+  printf 'RUNS_KEEP=2\n' > "$repo/.review/config.sh"
+  runs="$(runs_dir "$repo")"
+  run_review "$repo" "$stub" --lenses correctness
+  first="$(ls "$runs")"
+  sleep 1; run_review "$repo" "$stub" --lenses correctness
+  sleep 1; run_review "$repo" "$stub" --lenses correctness
+  assert "rr2: the archive keeps the newest RUNS_KEEP runs" test "$(ls "$runs" | grep -c .)" -eq 2
+  assert "rr2: … pruning the oldest" sh -c '[ -n "$1" ] && [ ! -e "$2/$1" ]' _ "$first" "$runs"
+
+  rm -rf "$runs"; printf 'RUNS_KEEP=0\n' > "$repo/.review/config.sh"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "rr2: RUNS_KEEP=0 keeps none" test ! -e "$runs"
+  printf 'RUNS_KEEP=many\n' > "$repo/.review/config.sh"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "rr2: a RUNS_KEEP that is not a count warns and keeps the default" \
+    sh -c 'grep -qF "RUNS_KEEP=many is not a count up to 999999" "$1" && [ "$(ls "$2" | grep -c .)" -eq 1 ]' _ "$LOG" "$runs"
+
+  local keep n i
+  for keep in 08:8 010:10 0000003:3; do
+    rm -rf "$runs"; mkdir -p "$runs"
+    for i in 01 02 03 04 05 06 07 08 09 10 11; do mkdir "$runs/20200101T0000${i}Z-old-1"; done
+    printf 'RUNS_KEEP=%s\n' "${keep%:*}" > "$repo/.review/config.sh"
+    run_review "$repo" "$stub" --lenses correctness
+    n="$(ls "$runs" | grep -c .)"
+    assert "rr2: RUNS_KEEP=${keep%:*} keeps ${keep#*:} runs, read as decimal" \
+      sh -c '[ "$1" -eq "$2" ] && ! grep -q "value too great\|invalid" "$3" && [ -n "$(ls "$4" | grep -v -- -old-)" ]' _ "$n" "${keep#*:}" "$LOG" "$runs"
+  done
+  rm -rf "$runs"; mkdir -p "$runs"
+  for i in $(seq 10 64); do mkdir "$runs/20200101T0000${i}Z-old-1"; done
+  printf 'RUNS_KEEP=18446744073709551617\n' > "$repo/.review/config.sh"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "rr2: an oversized RUNS_KEEP warns and keeps the newest 50 runs" \
+    sh -c 'grep -qF "is not a count up to 999999" "$1" && [ "$(ls "$2" | grep -c .)" -eq 50 ] && [ -n "$(ls "$2" | grep -v -- -old-)" ]' _ "$LOG" "$runs"
+
+  rm -rf "$runs"; rm -f "$repo/.review/config.sh"
+  ( cd "$repo" && git checkout -q main && git checkout -qb empty )
+  run_review "$repo" "$stub" --lenses correctness
+  assert "rr2: a run that launched no lens is not archived" \
+    sh -c 'grep -qF "no changes to review" "$1" && [ ! -e "$2" ]' _ "$LOG" "$runs"
+
+  ( cd "$repo" && git checkout -q change )
+  mkdir -p "$(history_dir "$repo")"; printf 'not a directory\n' > "$runs"
+  run_review "$repo" "$stub" --lenses correctness; rc=$?
+  assert "rr2: an unwritable run archive warns" grep -qF 'run archive' "$LOG"
+  assert "rr2: … without changing the run's exit code" test "$rc" -eq 0
+  assert "rr2: … or its report" jq -e '.complete == true' "$repo/.review/findings.json"
+}
+
 # A worktree's final verdict is written after its last review run, so the run alone
 # would never archive it before the worktree is removed. The push does.
 test_prepush_archives_the_verdict() {
@@ -3652,6 +3775,14 @@ test_postmortem_docs_score_per_finding_and_cite_lens_evidence() {
   assert "pp2: without them the cause is unverified" grep -qF 'is `unverified`, and `cause_evidence` says which file' "$pm"
   assert "pp2: … counted apart from the four causes" grep -qF '/ structural d / unverified e)' "$pm"
   assert "pp2: replay mode names its lens evidence" grep -qF '`<record>/raw/log-<lens>.txt`' "$pm"
+  assert "pp2: … and lists no run archive" grep -qF 'do not list the run archive' "$pm"
+  assert "pp2: lens evidence comes from every archived run" grep -qF '`<git common dir>/review-history/runs/<dir>/`' "$pm"
+  assert "pp2: … same or ancestor, in branch mode, before CodeRabbit's first review" \
+    sh -c 'grep -qF "relation \`same\` or \`ancestor\`, mode" "$1" && grep -qF "time before CodeRabbit'"'"'s first review" "$1"' _ "$pm"
+  assert "pp2: … whose diff covered the finding's file" grep -qF 'path before a rename, is in its `raw/changed-files.txt`' "$pm"
+  assert "pp2: … the full run and any scoped re-run alike" grep -qF 'the full run and any scoped re-run alike' "$pm"
+  assert "pp2: … or whose logs show a lens reading the file" grep -qF '`log-<lens>.txt` shows a lens reading that file' "$pm"
+  assert "pp2: … and only a run whose head already had the defect" grep -qF "with the run's head in place of the verdict's" "$pm"
 }
 
 # Claude writes the verdict header, so the marker lives in the procedure it follows (#53).
@@ -5272,6 +5403,8 @@ run_tests \
   test_verdict_archive_is_shared_across_worktrees \
   test_verdict_archive_failure_warns_without_failing \
   test_verdict_archive_keys_an_uncommitted_verdict \
+  test_review_keeps_each_runs_raw_output \
+  test_run_archive_retention \
   test_prepush_archives_the_verdict \
   test_review_tune_docs_name_legacy_archive \
   test_postmortem_finds_the_verdict_for_the_reviewed_commit \

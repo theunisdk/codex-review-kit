@@ -38,6 +38,7 @@ MAX_PARALLEL="6"
 LENS_TIMEOUT="900"       # seconds per lens
 FAIL_ON="none"           # none | critical | high | medium | low
 RUN_ANALYZERS="1"
+RUNS_KEEP="50"           # runs archived under <git common dir>/review-history/runs; 0 = none
 BASE=""
 MODE="branch"            # branch | uncommitted | spec
 SPEC_PATHS=""
@@ -63,6 +64,16 @@ finish_report() {
       >> .review/findings.md
   fi
   [ -z "$HOOK_WARNING" ] || printf '\n> %s\n' "$HOOK_WARNING" >> .review/findings.md
+  # a run that launched no lens holds no lens evidence to keep
+  ls "$OUT"/log-*.txt > /dev/null 2>&1 || return
+  local meta
+  meta="$(jq -cn --arg head "$HEAD_FULL" --arg mode "$MODE" --arg base "$BASE" --arg mb "${MERGE_BASE:-}" \
+    --arg lenses "${launched# }" --arg started "$RUN_STARTED" --arg finished "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson rc "$rc" '{head: (if $head == "" then null else $head end), mode: $mode,
+      base: (if $base == "" then null else $base end), merge_base: (if $mb == "" then null else $mb end),
+      lenses: ($lenses | split(" ")), started: $started, finished: $finished, rc: $rc}')" \
+    || { warn "could not describe this run — its lens output is kept only in $OUT/"; return; }
+  archive_review_run "$RUNS_KEEP" "$HEAD_SHORT" "$meta"
 }
 trap finish_report EXIT
 trap 'exit 130' INT
@@ -111,6 +122,8 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 rm -f .review/findings.json .review/findings.md
 HEAD_SHORT="$(git rev-parse --short -q --verify HEAD)" || HEAD_SHORT=""   # empty only on an unborn branch
 HEAD_JSON=null; [ -z "$HEAD_SHORT" ] || HEAD_JSON="\"$HEAD_SHORT\""
+HEAD_FULL="$(git rev-parse -q --verify HEAD)" || HEAD_FULL=""
+RUN_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; launched=""
 STARTED=1
 
 # --- preflight -------------------------------------------------------------
@@ -432,7 +445,7 @@ collect_path_rules "$OUT/changed-files.txt" "$OUT/path-rules.md"
 if [ -n "$PATH_RULES_WARNING" ]; then warn "path rules: $PATH_RULES_WARNING"; else info "$(path_rules_note)"; fi
 
 # --- launch lenses ---------------------------------------------------------
-pids=""; running=0; launched=""
+pids=""; running=0
 OLD_IFS="$IFS"; IFS=','
 for lens in $LENSES; do
   IFS="$OLD_IFS"
