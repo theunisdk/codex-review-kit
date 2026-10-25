@@ -3510,10 +3510,12 @@ test_run_archive_retention() {
     assert "rr2: RUNS_KEEP=${keep%:*} keeps ${keep#*:} runs, read as decimal" \
       sh -c '[ "$1" -eq "$2" ] && ! grep -q "value too great\|invalid" "$3" && [ -n "$(ls "$4" | grep -v -- -old-)" ]' _ "$n" "${keep#*:}" "$LOG" "$runs"
   done
-  rm -rf "$runs"; printf 'RUNS_KEEP=18446744073709551617\n' > "$repo/.review/config.sh"
+  rm -rf "$runs"; mkdir -p "$runs"
+  for i in $(seq 10 64); do mkdir "$runs/20200101T0000${i}Z-old-1"; done
+  printf 'RUNS_KEEP=18446744073709551617\n' > "$repo/.review/config.sh"
   run_review "$repo" "$stub" --lenses correctness
-  assert "rr2: an oversized RUNS_KEEP warns and still archives" \
-    sh -c 'grep -qF "is not a count up to 999999" "$1" && [ "$(ls "$2" | grep -c .)" -eq 1 ]' _ "$LOG" "$runs"
+  assert "rr2: an oversized RUNS_KEEP warns and keeps the newest 50 runs" \
+    sh -c 'grep -qF "is not a count up to 999999" "$1" && [ "$(ls "$2" | grep -c .)" -eq 50 ] && [ -n "$(ls "$2" | grep -v -- -old-)" ]' _ "$LOG" "$runs"
 
   rm -rf "$runs"; rm -f "$repo/.review/config.sh"
   ( cd "$repo" && git checkout -q main && git checkout -qb empty )
