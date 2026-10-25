@@ -229,11 +229,40 @@ reports its own update of the record on a third line,
 
 4. **Diagnose why each Missed finding was missed**, from what the lenses did,
    not from the verdict alone. A lens that never surfaced a defect can still
-   have read that code and reasoned about it. The evidence is in `.review/raw/`:
-   `out-<lens>.json` holds what each lens returned, before the merge filter,
-   and `log-<lens>.txt` holds what it ran and read. Each run of `review.sh`
-   replaces them and `findings.json`, so they are evidence only for the
-   verdict adjudicated from that run. Two checks must pass:
+   have read that code and reasoned about it. The evidence is a run's raw
+   output: `out-<lens>.json` holds what each lens returned, before the merge
+   filter, `log-<lens>.txt` holds what it ran and read, and
+   `changed-files.txt` the files its diff covered.
+
+   `.review/raw/` holds only the last run in this worktree: each run of
+   `review.sh` replaces it. A scoped re-review over a fix commit therefore
+   replaces the full run's output. So every run that launched a lens also
+   keeps a copy in the review history, at
+   `<git common dir>/review-history/runs/<dir>/`: its `raw/`, its
+   `findings.json` and `findings.md`, and a `run.json` naming its `head`
+   (full SHA), `mode`, `base`, `merge_base`, `lenses` and `finished` time
+   (UTC). List them, from the repo root, with the comparison commit and the
+   PR commit file from step 2:
+
+   ```bash
+   . scripts/lib/common.sh && review_runs <first> <pr-commit-file>
+   ```
+
+   Each line is `<relation> <head> <mode> <finished> <dir>`, with the
+   relation as in step 2. A line starting `failed:`, or a non-zero exit,
+   means the archive could not be read: report `failed`. A line starting
+   `unread` names a run that could not be checked: name it in `reason`. The
+   **evidence runs** are the lines with relation `same` or `ancestor`, mode
+   `branch`, and a `finished` time before CodeRabbit's first review from
+   step 2. A later run is not the local pass CodeRabbit is compared with.
+   One run is evidence for a miss only if the finding's file, or its old
+   path before a rename, is in its `raw/changed-files.txt`. A run whose diff
+   did not cover the file says nothing about it. Use every evidence run that
+   covered it, the full run and any scoped re-run alike.
+
+   A kit before the archive kept no copy. Then this worktree's live
+   `.review/raw/` is evidence only for the verdict adjudicated from that run,
+   and two checks must pass:
    - `jq -r '.head, .mode' .review/findings.json` prints a prefix of the
      verdict's SHA, then `branch`.
    - The verdict is this worktree's live `.review/verdict.md`, written after
@@ -242,16 +271,18 @@ reports its own update of the record on a third line,
      the earlier verdict, and an archived verdict is a copy made before the
      next run. Either way, the logs belong to another run.
 
-   For each miss, search every lens's output and log for the finding's file
-   with the Grep tool, not a shell command, then read the matching parts of
-   the log.
+   For each miss, search every evidence run's lens outputs and logs for the
+   finding's file with the Grep tool, not a shell command, then read the
+   matching parts of the log.
 
-   Set `cause_evidence` to one line naming the file and what it shows, such as
-   ``log-correctness.txt: read src/a.ts:40-90 and checked the retry order; out-correctness.json: nothing on it``.
-   If the files are missing, or `findings.json` is not the verdict's run (an
-   older kit leaves `head` out), the cause
-   is `unverified`, and `cause_evidence` says which file was missing or
-   stale. Never pick a cause without the evidence. Give each miss one cause:
+   Set `cause_evidence` to one line naming each run's directory and file and
+   what it shows, such as
+   ``runs/20261020T101500Z-1a2b3c4-4242/raw/log-correctness.txt: read src/a.ts:40-90 and checked the retry order; out-correctness.json: nothing on it``.
+   If no evidence run covered the file, and the live files are missing or
+   `findings.json` is not the verdict's run (an older kit leaves `head` out),
+   the cause is `unverified`, and `cause_evidence` says which file was
+   missing or stale. Never pick a cause without the evidence. Give each miss
+   one cause, judged across every evidence run:
    - **Wrong lens** (`wrong_lens`): no lens whose scope covers this defect
      class read the code. The lenses that did read it were hunting other
      classes. → Propose a specific "hunt specifically
@@ -267,15 +298,15 @@ reports its own update of the record on a third line,
      `.review/learnings.md` if repo-specific, or is a hub lesson for
      `learnings-shared.md` if it generalises.
    - **Threshold** (`threshold`): a lens returned it in `out-<lens>.json`
-     with a confidence below the run's minimum (`min confidence` in
-     `.review/findings.md`), so the merge dropped it. → Tell me the
+     with a confidence below the run's minimum (`min confidence` in that
+     run's `findings.md`), so the merge dropped it. → Tell me the
      threshold is too aggressive.
    - **Structural limit** (`structural`: needs a repo-wide index, cross-PR
      history, or a tool we do not run) → say so plainly. That is CodeRabbit
      earning its cost, and the right answer is to keep paying for it, not to
      bolt on more prompt.
-   - **Unverified** (`unverified`): there is no lens evidence for this
-     verdict. Propose nothing for it. `missed_by_cause` counts only the four
+   - **Unverified** (`unverified`): no run's lens evidence covers this
+     finding. Propose nothing for it. `missed_by_cause` counts only the four
      causes above, so its total falls short of `missed` by the unverified
      misses.
 
@@ -411,7 +442,7 @@ notifies everyone on it. The steps above apply, with these changes:
 - **The lens evidence for step 4 is this clone's `.review/raw/`**, from
   the run that the verdict adjudicated. The clone held only that run, so
   the `head` and `mode` check alone ties them; skip the `find`, which the
-  replay does not allow. A replay that keeps them copies them
+  replay does not allow, and do not list the run archive. A replay that keeps them copies them
   into the record, at `<record>/raw/log-<lens>.txt` and
   `<record>/raw/out-<lens>.json`; re-scoring a record later reads them there.
 - **Save nothing.** In step 5, print the record instead: the status line,

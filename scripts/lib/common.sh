@@ -191,6 +191,66 @@ archive_verdicts() {
   return 0
 }
 
+# Copy this run's .review/raw/, findings.json and findings.md into the review
+# history, as runs/<UTC stamp>-<head>-<pid>/ with run.json beside them, so the next
+# run's wipe of .review/raw/ never erases the evidence of this one. Keeps the
+# newest <keep> runs; 0 keeps none. Run from the repo root. Warns on failure;
+# never fails the caller.
+archive_review_run() { # archive_review_run <keep> <head-short> <run.json>
+  local keep="$1" head="${2:-unborn}" meta="$3" dir runs key tmp old
+  case "$keep" in ''|*[!0-9]*) warn "RUNS_KEEP=$keep is not a count — keeping 50 runs"; keep=50 ;; esac
+  [ "$keep" -gt 0 ] || return 0
+  dir="$(git rev-parse --git-common-dir 2>/dev/null)" && dir="$(cd "$dir" 2>/dev/null && pwd -P)" \
+    && runs="$dir/review-history/runs" && mkdir -p "$runs" 2>/dev/null && [ -d "$runs" ] && [ -w "$runs" ] \
+    || { warn "run archive ${runs:-<git common dir>/review-history/runs} is not writable — this run's lens output is kept only in .review/raw/"; return 0; }
+  key="$(date -u +%Y%m%dT%H%M%SZ)-$head-$$"
+  tmp="$runs/.tmp.$key"
+  if ! { mkdir "$tmp" && cp -R .review/raw "$tmp/raw" \
+         && { [ ! -f .review/findings.json ] || cp .review/findings.json "$tmp/"; } \
+         && { [ ! -f .review/findings.md ] || cp .review/findings.md "$tmp/"; } \
+         && printf '%s\n' "$meta" > "$tmp/run.json" && mv "$tmp" "$runs/$key"; } 2>/dev/null; then
+    rm -rf "$tmp" 2>/dev/null; warn "could not archive .review/raw/ to $runs/$key"; return 0
+  fi
+  # a run killed mid-copy leaves its .tmp. directory behind
+  find "$runs" -mindepth 1 -maxdepth 1 -name '.tmp.*' -mmin +60 -exec rm -rf {} + 2>/dev/null
+  ls -1 "$runs" 2>/dev/null | grep -E '^[0-9]{8}T[0-9]{6}Z-' | sort -r | tail -n +"$((keep + 1))" \
+    | while IFS= read -r old; do rm -rf "${runs:?}/$old" || warn "could not prune the archived run $runs/$old"; done
+  return 0
+}
+
+# List the runs archive_review_run kept, oldest first, one line each:
+# <relation> <head> <mode> <finished> <dir>. The relation to commit <first> is the
+# postmortem's: same, ancestor (one of the PR commits in <pr-commit-file> that is
+# an ancestor of <first>) or other. A line starting unread names a run whose
+# run.json could not be read; one starting failed: means the archive could not
+# be, and the exit is non-zero. No archive is no runs, not a failure.
+review_runs() { # review_runs <first> <pr-commit-file>
+  local first prs="$2" common runs d fields head mode fin rel rc
+  command -v jq > /dev/null 2>&1 || { echo "failed: jq is not on PATH"; return 1; }
+  first="$(git rev-parse --verify -q "$1^{commit}")" || { echo "failed: $1 is not a commit in this clone"; return 1; }
+  [ -r "$prs" ] && [ -s "$prs" ] || { echo "failed: no PR commit list at $prs"; return 1; }
+  common="$(git rev-parse --git-common-dir 2>/dev/null)" && common="$(cd "$common" 2>/dev/null && pwd -P)" \
+    || { echo "failed: git common dir"; return 1; }
+  runs="$common/review-history/runs"
+  [ -e "$runs" ] || return 0
+  [ -d "$runs" ] && [ -r "$runs" ] && [ -x "$runs" ] || { echo "failed: $runs is not readable"; return 1; }
+  for d in "$runs"/[0-9]*; do
+    [ -d "$d" ] || continue
+    fields="$(jq -r '[.head, .mode, .finished] | map(strings | select(test("^[^[:space:]]+$"))) | select(length == 3) | join(" ")' \
+      "$d/run.json" 2>/dev/null)"
+    [ -n "$fields" ] || { echo "unread $d: no readable run.json"; continue; }
+    read -r head mode fin <<< "$fields"
+    if [ "$head" = "$first" ]; then rel=same
+    elif ! grep -qFx "$head" "$prs"; then rel=other
+    else
+      git merge-base --is-ancestor "$head" "$first"; rc=$?
+      case "$rc" in 0) rel=ancestor ;; 1) rel=other ;; *) echo "failed: git merge-base --is-ancestor $head $first"; return 1 ;; esac
+    fi
+    printf '%s %s %s %s %s\n' "$rel" "$head" "$mode" "$fin" "$d"
+  done
+  return 0
+}
+
 # Is release tag $1 older than $2? Both vN.N.N.
 release_older() {
   [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "${1#v}" "${2#v}" \

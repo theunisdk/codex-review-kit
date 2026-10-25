@@ -166,6 +166,7 @@ model change.
 For the first few runs, look under the hood:
 
 - `.review/raw/log-<lens>.txt` — did all lenses actually produce output?
+  Earlier runs' copies are under `$(git rev-parse --git-common-dir)/review-history/runs/`.
 - `.review/raw/analyzers.txt` — does it contain real sections for your stack,
   each ending `analyzer status: ran — …`? `findings.json` `analyzers` lists
   the ones that did not.

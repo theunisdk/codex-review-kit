@@ -373,8 +373,14 @@ whatever code was already there at the reviewed commit. With no
 verdict for that commit or such an ancestor, the PR is recorded as `no-local-verdict` and not scored, which is
 not the same as `missed 0`. Every missed finding is diagnosed by cause —
 wrong lens, insufficient tracing, filtered by threshold, or structurally out of
-reach — from the lens logs in `.review/raw/`, and turned into a prompt edit
-or a WATCH entry. Without those logs the cause is `unverified`.
+reach — from the lens logs of every run that covered the PR's commits, and
+turned into a prompt edit or a WATCH entry. `.review/raw/` holds only the last
+run, so each run that launched a lens also copies it, with `findings.json` and
+a `run.json` naming its head, mode and base, to
+`review-history/runs/<UTC stamp>-<head>-<pid>/`. A scoped re-review over a fix
+then leaves the full run's logs findable. The newest `RUNS_KEEP` runs are kept
+(50 by default, `0` keeps none), shared by every worktree like the verdicts.
+Without any run's logs for the code a finding cites, the cause is `unverified`.
 
 The scorecard is kept twice. It is a PR comment marked
 `<!-- review-postmortem:v1 -->` with a JSON record, which a re-run updates

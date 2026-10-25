@@ -18,7 +18,8 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
      `<mode>-unparsed-<cksum>.md`. The name's mode comes from the header, so
      it can be wrong for an old spec verdict (see below). The same directory
      holds `/review-postmortem` records, `postmortem-pr<n>.md`. They are not
-     verdicts: read them in the next store.
+     verdicts: read them in the next store. Its `runs/` directory holds each
+     run's raw lens output for `/review-postmortem`, not verdicts: skip it.
    - The postmortem records. Each `postmortem-pr<n>.md` ends in a JSON block
      (`"schema": "review-postmortem/v1"`) listing every CodeRabbit finding on
      that PR, how it compared with the local verdict, and the author's
