@@ -198,7 +198,11 @@ archive_verdicts() {
 # never fails the caller.
 archive_review_run() { # archive_review_run <keep> <head-short> <run.json>
   local keep="$1" head="${2:-unborn}" meta="$3" dir runs key tmp old
-  case "$keep" in ''|*[!0-9]*) warn "RUNS_KEEP=$keep is not a count — keeping 50 runs"; keep=50 ;; esac
+  # shell arithmetic reads a leading 0 as octal
+  case "$keep" in *[!0-9]*|'') ;; *) keep="${keep#"${keep%%[!0]*}"}"; keep="${keep:-0}" ;; esac
+  case "$keep" in
+    *[!0-9]*|''|???????*) warn "RUNS_KEEP=$1 is not a count up to 999999 — keeping 50 runs"; keep=50 ;;
+  esac
   [ "$keep" -gt 0 ] || return 0
   dir="$(git rev-parse --git-common-dir 2>/dev/null)" && dir="$(cd "$dir" 2>/dev/null && pwd -P)" \
     && runs="$dir/review-history/runs" && mkdir -p "$runs" 2>/dev/null && [ -d "$runs" ] && [ -w "$runs" ] \

@@ -256,9 +256,12 @@ reports its own update of the record on a third line,
    `branch`, and a `finished` time before CodeRabbit's first review from
    step 2. A later run is not the local pass CodeRabbit is compared with.
    One run is evidence for a miss only if the finding's file, or its old
-   path before a rename, is in its `raw/changed-files.txt`. A run whose diff
-   did not cover the file says nothing about it. Use every evidence run that
-   covered it, the full run and any scoped re-run alike.
+   path before a rename, is in its `raw/changed-files.txt`, or its
+   `log-<lens>.txt` shows a lens reading that file. A run that did neither
+   says nothing about it. It must also have seen the defect: decide that as
+   step 2 decides presence, with the run's head in place of the verdict's
+   commit. A run whose head predates the defect read code without it. Use
+   every evidence run left, the full run and any scoped re-run alike.
 
    A kit before the archive kept no copy. Then this worktree's live
    `.review/raw/` is evidence only for the verdict adjudicated from that run,

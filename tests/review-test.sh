@@ -3422,6 +3422,7 @@ test_review_keeps_each_runs_raw_output() {
   local runs a b full scoped rc
   make_repo "$repo"; mkdir -p "$stub"
   finding "full-run finding" > "$stub/security.json"
+  printf 'SECURITY-TRANSCRIPT-5e1d' > "$stub/security.tokens"
   printf '{"findings":[]}' > "$stub/correctness.json"
   git -C "$repo" worktree add -q -b feat "$wt" main
   ( cd "$wt" && printf 'full\n' >> src.txt && git commit -qam full )
@@ -3440,7 +3441,7 @@ test_review_keeps_each_runs_raw_output() {
   assert "rr1: the live .review/raw/ is the scoped run's" \
     sh -c '[ -f "$1/log-correctness.txt" ] && [ ! -e "$1/log-security.txt" ]' _ "$wt/.review/raw"
   assert "rr1: the full run's lens output survives the scoped run" \
-    sh -c 'grep -qF "full-run finding" "$1/raw/out-security.json" && [ -f "$1/raw/log-security.txt" ]' _ "$full"
+    sh -c 'grep -qF "full-run finding" "$1/raw/out-security.json" && grep -qF SECURITY-TRANSCRIPT-5e1d "$1/raw/log-security.txt"' _ "$full"
   assert "rr1: … with its report and the files its diff covered" \
     sh -c 'jq -e ".mode == \"branch\"" "$1/findings.json" && grep -qxF src.txt "$1/raw/changed-files.txt"' _ "$full"
   assert "rr1: run.json names the full run's head, mode, base and lenses" \
@@ -3497,7 +3498,22 @@ test_run_archive_retention() {
   printf 'RUNS_KEEP=many\n' > "$repo/.review/config.sh"
   run_review "$repo" "$stub" --lenses correctness
   assert "rr2: a RUNS_KEEP that is not a count warns and keeps the default" \
-    sh -c 'grep -qF "RUNS_KEEP=many is not a count" "$1" && [ "$(ls "$2" | grep -c .)" -eq 1 ]' _ "$LOG" "$runs"
+    sh -c 'grep -qF "RUNS_KEEP=many is not a count up to 999999" "$1" && [ "$(ls "$2" | grep -c .)" -eq 1 ]' _ "$LOG" "$runs"
+
+  local keep n i
+  for keep in 08:8 010:10 0000003:3; do
+    rm -rf "$runs"; mkdir -p "$runs"
+    for i in 01 02 03 04 05 06 07 08 09 10 11; do mkdir "$runs/20200101T0000${i}Z-old-1"; done
+    printf 'RUNS_KEEP=%s\n' "${keep%:*}" > "$repo/.review/config.sh"
+    run_review "$repo" "$stub" --lenses correctness
+    n="$(ls "$runs" | grep -c .)"
+    assert "rr2: RUNS_KEEP=${keep%:*} keeps ${keep#*:} runs, read as decimal" \
+      sh -c '[ "$1" -eq "$2" ] && ! grep -q "value too great\|invalid" "$3" && [ -n "$(ls "$4" | grep -v -- -old-)" ]' _ "$n" "${keep#*:}" "$LOG" "$runs"
+  done
+  rm -rf "$runs"; printf 'RUNS_KEEP=18446744073709551617\n' > "$repo/.review/config.sh"
+  run_review "$repo" "$stub" --lenses correctness
+  assert "rr2: an oversized RUNS_KEEP warns and still archives" \
+    sh -c 'grep -qF "is not a count up to 999999" "$1" && [ "$(ls "$2" | grep -c .)" -eq 1 ]' _ "$LOG" "$runs"
 
   rm -rf "$runs"; rm -f "$repo/.review/config.sh"
   ( cd "$repo" && git checkout -q main && git checkout -qb empty )
@@ -3763,6 +3779,8 @@ test_postmortem_docs_score_per_finding_and_cite_lens_evidence() {
     sh -c 'grep -qF "relation \`same\` or \`ancestor\`, mode" "$1" && grep -qF "time before CodeRabbit'"'"'s first review" "$1"' _ "$pm"
   assert "pp2: … whose diff covered the finding's file" grep -qF 'path before a rename, is in its `raw/changed-files.txt`' "$pm"
   assert "pp2: … the full run and any scoped re-run alike" grep -qF 'the full run and any scoped re-run alike' "$pm"
+  assert "pp2: … or whose logs show a lens reading the file" grep -qF '`log-<lens>.txt` shows a lens reading that file' "$pm"
+  assert "pp2: … and only a run whose head already had the defect" grep -qF "with the run's head in place of the verdict's" "$pm"
 }
 
 # Claude writes the verdict header, so the marker lives in the procedure it follows (#53).
