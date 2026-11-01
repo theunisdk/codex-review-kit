@@ -3565,7 +3565,8 @@ test_review_tune_docs_name_legacy_archive() {
 # whose header names the first commit CodeRabbit reviewed, or an ancestor of it,
 # in the live files and the review history, and tell a failed read from none.
 postmortem_snippet() { # postmortem_snippet <first> <pr-commit-file> — the doc's verdict-locating block, filled in
-  awk '/^   ```bash$/ { f = 1; next } f && /^   ```$/ { exit } f { sub(/^   /, ""); print }' \
+  awk '/^   ```bash$/ { f = 1; b = ""; next } f && /^   ```$/ { if (b ~ /^first=/) { printf "%s", b; exit } f = 0; next }
+       f { sub(/^   /, ""); b = b $0 "\n" }' \
     "$KIT/.claude/commands/review-postmortem.md" | sed "1s|^first=.*|first=$1|; 2s|^pr_commits=.*|pr_commits=$2|"
 }
 
@@ -3890,6 +3891,7 @@ case "$1 ${2:-}" in
   "pr view")        key="pr-view-$3" ;;
   "pr list")        key="pr-list" ;;
   "api --paginate") key="api-$(printf '%s' "$3" | tr '/' '_')" ;;
+  "api graphql")    key="api-graphql-$(printf '%s\n' "$@" | sed -n 's/^n=//p')" ;;
   "api "*)          key="api-$(printf '%s' "$2" | tr '/' '_')" ;;
 esac
 [ -n "$key" ] && [ -f "$GH_STUB_DIR/$key.json" ] || { echo "HTTP 404: Not Found ($*)" >&2; exit 1; }
@@ -3945,6 +3947,25 @@ gh_pr_fixture() { # gh_pr_fixture <stubdir> <n> <first-reviewed sha> <head sha> 
   gh_json "$d" "api-repos_o_r_issues_${n}_comments" "[]"
   gh_json "$d" "api-repos_o_r_commits_${a}_statuses" "[]"
   gh_json "$d" "api-repos_o_r_commits_${b}_statuses" "[{\"creator\":$cr,\"context\":\"CodeRabbit\",\"state\":\"success\",\"description\":\"Review rate limited\",\"created_at\":\"2026-01-01T08:00:00Z\"}]"
+  gh_json "$d" "api-repos_o_r_commits_${a}_check-runs?filter=all" '{"total_count":0,"check_runs":[]}'
+  force_pushes "$d" "$n"
+  gh_json "$d" "api-repos_o_r_commits_${b}_check-runs?filter=all" "$(check_run neutral 'Result: Rate limited - Review rate limited' 2026-01-01T07:00:00Z)"
+}
+
+force_pushes() { # force_pushes <stubdir> <n> [<before> <after>]... — the PR's force-push events, null for "null"
+  local d="$1" n="$2" nodes="[]"; shift 2
+  while [ $# -ge 2 ]; do
+    nodes="$(jq -c --arg b "$1" --arg a "$2" '. + [{beforeCommit: (if $b == "null" then null else {oid: $b} end),
+      afterCommit: (if $a == "null" then null else {oid: $a} end)}]' <<< "$nodes")"; shift 2
+  done
+  gh_json "$d" "api-graphql-$n" "$(jq -cn --argjson x "$nodes" '{data: {repository: {pullRequest: {timelineItems:
+    {pageInfo: {hasNextPage: false, endCursor: null}, nodes: $x}}}}}')"
+}
+
+check_run() { # check_run <conclusion> <summary> <completed_at> [app slug] [status] [started_at] — one CodeRabbit check run, as a page
+  jq -cn --arg c "$1" --arg s "$2" --arg t "$3" --arg app "${4:-coderabbitai}" --arg st "${5:-completed}" --arg st0 "${6:-$3}" \
+    '{total_count: 1, check_runs: [{name: "CodeRabbit", app: {slug: $app}, status: $st, conclusion: (if $st == "completed" then $c else null end),
+       started_at: $st0, completed_at: (if $st == "completed" then $t else null end), output: {title: "Finished", summary: "\($s)\nRun ID: `x`"}}]}'
 }
 
 # $RS: spoke · $RREMOTE: its origin · $RHUB: the hub · $RGH / $RCL / $RCX: gh, claude, codex stub dirs
@@ -4135,7 +4156,8 @@ test_replay_scores_reports_and_writes_nothing_else() {
   assert "r1: no replay worktree is left behind" no_replay_worktrees "$RS"
   assert "r1: … nor the .claude/ directory a worktree used to need" test ! -e "$RS/.claude"
   assert_not "r1: nothing is commented, filed or written on GitHub" \
-    grep -qE '^(pr comment|pr review|issue create|issue comment|label create)|(^| )(-X|--method|-f|-F|--field|--raw-field|--input)( |$)' "$RGH/calls.log"
+    sh -c 'grep -vE "^api graphql --paginate -f owner=o -f repo=r -F n=[0-9]+ -f query=query\(" "$1" \
+      | grep -qE "^(pr comment|pr review|issue create|issue comment|label create)|(^| )(-X|--method|-f|-F|--field|--raw-field|--input)( |$)|mutation"' _ "$RGH/calls.log"
   assert "r1: claude never gets gh, Edit or Write" \
     sh -c '[ "$(grep -c . "$1")" -eq 4 ] && ! grep -vF -- "--disallowedTools Bash(gh:*)" "$1" | grep -q . && ! grep -vF -- "--tools Read,Grep,Glob,Bash" "$1" | grep -q .' _ "$RCL/calls.log"
   assert "r1: … nor any settings file, whose allow rules would apply" \
@@ -4153,6 +4175,75 @@ test_replay_scores_reports_and_writes_nothing_else() {
   assert "r1: … and keeps its own logs beside it" \
     sh -c 'test -s "$1.last-unscored/review.log" && grep -qF "(logs: $1.last-unscored)" "$2"' _ "$rec" "$LOG"
   assert "r1: a second run keeps a record of its own" test "$(ls "$runs" | wc -l)" -eq 2
+}
+
+# pepper3 #175: CodeRabbit's only trace on the head was a check run, so the
+# postmortem read a clean review as no review.
+test_replay_reads_check_runs() {
+  local short kit common
+  replay_fixture r16
+  local a="$RA" b c6 l8
+  b="$(jq -r '.commits[1].oid' "$RGH/pr-view-1.json")"
+  c6="$(jq -r '.commits[0].oid' "$RGH/pr-view-6.json")"
+  l8="$(jq -r '.commits[0].oid' "$RGH/pr-view-8.json")"
+  # PR 1: no review body and no status — only a completed check run on its first commit, on a
+  # second page, and one on its head that started earlier but completed later
+  gh_json "$RGH" api-repos_o_r_pulls_1_reviews '[]'
+  gh_json "$RGH" "api-repos_o_r_commits_${b}_statuses" '[]'
+  gh_json "$RGH" "api-repos_o_r_commits_${a}_check-runs?filter=all" "$(check_run success 'Result: Success - Review completed' 2026-01-01T09:00:00Z other-app)
+$(check_run success 'Result: Success - Review completed' 2026-01-01T10:00:00Z)"
+  gh_json "$RGH" "api-repos_o_r_commits_${b}_check-runs?filter=all" \
+    "$(check_run success 'Result: Success - Review completed' 2026-01-01T11:00:00Z coderabbitai completed 2026-01-01T08:00:00Z)"
+  # PR 6: its check-runs read fails
+  gh_json "$RGH" api-repos_o_r_pulls_6_reviews '[]'
+  rm "$RGH/api-repos_o_r_commits_${c6}_check-runs?filter=all.json"
+  # PR 8: only check runs that are not CodeRabbit reviews
+  gh_json "$RGH" api-repos_o_r_pulls_8_reviews '[]'
+  gh_json "$RGH" "api-repos_o_r_commits_${l8}_check-runs?filter=all" "$(jq -cs '{total_count: 3, check_runs: map(.check_runs[])}' \
+    <(check_run success 'Result: Success - Review completed' 2026-01-01T10:00:00Z other-app) \
+    <(check_run x 'Result: Success - Review completed' 2026-01-01T10:00:00Z coderabbitai in_progress) \
+    <(check_run neutral 'Result: Rate limited - Review rate limited' 2026-01-01T11:00:00Z))"
+  run_replay 1 6 8
+  common="$(cd "$RS" && cd "$(git rev-parse --git-common-dir)" && pwd -P)"
+  short="$(git -C "$RS" rev-parse --short "$a")"; kit="$(git -C "$RHUB" rev-parse --short main)"
+  assert "r16: a PR reviewed only by a check run is replayed against that commit" \
+    grep -qE "^review-replay: replayed — PR #1 \($short, kit $kit\)" "$LOG"
+  assert "r16: … and the postmortem gets the check runs of every page" \
+    jq -e --arg a "$a" 'map(select(.sha == $a) | .check_runs[].app.slug) == ["other-app", "coderabbitai"]' \
+    "$common/review-replay/pr1-$kit/github/check-runs.json"
+  assert "r16: a failed check-runs read is a failure, not \"no review\"" \
+    grep -qE "^review-replay: failed — PR #6: github: gh api --paginate repos/o/r/commits/$c6/check-runs[?]filter=all exited 1: HTTP 404" "$LOG"
+  assert "r16: another app's, a pending and a rate-limited check run are not reviews" \
+    grep -qxF 'review-replay: skipped — PR #8: CodeRabbit has not reviewed PR #8' "$LOG"
+  assert "r16: the postmortem reads a CodeRabbit check run as its status, in replay mode too" \
+    sh -c 'grep -qF "\`Result: Success - Review completed\` is" "$1" && grep -qF "\`check-runs.json\`" "$1"' _ "$KIT/.claude/commands/review-postmortem.md"
+}
+
+# exchange #9: CodeRabbit passed 2dab84c clean, with a status alone, and a
+# force-push then took 2dab84c out of the PR's commit list.
+test_replay_reads_force_pushed_heads() {
+  local a b n short kit
+  replay_fixture r17
+  a="$RA"; b="$(jq -r '.commits[1].oid' "$RGH/pr-view-1.json")"
+  for n in 1 3 5; do
+    jq -c --arg b "$b" '.commits = [{oid: $b}]' "$RGH/pr-view-$n.json" > "$RGH/pr-view.tmp" && mv "$RGH/pr-view.tmp" "$RGH/pr-view-$n.json"
+    gh_json "$RGH" "api-repos_o_r_pulls_${n}_reviews" '[]'
+    gh_json "$RGH" "api-repos_o_r_pulls_${n}_comments" '[]'
+  done
+  gh_json "$RGH" "api-repos_o_r_commits_${a}_statuses" '[{"creator":{"login":"coderabbitai[bot]"},"context":"CodeRabbit","state":"success","description":"Review completed","created_at":"2026-01-01T10:00:00Z"}]'
+  force_pushes "$RGH" 1 "$a" "$b"
+  force_pushes "$RGH" 3 null "$b"
+  rm "$RGH/api-graphql-5.json"
+  run_replay 1 3 5
+  short="$(git -C "$RS" rev-parse --short "$a")"; kit="$(git -C "$RHUB" rev-parse --short main)"
+  assert "r17: a head force-pushed away after CodeRabbit reviewed it is still the comparison commit" \
+    grep -qE "^review-replay: replayed — PR #1 \($short, kit $kit\)" "$LOG"
+  assert "r17: a force-push that names no before commit fails the PR" \
+    grep -qF 'review-replay: failed — PR #3: github: a force-push on PR #3 names no before or after commit' "$LOG"
+  assert "r17: a failed force-push read is a failure, not \"no review\"" \
+    grep -qE '^review-replay: failed — PR #5: github: gh api graphql \(force-pushes of PR #5\) exited 1: HTTP 404' "$LOG"
+  assert "r17: the postmortem reads force-pushes in replay mode too" \
+    sh -c 'grep -qF "HeadRefForcePushedEvent" "$1" && grep -qF "\`force-pushes.json\`" "$1"' _ "$KIT/.claude/commands/review-postmortem.md"
 }
 
 test_replay_failure_is_reported_and_cleaned_up() {
@@ -4253,6 +4344,8 @@ test_replay_silent_failures_are_failures() {
   assert "r6: comments whose commits cannot be listed fail the PR" \
     sh -c '[ "$2" -eq 1 ] && grep -qE "^review-replay: failed — PR #1: github: cannot list the commits CodeRabbit commented on: .*jq" "$1"' _ "$LOG" "$rc"
   jq --arg d "$dead" '. + [.[0] + {id: 8, original_commit_id: $d}]' "$RGH/comments.good" > "$RGH/api-repos_o_r_pulls_1_comments.json"
+  gh_json "$RGH" "api-repos_o_r_commits_${dead}_statuses" '[]'
+  gh_json "$RGH" "api-repos_o_r_commits_${dead}_check-runs?filter=all" '{"total_count":0,"check_runs":[]}'
   run_replay 1; rc=$?
   assert "r6: a commented commit that cannot be fetched fails the PR, not leaves its findings unscored" \
     sh -c '[ "$2" -eq 1 ] && grep -qE "^review-replay: failed — PR #1: fetch: cannot fetch ddddddd, which CodeRabbit commented on" "$1"' _ "$LOG" "$rc"
@@ -5417,6 +5510,8 @@ run_tests \
   test_review_tune_docs_read_postmortem_records \
   test_postmortem_plateau_is_a_hypothesis \
   test_replay_scores_reports_and_writes_nothing_else \
+  test_replay_reads_check_runs \
+  test_replay_reads_force_pushed_heads \
   test_replay_failure_is_reported_and_cleaned_up \
   test_replay_interrupt_removes_the_worktree \
   test_replay_recent_and_limit \

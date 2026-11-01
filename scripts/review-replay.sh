@@ -281,6 +281,19 @@ gh_pages() { # gh_pages <file> <api path> — every page, as one array
     || { G_ERR="gh api $2: unparseable response: $(err_of "$1.err")"; return 1; }
 }
 
+FORCE_PUSH_QUERY='query($owner: String!, $repo: String!, $n: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $repo) { pullRequest(number: $n) {
+    timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], first: 100, after: $endCursor) {
+      pageInfo { hasNextPage endCursor }
+      nodes { ... on HeadRefForcePushedEvent { beforeCommit { oid } afterCommit { oid } } } } } } }'
+gh_check_runs() { # gh_check_runs <file> <api path> — every page's check runs, as one array
+  gh_to "$1.pages" api --paginate "$2" || return 1
+  jq -s 'if length == 0 then error("no reply") elif all(type == "object" and (.check_runs | type) == "array") then map(.check_runs) | add
+         else error("not a check-run list but \(map(type) | unique | join(", "))") end' \
+    "$1.pages" > "$1" 2> "$1.err" \
+    || { G_ERR="gh api $2: unparseable response: $(err_of "$1.err")"; return 1; }
+}
+
 # fetch the PR's GitHub data into $GH and find its first reviewed head (FIRST),
 # or set FIRST empty when CodeRabbit never reviewed it
 gather() {
@@ -295,22 +308,49 @@ gather() {
   jq -e 'type == "object"' "$GH/pull.json" > /dev/null 2>&1 || { fail_at github "unparseable reply from pulls/$n"; return; }
   jq -r '.commits[].oid' "$GH/pr.json" > "$GH/pr-commits.txt" && [ -s "$GH/pr-commits.txt" ] \
     || { fail_at github "gh pr view listed no commits for PR #$n"; return; }
-  : > "$GH/statuses.pages"
+  run_with_timeout "$NET_TIMEOUT" gh api graphql --paginate -f owner="${REPO%%/*}" -f repo="${REPO#*/}" -F n="$n" -f query="$FORCE_PUSH_QUERY" \
+    > "$GH/force-pushes.pages" 2> "$GH/force-pushes.err" \
+    || { fail_at github "gh api graphql (force-pushes of PR #$n) $(exit_why $? "$NET_TIMEOUT"): $(err_of "$GH/force-pushes.err")"; return; }
+  jq -s 'if length == 0 then error("no reply")
+         else map(.data.repository.pullRequest.timelineItems.nodes
+                  | if type == "array" then . else error("no timeline items") end)
+              | add | map({before: .beforeCommit.oid, after: .afterCommit.oid}) end' \
+    "$GH/force-pushes.pages" > "$GH/force-pushes.json" 2> "$GH/force-pushes.err" \
+    || { fail_at github "gh api graphql: unparseable force-push events: $(err_of "$GH/force-pushes.err")"; return; }
+  # a force-push takes the commits CodeRabbit reviewed out of the PR's commit list
+  jq -e 'all(.before != null and .after != null)' "$GH/force-pushes.json" > /dev/null \
+    || { fail_at github "a force-push on PR #$n names no before or after commit, so a commit CodeRabbit reviewed may be unreadable"; return; }
+  jq -rs --arg cr "$CR_LOGIN" '(.[0] | map(.before, .after)[]),
+      ((.[1], .[2]) | .[] | select(.user.login == $cr) | (.commit_id, .original_commit_id) // empty)' \
+    "$GH/force-pushes.json" "$GH/reviews.json" "$GH/comments.json" > "$GH/reviewed.all" 2> "$GH/reviewed.err" \
+    || { fail_at github "cannot list the commits CodeRabbit commented on: $(err_of "$GH/reviewed.err")"; return; }
+  { cat "$GH/pr-commits.txt"; sort -u "$GH/reviewed.all" | grep -vxF -f "$GH/pr-commits.txt"; } > "$GH/status-commits.txt"
+  [ $? -le 1 ] && ! grep -qvE '^[0-9a-f]{40}([0-9a-f]{24})?$' "$GH/status-commits.txt" \
+    || { fail_at github "cannot list the commits to read CodeRabbit's statuses of"; return; }
+  : > "$GH/statuses.pages"; : > "$GH/check-runs.pages"
   while read -r sha; do
     gh_pages "$GH/st-$sha.json" "repos/$REPO/commits/$sha/statuses" || { fail_at github "$G_ERR"; return; }
     jq --arg s "$sha" '{sha: $s, statuses: .}' "$GH/st-$sha.json" >> "$GH/statuses.pages" \
       || { fail_at github "cannot read the statuses of ${sha:0:7}"; return; }
-    rm -f "$GH/st-$sha".*
-  done < "$GH/pr-commits.txt"
+    gh_check_runs "$GH/cr-$sha.json" "repos/$REPO/commits/$sha/check-runs?filter=all" || { fail_at github "$G_ERR"; return; }
+    jq --arg s "$sha" '{sha: $s, check_runs: .}' "$GH/cr-$sha.json" >> "$GH/check-runs.pages" \
+      || { fail_at github "cannot read the check runs of ${sha:0:7}"; return; }
+    rm -f "$GH/st-$sha".* "$GH/cr-$sha".*
+  done < "$GH/status-commits.txt"
   jq -s . "$GH/statuses.pages" > "$GH/statuses.json" || { fail_at github "cannot assemble statuses"; return; }
-  rm -f "$GH"/*.pages "$GH"/*.err
-  # the rule of review-postmortem.md step 2: the earliest non-empty review or "Review completed" status
-  FIRST="$(jq -rn --arg cr "$CR_LOGIN" --slurpfile r "$GH/reviews.json" --slurpfile s "$GH/statuses.json" '
+  jq -s . "$GH/check-runs.pages" > "$GH/check-runs.json" || { fail_at github "cannot assemble check runs"; return; }
+  rm -f "$GH"/*.pages "$GH"/*.err "$GH/reviewed.all" "$GH/status-commits.txt"
+  # the rule of review-postmortem.md step 2: the earliest non-empty review, or "Review completed" status or check run
+  FIRST="$(jq -rn --arg cr "$CR_LOGIN" --slurpfile r "$GH/reviews.json" --slurpfile s "$GH/statuses.json" --slurpfile k "$GH/check-runs.json" '
     ([$r[0][] | select(.user.login == $cr and (.body // "") != "" and .commit_id != null)
        | {at: .submitted_at, sha: .commit_id}]
      + [$s[0][] | .sha as $c | .statuses[]
        | select(.creator.login == $cr and ((.description // "") | startswith("Review completed")))
-       | {at: .created_at, sha: $c}])
+       | {at: .created_at, sha: $c}]
+     + [$k[0][] | .sha as $c | .check_runs[]
+       | select(.app.slug == "coderabbitai" and .name == "CodeRabbit" and .status == "completed"
+                and ((.output.summary // "") | startswith("Result: Success - Review completed")))
+       | {at: (.completed_at // .started_at), sha: $c}])
     | sort_by(.at) | .[0].sha // ""')" || { fail_at github "cannot read CodeRabbit's reviews"; return; }
 }
 
