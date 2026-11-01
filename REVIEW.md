@@ -353,9 +353,15 @@ These are what make it improve rather than plateau:
 **Noise down** (`/review-tune`): recurring REJECT reasons become SUPPRESS entries
 in `learnings.md`, injected into every future prompt. Requires two occurrences —
 one rejection is a one-off.
-Verdicts are gitignored, so `review.sh` and the pre-push hook archive each one
-to `$(git rev-parse --git-common-dir)/review-history/`: shared by every
+Verdicts are gitignored, so each one is archived to
+`$(git rev-parse --git-common-dir)/review-history/`: shared by every
 worktree of the clone, kept after a worktree is removed, never committed.
+The adjudicator archives a verdict the moment it writes or rewrites one, with
+`./scripts/review.sh --archive-verdicts` (adjudication.md step 5), so no push
+or later run is needed. It reports `archived`, `already archived` or `failed`
+for each verdict file, and a failure goes into its report. `review.sh` at the
+start of a run and the pre-push hook archive again; a verdict already there
+is not copied twice.
 `/review-postmortem` reads it to find the verdict for the commit CodeRabbit
 reviewed, and writes its own records there. `/review-tune` reads the verdicts
 and those records.

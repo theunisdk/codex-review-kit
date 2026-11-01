@@ -3408,6 +3408,131 @@ test_verdict_archive_keys_an_uncommitted_verdict() {
     sh -c 'ls "$1"/spec-unparsed-*.md' _ "$hist"
 }
 
+# A worktree's final verdict reached the history only through a later run or a
+# push through the hook, so a clone without the hook lost it with the worktree.
+# The adjudicator archives each verdict as it writes it, and reads the outcome.
+archive_now() { # archive_now <dir> [args...] — the adjudicator's archive step; output in $LOG
+  local dir="$1"; shift
+  LOG="$dir.archive.log"
+  ( cd "$dir" && bash scripts/review.sh --archive-verdicts "$@" ) > "$LOG" 2>&1
+}
+
+test_verdict_archived_when_written_survives_worktree_removal() {
+  local repo="$WORK/aw1" wt="$WORK/aw1-wt" keep="$WORK/aw1-keep" hist rc
+  make_repo "$repo"; mkdir -p "$keep"
+  git -C "$repo" worktree add -q -b aw-branch "$wt" main
+  hist="$(history_dir "$repo")"
+  printf '# Review verdict — aw-branch — 5e1d0aa — 2026-01-06\n\n## Rejected\nF1 — noise\n' > "$wt/.review/verdict.md"
+  printf '# Spec verdict — aw-branch — 5e1d0aa — 2026-01-06\n\nclean\n' > "$wt/.review/spec-verdict.md"
+  cp "$wt/.review/verdict.md" "$keep/code.md"; cp "$wt/.review/spec-verdict.md" "$keep/spec.md"
+  archive_now "$wt"; rc=$?
+
+  assert "aw1: archiving a fresh verdict exits 0" test "$rc" -eq 0
+  assert "aw1: … and says each verdict file was archived, and where" \
+    sh -c 'grep -qx "review-archive: archived — .review/verdict.md as $2/code-2026-01-06-5e1d0aa-[0-9]*.md" "$1" \
+      && grep -qx "review-archive: archived — .review/spec-verdict.md as $2/spec-2026-01-06-5e1d0aa-[0-9]*.md" "$1"' _ "$LOG" "$hist"
+  assert "aw1: … without running a review" \
+    sh -c '[ -f "$1/.review/raw/seed.txt" ] && [ ! -e "$1/.review/findings.json" ]' _ "$wt"
+  assert_not "aw1: no hook is wired, so nothing but the archive step copied it" git -C "$repo" config core.hooksPath
+
+  archive_now "$wt"; rc=$?
+  assert "aw1: a second call exits 0 too" test "$rc" -eq 0
+  assert "aw1: … and reports both as already archived" \
+    test "$(grep -c '^review-archive: already archived — ' "$LOG")" -eq 2
+  assert "aw1: … adding nothing" test "$(ls "$hist" | grep -c .)" -eq 2
+
+  printf 're-adjudicated after the push\n' >> "$wt/.review/verdict.md"
+  cp "$wt/.review/verdict.md" "$keep/code2.md"
+  archive_now "$wt"
+  assert "aw1: a rewritten verdict is archived beside the first" \
+    sh -c 'grep -q "^review-archive: archived — .review/verdict.md as " "$1" \
+      && grep -q "^review-archive: already archived — .review/spec-verdict.md as " "$1"' _ "$LOG"
+
+  git -C "$repo" worktree remove --force "$wt"
+  assert "aw1: with no push and no later run, the verdicts outlive the worktree" \
+    sh -c 'cmp -s "$1/code.md" "$2"/code-2026-01-06-5e1d0aa-$(cksum < "$1/code.md" | cut -d" " -f1).md \
+      && cmp -s "$1/code2.md" "$2"/code-2026-01-06-5e1d0aa-$(cksum < "$1/code2.md" | cut -d" " -f1).md \
+      && cmp -s "$1/spec.md" "$2"/spec-2026-01-06-5e1d0aa-*.md' _ "$keep" "$hist"
+}
+
+test_verdict_archive_step_reports_failure_and_nothing() {
+  local repo="$WORK/aw2" hist rc
+  make_repo "$repo"
+  hist="$(history_dir "$repo")"
+
+  archive_now "$repo"; rc=$?
+  assert "aw2: with no verdict file the step exits 3" test "$rc" -eq 3
+  assert "aw2: … and says there was nothing to archive" grep -q '^review-archive: nothing — ' "$LOG"
+
+  printf '# Review verdict — change — abc1234 — 2026-01-07\n' > "$repo/.review/verdict.md"
+  printf 'not a directory\n' > "$hist"
+  archive_now "$repo"; rc=$?
+  assert "aw2: an unwritable archive exits 1, not 0" test "$rc" -eq 1
+  assert "aw2: … with a failed line naming the verdict" \
+    grep -q '^review-archive: failed — .review/verdict.md: .* is not writable$' "$LOG"
+  assert_not "aw2: … and no line claiming it was archived" grep -q '^review-archive: \(already \)\{0,1\}archived' "$LOG"
+  printf '# Spec verdict — change — abc1234 — 2026-01-07\n' > "$repo/.review/spec-verdict.md"
+  archive_now "$repo"
+  assert "aw2: every verdict file it could not archive gets its own failed line" \
+    test "$(grep -c '^review-archive: failed — ' "$LOG")" -eq 2
+
+  archive_now "$repo" --lenses correctness; rc=$?
+  assert "aw2: the archive step takes no other argument" test "$rc" -ne 0 -a "$rc" -ne 3
+  assert_not "aw2: … and archives nothing when given one" grep -q '^review-archive: ' "$LOG"
+
+  rm -f "$hist"
+  archive_now "$repo"; rc=$?
+  assert "aw2: once the archive is writable again, the same call exits 0" test "$rc" -eq 0
+}
+
+test_verdict_archive_step_reports_a_failed_copy() {
+  local repo="$WORK/aw4" bin="$WORK/aw4-bin" hist rc
+  make_repo "$repo"; mkdir -p "$bin"
+  hist="$(history_dir "$repo")"
+  printf '#!/bin/sh\ncase "$1" in "$AW4_FAIL") exit 1 ;; esac\nexec %s "$@"\n' "$(command -v cp)" > "$bin/cp"
+  printf '#!/bin/sh\ncase "$2" in *"$AW4_FAIL_MV"*) exit 1 ;; esac\nexec %s "$@"\n' "$(command -v mv)" > "$bin/mv"
+  chmod +x "$bin/cp" "$bin/mv"
+  printf '# Review verdict — change — abc1234 — 2026-01-08\n' > "$repo/.review/verdict.md"
+  printf '# Spec verdict — change — abc1234 — 2026-01-08\n' > "$repo/.review/spec-verdict.md"
+
+  LOG="$repo.archive.log"
+  ( cd "$repo" && PATH="$bin:$PATH" AW4_FAIL=.review/verdict.md AW4_FAIL_MV=none \
+      bash scripts/review.sh --archive-verdicts ) > "$LOG" 2>&1; rc=$?
+  assert "aw4: a copy that fails before another succeeds exits 1" test "$rc" -eq 1
+  assert "aw4: … with a failed line for that verdict" \
+    grep -q '^review-archive: failed — .review/verdict.md: could not copy it to ' "$LOG"
+  assert "aw4: … and the other verdict still archived" \
+    sh -c 'grep -q "^review-archive: archived — .review/spec-verdict.md as " "$1" && ls "$2"/spec-2026-01-08-abc1234-*.md' _ "$LOG" "$hist"
+  assert_not "aw4: … leaving no partial copy" sh -c 'ls "$1" | grep -q -e "^code-" -e "\.tmp\."' _ "$hist"
+
+  ( cd "$repo" && PATH="$bin:$PATH" AW4_FAIL=none AW4_FAIL_MV=spec- \
+      bash scripts/review.sh --archive-verdicts ) > "$LOG" 2>&1; rc=$?
+  printf 'respec\n' >> "$repo/.review/spec-verdict.md"
+  ( cd "$repo" && PATH="$bin:$PATH" AW4_FAIL=none AW4_FAIL_MV=spec- \
+      bash scripts/review.sh --archive-verdicts ) > "$LOG" 2>&1; rc=$?
+  assert "aw4: a rename that fails after another succeeds exits 1" test "$rc" -eq 1
+  assert "aw4: … with a failed line for that verdict" \
+    grep -q '^review-archive: failed — .review/spec-verdict.md: could not copy it to ' "$LOG"
+  assert "aw4: … after the first was reported as kept" \
+    grep -q '^review-archive: already archived — .review/verdict.md as ' "$LOG"
+}
+
+test_adjudication_archives_each_verdict_it_writes() {
+  local adj="$KIT/.review/adjudication.md" spec="$KIT/.claude/commands/review-spec.md" step5 replay
+  step5="$(awk '/^## 5 /{on=1} /^## 6 /{on=0} on' "$adj")"
+  replay="$(awk '/^## Replay mode/{on=1} on' "$adj")"
+  assert "aw3: step 5 runs the archive step after writing the verdict" \
+    sh -c 'printf "%s\n" "$1" | grep -qx "\./scripts/review\.sh --archive-verdicts"' _ "$step5"
+  assert "aw3: … again after every later edit" sh -c 'printf "%s\n" "$1" | grep -q "after every later edit"' _ "$step5"
+  assert "aw3: step 6 reports a failed archive first" \
+    sh -c 'awk "/^## 6 /{on=1} /^## Replay/{on=0} on" "$1" | grep -q "review-archive:"' _ "$adj"
+  assert "aw3: replay mode does not run it" sh -c 'printf "%s\n" "$1" | grep -q "do not run the archive step"' _ "$replay"
+  assert "aw3: /review-spec archives its verdict" grep -qF './scripts/review.sh --archive-verdicts' "$spec"
+  assert "aw3: the pre-push hook still archives" grep -q 'archive_verdicts$' "$KIT/.githooks/pre-push"
+  assert "aw3: --help shows the archive step" \
+    sh -c 'cd "$1" && bash scripts/review.sh --help | grep -qF -- "--archive-verdicts"' _ "$KIT"
+}
+
 # Each run wiped .review/raw/, so a scoped re-review over a fix commit erased the
 # full run's lens logs before /review-postmortem could read them, and every miss
 # on that PR was unverified. Each run now keeps a copy under the review history.
@@ -5496,6 +5621,10 @@ run_tests \
   test_verdict_archive_is_shared_across_worktrees \
   test_verdict_archive_failure_warns_without_failing \
   test_verdict_archive_keys_an_uncommitted_verdict \
+  test_verdict_archived_when_written_survives_worktree_removal \
+  test_verdict_archive_step_reports_failure_and_nothing \
+  test_verdict_archive_step_reports_a_failed_copy \
+  test_adjudication_archives_each_verdict_it_writes \
   test_review_keeps_each_runs_raw_output \
   test_run_archive_retention \
   test_prepush_archives_the_verdict \
