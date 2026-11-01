@@ -45,9 +45,28 @@ reports its own update of the record on a third line,
    `skipped — no PR for this branch`. Then fetch, each with `--paginate`:
    `gh api repos/{owner}/{repo}/pulls/<n>/reviews`, `…/pulls/<n>/comments`
    (inline threads, with `in_reply_to_id` and `original_commit_id`),
-   `…/issues/<n>/comments`, and `gh api repos/{owner}/{repo}/commits/<sha>/statuses`
-   for every commit of the PR. If any of these calls fails, stop with
-   `failed`. Do not guess, and do not score from pasted comments: they carry
+   `…/issues/<n>/comments`, and the PR's force-pushes:
+
+   ```bash
+   gh api graphql --paginate -F owner='{owner}' -F repo='{repo}' -F n=<n> -f query='
+     query($owner: String!, $repo: String!, $n: Int!, $endCursor: String) {
+       repository(owner: $owner, name: $repo) { pullRequest(number: $n) {
+         timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], first: 100, after: $endCursor) {
+           pageInfo { hasNextPage endCursor }
+           nodes { ... on HeadRefForcePushedEvent { beforeCommit { oid } afterCommit { oid } } } } } } }'
+   ```
+
+   A force-push takes the commits CodeRabbit reviewed out of the PR's commit
+   list, so the commits to read are the PR's commits, the `commit_id` of each
+   CodeRabbit review, the `commit_id` and `original_commit_id` of each
+   CodeRabbit inline comment, and the `beforeCommit` and `afterCommit` of each
+   force-push. A force-push whose `beforeCommit` or `afterCommit` is null may
+   hide a reviewed commit: stop with `failed`. For every commit to read, fetch
+   both `gh api repos/{owner}/{repo}/commits/<sha>/statuses` and
+   `…/commits/<sha>/check-runs`. Each check-runs page is an object; its runs
+   are in `.check_runs`. If any of these calls fails, or a check-runs page has
+   no `.check_runs` list, stop with `failed`: a failed read is never "no
+   review". Do not guess, and do not score from pasted comments: they carry
    no commit.
 
    CodeRabbit posts as `coderabbitai[bot]`. A review object with an empty body is
@@ -56,6 +75,16 @@ reports its own update of the record on a third line,
    belongs to the commit CodeRabbit reviewed when it raised it: the comment's
    `original_commit_id`, or the review's `commit_id`. A finding raised again on
    a later head counts once, at its first commit.
+
+   CodeRabbit reports each commit as a commit status or as a check run, and
+   a commit may have only one of them. Its check run has `app.slug`
+   `coderabbitai` and `name` `CodeRabbit`, and it counts as that commit's
+   CodeRabbit status. A `status` of `queued` or `in_progress` is `pending`,
+   whatever its summary says. A `completed` run is read from the first line
+   of `output.summary`: `Result: Success - Review completed` is
+   `Review completed`, at its `completed_at`; `Result: Rate limited - …` is
+   `Review rate limited`; `Result: Skipped - …` is `Review skipped`;
+   `Result: Cancelled - …` is not a review.
 
    A CodeRabbit status reading `Review completed` means it reviewed that
    commit; a clean pass may leave only that status. `Review rate limited` and
@@ -66,8 +95,8 @@ reports its own update of the record on a third line,
 
 2. **Find the local verdict for the commit CodeRabbit first reviewed.** The
    comparison commit is the **first head CodeRabbit reviewed**: of its
-   non-empty reviews and its `Review completed` statuses, the one with the
-   earliest `submitted_at` or `created_at`. Later heads hold fixes made in
+   non-empty reviews and its `Review completed` statuses and check runs, the
+   one with the earliest `submitted_at`, `created_at` or `completed_at`. Later heads hold fixes made in
    answer to CodeRabbit, and a verdict written after its first review may have
    read it. `.review/verdict.md` holds whatever was reviewed last, so never use
    it without matching its header.
@@ -82,7 +111,8 @@ reports its own update of the record on a third line,
    If `git rev-parse --is-shallow-repository` prints `true`, run
    `git fetch --unshallow`: a missing ancestor would read as `other`. If a
    fetch fails, stop with `failed — fetch`. Write the PR's full commit
-   SHAs to a file: `gh pr view <n> --json commits -q '.commits[].oid' > <file>`.
+   SHAs to a file: `gh pr view <n> --json commits -q '.commits[].oid' > <file>`,
+   then append the other commits step 1 read, one per line.
    Then list every candidate with its relation to the comparison commit, from
    the live `.review/verdict.md` of each worktree and the clone's review
    history. The live file may not be archived yet, so read both:
@@ -433,8 +463,10 @@ notifies everyone on it. The steps above apply, with these changes:
   `gh pr view` fields, plus `headRefName` and `state`), `pull.json`
   (`…/pulls/<n>`), `reviews.json`, `comments.json` and
   `issue-comments.json` (every page, as one array), `statuses.json`
-  (`[{"sha": …, "statuses": […]}]` for every PR commit) and
-  `pr-commits.txt`. Check each JSON file with `jq -e type <file>`. If a file
+  (`[{"sha": …, "statuses": […]}]` for every commit step 1 reads),
+  `check-runs.json` (`[{"sha": …, "check_runs": […]}]`, the same commits),
+  `force-pushes.json` (`[{"before": …, "after": …}]`, one per force-push) and
+  `pr-commits.txt` (the PR's commits, from `gh pr view`). Check each JSON file with `jq -e type <file>`. If a file
   is missing or does not parse, report `failed — read: <file>`.
 - **Fetch nothing.** The caller fetched the PR's commits. A finding whose
   commit is still missing is unscored with `compare_failed`.
