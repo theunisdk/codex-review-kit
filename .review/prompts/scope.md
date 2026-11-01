@@ -22,6 +22,14 @@ Hunt specifically for:
   enumeration (a README list, CLI usage/help text, a menu, a dispatch table, a
   per-check doc) but not its parallel ones: find every place the set is spelled
   out and compare them.
+- **Prose the change falsified** — for each behaviour the diff changes (a
+  condition, exit code, permission, rollout order, the source of an event or
+  log line), grep the docs, README, help text, specs and comments, the edited
+  files outside their hunks included, for sentences that describe it, and check
+  each still holds. Check each absolute claim a doc or message makes (only,
+  every, never, no file, fails closed, costs less) against the code or values it
+  describes and against the same document's other sections; a repair hint must
+  run as written.
 - **Debug residue** — `console.log`, `print`, `dbg!`, commented-out code, a
   hardcoded local URL, credentials in a fixture, `.only` or `.skip` left on a test,
   a temporarily loosened timeout or assertion.

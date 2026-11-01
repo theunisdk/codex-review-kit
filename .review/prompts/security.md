@@ -28,7 +28,25 @@ Hunt specifically for:
   randomness (`Math.random`, unseeded PRNG) used for tokens, IDs, or nonces.
 - **Web surface** — CORS widened to `*` or reflecting Origin, missing CSRF
   protection on state-changing routes, cookies without HttpOnly/Secure/SameSite,
-  `dangerouslySetInnerHTML` / `innerHTML` with untrusted data, open redirects.
+  `dangerouslySetInnerHTML` / `innerHTML` with untrusted data, open redirects; a
+  single-use token, nonce or link consumed or reset by an event other than its
+  use (a mail scanner prefetching a one-click link, a reset on an error returned
+  before the server read the token).
+- **Permission rules and command filters** — for each allow rule, wildcard
+  grant or argv filter the diff adds or relies on, list what else it admits: a
+  destructive subcommand under `tool *`, a wrapper that runs its arguments
+  (`pnpm exec`, `npx`, `env`, `bash -c`, `xargs`) and so steps around an ask or
+  deny rule, an alternate spelling of a flag (`-xVALUE`, `--opt=VALUE`, a config
+  override) that a deny-list misses. CI token permissions granted for the whole
+  workflow instead of the job that needs them, and a script or action fetched at
+  a mutable ref (a branch, a `@v4` tag) and run with write credentials, or run
+  after its download failed, are findings.
+- **Isolation and grant checks that prove less than they claim** — a probe set,
+  smoke test or verification step reported as proof of isolation or of a grant:
+  list every way to reach the resource (recursive, list, batch and history reads
+  beside the direct get) and check each is probed, and check that the expected
+  result could not come from elsewhere (a public resource any credential can
+  read, a default that already allows it).
 - **Missing limits** — no rate limit, no size cap on uploads or request bodies, no
   pagination cap, unbounded loop driven by user input (DoS surface).
 - **Dependency and supply chain** — a newly added dependency doing something the
