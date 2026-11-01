@@ -59,12 +59,17 @@ reports its own update of the record on a third line,
    A force-push takes the commits CodeRabbit reviewed out of the PR's commit
    list, so the commits to read are the PR's commits, the `commit_id` of each
    CodeRabbit review, the `commit_id` and `original_commit_id` of each
-   CodeRabbit inline comment, and the `beforeCommit` and `afterCommit` of each
-   force-push. A force-push whose `beforeCommit` or `afterCommit` is null may
-   hide a reviewed commit: stop with `failed`. For every commit to read, fetch
-   both `gh api repos/{owner}/{repo}/commits/<sha>/statuses` and
-   `…/commits/<sha>/check-runs`. Each check-runs page is an object; its runs
-   are in `.check_runs`. If any of these calls fails, or a check-runs page has
+   CodeRabbit inline comment, the `beforeCommit` and `afterCommit` of each
+   force-push, and every commit below each `beforeCommit`:
+   `gh api --paginate "repos/{owner}/{repo}/compare/<base>...<before>?per_page=100"`,
+   with `<base>` the `base.sha` of `gh api repos/{owner}/{repo}/pulls/<n>`.
+   Its `.commits` across all pages must number its `total_commits`. A
+   force-push whose `beforeCommit` or `afterCommit` is null may hide a
+   reviewed commit: stop with `failed`. For every commit to read, fetch both
+   `gh api repos/{owner}/{repo}/commits/<sha>/statuses` and
+   `…/commits/<sha>/check-runs?filter=all`; without `filter=all` GitHub
+   returns only the latest run, which hides an earlier review of the same
+   commit. Each check-runs page is an object; its runs are in `.check_runs`. If any of these calls fails, or a check-runs page has
    no `.check_runs` list, stop with `failed`: a failed read is never "no
    review". Do not guess, and do not score from pasted comments: they carry
    no commit.
@@ -111,8 +116,7 @@ reports its own update of the record on a third line,
    If `git rev-parse --is-shallow-repository` prints `true`, run
    `git fetch --unshallow`: a missing ancestor would read as `other`. If a
    fetch fails, stop with `failed — fetch`. Write the PR's full commit
-   SHAs to a file: `gh pr view <n> --json commits -q '.commits[].oid' > <file>`,
-   then append the other commits step 1 read, one per line.
+   SHAs to a file: `gh pr view <n> --json commits -q '.commits[].oid' > <file>`.
    Then list every candidate with its relation to the comparison commit, from
    the live `.review/verdict.md` of each worktree and the clone's review
    history. The live file may not be archived yet, so read both:

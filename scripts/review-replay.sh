@@ -297,7 +297,7 @@ gh_check_runs() { # gh_check_runs <file> <api path> — every page's check runs,
 # fetch the PR's GitHub data into $GH and find its first reviewed head (FIRST),
 # or set FIRST empty when CodeRabbit never reviewed it
 gather() {
-  local n="$1" sha
+  local n="$1" sha base_sha
   GH="$REC_TMP/github"; mkdir -p "$GH"; FIRST=""
   gh_to "$GH/pr.json" pr view "$n" -R "$REPO" --json number,url,author,state,baseRefName,headRefName,headRefOid,commits \
     || { fail_at github "$G_ERR"; return; }
@@ -308,7 +308,7 @@ gather() {
   jq -e 'type == "object"' "$GH/pull.json" > /dev/null 2>&1 || { fail_at github "unparseable reply from pulls/$n"; return; }
   jq -r '.commits[].oid' "$GH/pr.json" > "$GH/pr-commits.txt" && [ -s "$GH/pr-commits.txt" ] \
     || { fail_at github "gh pr view listed no commits for PR #$n"; return; }
-  run_with_timeout "$NET_TIMEOUT" gh api graphql --paginate -F owner="${REPO%%/*}" -F repo="${REPO#*/}" -F n="$n" -f query="$FORCE_PUSH_QUERY" \
+  run_with_timeout "$NET_TIMEOUT" gh api graphql --paginate -f owner="${REPO%%/*}" -f repo="${REPO#*/}" -F n="$n" -f query="$FORCE_PUSH_QUERY" \
     > "$GH/force-pushes.pages" 2> "$GH/force-pushes.err" \
     || { fail_at github "gh api graphql (force-pushes of PR #$n) $(exit_why $? "$NET_TIMEOUT"): $(err_of "$GH/force-pushes.err")"; return; }
   jq -s 'if length == 0 then error("no reply")
@@ -324,6 +324,20 @@ gather() {
       ((.[1], .[2]) | .[] | select(.user.login == $cr) | (.commit_id, .original_commit_id) // empty)' \
     "$GH/force-pushes.json" "$GH/reviews.json" "$GH/comments.json" > "$GH/reviewed.all" 2> "$GH/reviewed.err" \
     || { fail_at github "cannot list the commits CodeRabbit commented on: $(err_of "$GH/reviewed.err")"; return; }
+  # a commit below a force-pushed head may have been reviewed, and no event or comment names it
+  base_sha="$(jq -r '.base.sha // empty' "$GH/pull.json")" && [ -n "$base_sha" ] \
+    || { fail_at github "pulls/$n has no base.sha"; return; }
+  jq -r '.[].before' "$GH/force-pushes.json" | sort -u > "$GH/force-pushed.txt" \
+    || { fail_at github "cannot list the force-pushed heads of PR #$n"; return; }
+  while read -r sha; do
+    gh_to "$GH/cmp.pages" api --paginate "repos/$REPO/compare/$base_sha...$sha?per_page=100" || { fail_at github "$G_ERR"; return; }
+    jq -rs 'if length == 0 then error("no reply")
+            elif all(type == "object" and (.commits | type) == "array") | not then error("not a comparison")
+            elif (map(.commits | length) | add) != .[0].total_commits then error("lists \(map(.commits | length) | add) of \(.[0].total_commits) commits")
+            else .[].commits[].sha end' "$GH/cmp.pages" >> "$GH/reviewed.all" 2> "$GH/cmp.err" \
+      || { fail_at github "gh api compare/${base_sha:0:7}...${sha:0:7}: $(err_of "$GH/cmp.err")"; return; }
+  done < "$GH/force-pushed.txt"
+  rm -f "$GH/cmp.pages" "$GH/cmp.err" "$GH/force-pushed.txt"
   { cat "$GH/pr-commits.txt"; sort -u "$GH/reviewed.all" | grep -vxF -f "$GH/pr-commits.txt"; } > "$GH/status-commits.txt"
   [ $? -le 1 ] && ! grep -qvE '^[0-9a-f]{40}([0-9a-f]{24})?$' "$GH/status-commits.txt" \
     || { fail_at github "cannot list the commits to read CodeRabbit's statuses of"; return; }
@@ -332,7 +346,7 @@ gather() {
     gh_pages "$GH/st-$sha.json" "repos/$REPO/commits/$sha/statuses" || { fail_at github "$G_ERR"; return; }
     jq --arg s "$sha" '{sha: $s, statuses: .}' "$GH/st-$sha.json" >> "$GH/statuses.pages" \
       || { fail_at github "cannot read the statuses of ${sha:0:7}"; return; }
-    gh_check_runs "$GH/cr-$sha.json" "repos/$REPO/commits/$sha/check-runs" || { fail_at github "$G_ERR"; return; }
+    gh_check_runs "$GH/cr-$sha.json" "repos/$REPO/commits/$sha/check-runs?filter=all" || { fail_at github "$G_ERR"; return; }
     jq --arg s "$sha" '{sha: $s, check_runs: .}' "$GH/cr-$sha.json" >> "$GH/check-runs.pages" \
       || { fail_at github "cannot read the check runs of ${sha:0:7}"; return; }
     rm -f "$GH/st-$sha".* "$GH/cr-$sha".*
