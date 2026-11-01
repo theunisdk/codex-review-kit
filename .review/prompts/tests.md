@@ -11,6 +11,12 @@ Hunt specifically for:
 - **The revert test** — for each new test, ask: if I reverted the implementation
   change but kept this test, would it fail? If not, the test proves nothing. This
   is the single highest-value check in this lens.
+- **The false-pass test** — for each assertion, name one broken implementation
+  that would still pass it: a mock or fixture that fixes the asserted value, a
+  lookup that accepts any match by name, an error check that accepts a whole
+  class where one error was meant, a list of cases (forbidden names, secret
+  fields) that omits members its sibling tests or the code cover, a negative
+  substring check that can fail or pass on unrelated text.
 - **Tautological tests** — asserting on a value the test itself just set;
   asserting a mock was called rather than that the behaviour happened; snapshot
   tests over volatile output; `expect(result).toBeDefined()` as the only assertion.
