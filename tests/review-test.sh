@@ -3485,6 +3485,38 @@ test_verdict_archive_step_reports_failure_and_nothing() {
   assert "aw2: once the archive is writable again, the same call exits 0" test "$rc" -eq 0
 }
 
+test_verdict_archive_step_reports_a_failed_copy() {
+  local repo="$WORK/aw4" bin="$WORK/aw4-bin" hist rc
+  make_repo "$repo"; mkdir -p "$bin"
+  hist="$(history_dir "$repo")"
+  printf '#!/bin/sh\ncase "$1" in "$AW4_FAIL") exit 1 ;; esac\nexec %s "$@"\n' "$(command -v cp)" > "$bin/cp"
+  printf '#!/bin/sh\ncase "$2" in *"$AW4_FAIL_MV"*) exit 1 ;; esac\nexec %s "$@"\n' "$(command -v mv)" > "$bin/mv"
+  chmod +x "$bin/cp" "$bin/mv"
+  printf '# Review verdict — change — abc1234 — 2026-01-08\n' > "$repo/.review/verdict.md"
+  printf '# Spec verdict — change — abc1234 — 2026-01-08\n' > "$repo/.review/spec-verdict.md"
+
+  LOG="$repo.archive.log"
+  ( cd "$repo" && PATH="$bin:$PATH" AW4_FAIL=.review/verdict.md AW4_FAIL_MV=none \
+      bash scripts/review.sh --archive-verdicts ) > "$LOG" 2>&1; rc=$?
+  assert "aw4: a copy that fails before another succeeds exits 1" test "$rc" -eq 1
+  assert "aw4: … with a failed line for that verdict" \
+    grep -q '^review-archive: failed — .review/verdict.md: could not copy it to ' "$LOG"
+  assert "aw4: … and the other verdict still archived" \
+    sh -c 'grep -q "^review-archive: archived — .review/spec-verdict.md as " "$1" && ls "$2"/spec-2026-01-08-abc1234-*.md' _ "$LOG" "$hist"
+  assert_not "aw4: … leaving no partial copy" sh -c 'ls "$1" | grep -q -e "^code-" -e "\.tmp\."' _ "$hist"
+
+  ( cd "$repo" && PATH="$bin:$PATH" AW4_FAIL=none AW4_FAIL_MV=spec- \
+      bash scripts/review.sh --archive-verdicts ) > "$LOG" 2>&1; rc=$?
+  printf 'respec\n' >> "$repo/.review/spec-verdict.md"
+  ( cd "$repo" && PATH="$bin:$PATH" AW4_FAIL=none AW4_FAIL_MV=spec- \
+      bash scripts/review.sh --archive-verdicts ) > "$LOG" 2>&1; rc=$?
+  assert "aw4: a rename that fails after another succeeds exits 1" test "$rc" -eq 1
+  assert "aw4: … with a failed line for that verdict" \
+    grep -q '^review-archive: failed — .review/spec-verdict.md: could not copy it to ' "$LOG"
+  assert "aw4: … after the first was reported as kept" \
+    grep -q '^review-archive: already archived — .review/verdict.md as ' "$LOG"
+}
+
 test_adjudication_archives_each_verdict_it_writes() {
   local adj="$KIT/.review/adjudication.md" spec="$KIT/.claude/commands/review-spec.md" step5 replay
   step5="$(awk '/^## 5 /{on=1} /^## 6 /{on=0} on' "$adj")"
@@ -5591,6 +5623,7 @@ run_tests \
   test_verdict_archive_keys_an_uncommitted_verdict \
   test_verdict_archived_when_written_survives_worktree_removal \
   test_verdict_archive_step_reports_failure_and_nothing \
+  test_verdict_archive_step_reports_a_failed_copy \
   test_adjudication_archives_each_verdict_it_writes \
   test_review_keeps_each_runs_raw_output \
   test_run_archive_retention \
