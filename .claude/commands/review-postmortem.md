@@ -59,13 +59,10 @@ reports its own update of the record on a third line,
    A force-push takes the commits CodeRabbit reviewed out of the PR's commit
    list, so the commits to read are the PR's commits, the `commit_id` of each
    CodeRabbit review, the `commit_id` and `original_commit_id` of each
-   CodeRabbit inline comment, the `beforeCommit` and `afterCommit` of each
-   force-push, and every commit below each `beforeCommit`:
-   `gh api --paginate "repos/{owner}/{repo}/compare/<base>...<before>?per_page=100"`,
-   with `<base>` the `base.sha` of `gh api repos/{owner}/{repo}/pulls/<n>`.
-   Its `.commits` across all pages must number its `total_commits`. A
-   force-push whose `beforeCommit` or `afterCommit` is null may hide a
-   reviewed commit: stop with `failed`. For every commit to read, fetch both
+   CodeRabbit inline comment, and the `beforeCommit` and `afterCommit` of
+   each force-push. A force-push whose `beforeCommit` or `afterCommit` is
+   null may hide a reviewed commit: stop with `failed`. For every commit to
+   read, fetch both
    `gh api repos/{owner}/{repo}/commits/<sha>/statuses` and
    `…/commits/<sha>/check-runs?filter=all`; without `filter=all` GitHub
    returns only the latest run, which hides an earlier review of the same

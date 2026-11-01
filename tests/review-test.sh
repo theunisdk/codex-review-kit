@@ -4222,7 +4222,7 @@ $(check_run success 'Result: Success - Review completed' 2026-01-01T10:00:00Z)"
 # exchange #9: CodeRabbit passed 2dab84c clean, with a status alone, and a
 # force-push then took 2dab84c out of the PR's commit list.
 test_replay_reads_force_pushed_heads() {
-  local a b m n short kit
+  local a b n short kit
   replay_fixture r17
   a="$RA"; b="$(jq -r '.commits[1].oid' "$RGH/pr-view-1.json")"
   for n in 1 3 5; do
@@ -4231,15 +4231,10 @@ test_replay_reads_force_pushed_heads() {
     gh_json "$RGH" "api-repos_o_r_pulls_${n}_comments" '[]'
   done
   gh_json "$RGH" "api-repos_o_r_commits_${a}_statuses" '[{"creator":{"login":"coderabbitai[bot]"},"context":"CodeRabbit","state":"success","description":"Review completed","created_at":"2026-01-01T10:00:00Z"}]'
-  # PR 1: a reviewed, then b pushed on top, then b force-pushed: only the comparison names a
-  force_pushes "$RGH" 1 "$b" "$b"
-  m="$(jq -r '.base.sha' "$RGH/api-repos_o_r_pulls_1.json")"
-  gh_json "$RGH" "api-repos_o_r_compare_$m...$b?per_page=100" "{\"total_commits\":2,\"commits\":[{\"sha\":\"$a\"}]}
-{\"total_commits\":2,\"commits\":[{\"sha\":\"$b\"}]}"
+  force_pushes "$RGH" 1 "$a" "$b"
   force_pushes "$RGH" 3 null "$b"
   rm "$RGH/api-graphql-5.json"
-  force_pushes "$RGH" 7 "$a" "$b"
-  run_replay 1 3 5 7
+  run_replay 1 3 5
   short="$(git -C "$RS" rev-parse --short "$a")"; kit="$(git -C "$RHUB" rev-parse --short main)"
   assert "r17: a head force-pushed away after CodeRabbit reviewed it is still the comparison commit" \
     grep -qE "^review-replay: replayed — PR #1 \($short, kit $kit\)" "$LOG"
@@ -4247,8 +4242,6 @@ test_replay_reads_force_pushed_heads() {
     grep -qF 'review-replay: failed — PR #3: github: a force-push on PR #3 names no before or after commit' "$LOG"
   assert "r17: a failed force-push read is a failure, not \"no review\"" \
     grep -qE '^review-replay: failed — PR #5: github: gh api graphql \(force-pushes of PR #5\) exited 1: HTTP 404' "$LOG"
-  assert "r17: a force-pushed head whose comparison cannot be read fails the PR" \
-    grep -qF "review-replay: failed — PR #7: github: gh api --paginate repos/o/r/compare/$m...$a?per_page=100 exited 1" "$LOG"
   assert "r17: the postmortem reads force-pushes in replay mode too" \
     sh -c 'grep -qF "HeadRefForcePushedEvent" "$1" && grep -qF "\`force-pushes.json\`" "$1"' _ "$KIT/.claude/commands/review-postmortem.md"
 }
