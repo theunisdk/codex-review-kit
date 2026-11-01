@@ -155,15 +155,23 @@ coderabbit_declared() {
 # Keyed <mode>-<date>-<sha>-<cksum>.md, <sha> keeping a code verdict's +uncommitted
 # marker: a re-run never duplicates a verdict, and a
 # second verdict on the same commit never replaces the first. Run from the repo
-# root. Warns on failure; never fails the caller.
+# root. Warns on failure; never fails the caller. ARCHIVE_OUTCOMES gets one line per
+# verdict file: "archived <file> <target>", "present <file> <target>" or
+# "failed <file> <reason>"; empty when there is no verdict file.
 archive_verdicts() {
   local f dir="" key target unparsed
+  ARCHIVE_OUTCOMES=""
   for f in .review/verdict.md .review/spec-verdict.md; do
     [ -f "$f" ] || continue
     if [ -z "$dir" ]; then
       dir="$(git rev-parse --git-common-dir 2>/dev/null)" && dir="$(cd "$dir" 2>/dev/null && pwd -P)" \
         && dir="$dir/review-history" && mkdir -p "$dir" 2>/dev/null && [ -d "$dir" ] && [ -w "$dir" ] \
-        || { warn "verdict archive ${dir:-<git common dir>/review-history} is not writable — rejection history for /review-tune is not being kept"; return 0; }
+        || { warn "verdict archive ${dir:-<git common dir>/review-history} is not writable — rejection history for /review-tune is not being kept"
+             for f in .review/verdict.md .review/spec-verdict.md; do
+               [ -f "$f" ] && ARCHIVE_OUTCOMES="${ARCHIVE_OUTCOMES}failed $f ${dir:-<git common dir>/review-history} is not writable
+"
+             done
+             return 0; }
     fi
     key="$(awk -F ' — ' 'NR == 1 {
       sha = $3; sub(/[+]uncommitted$/, "", sha)
@@ -181,14 +189,41 @@ archive_verdicts() {
     fi
     key="$key-$(cksum < "$f" | awk '{ print $1 }')"
     target="$dir/$key.md"
-    cmp -s "$f" "$target" 2>/dev/null && continue
-    if { cp "$f" "$target.tmp.$$" && mv -f "$target.tmp.$$" "$target"; } 2>/dev/null; then
+    if cmp -s "$f" "$target" 2>/dev/null; then
+      ARCHIVE_OUTCOMES="${ARCHIVE_OUTCOMES}present $f $target
+"
+    elif { cp "$f" "$target.tmp.$$" && mv -f "$target.tmp.$$" "$target"; } 2>/dev/null; then
       [ -z "$unparsed" ] || warn "$f has no standard verdict header — archived as $key.md"
+      ARCHIVE_OUTCOMES="${ARCHIVE_OUTCOMES}archived $f $target
+"
     else
       rm -f "$target.tmp.$$" 2>/dev/null; warn "could not archive $f to $target"
+      ARCHIVE_OUTCOMES="${ARCHIVE_OUTCOMES}failed $f could not copy it to $target
+"
     fi
   done
   return 0
+}
+
+# The adjudicator's entry point, run right after it writes or rewrites a verdict:
+# archive_verdicts, then one status line per verdict file. Exit 0 when every
+# verdict file is in the archive, 1 when one is not, 3 when there is no verdict file.
+archive_verdicts_now() {
+  local outcome f rest rc=0
+  archive_verdicts
+  if [ -z "$ARCHIVE_OUTCOMES" ]; then
+    echo "review-archive: nothing — no .review/verdict.md or .review/spec-verdict.md to archive"
+    return 3
+  fi
+  while read -r outcome f rest; do
+    case "$outcome" in
+      archived) echo "review-archive: archived — $f as $rest" ;;
+      present)  echo "review-archive: already archived — $f as $rest" ;;
+      *)        echo "review-archive: failed — $f: $rest"; rc=1 ;;
+    esac
+  done <<< "${ARCHIVE_OUTCOMES%
+}"
+  return "$rc"
 }
 
 # Copy this run's .review/raw/, findings.json and findings.md into the review

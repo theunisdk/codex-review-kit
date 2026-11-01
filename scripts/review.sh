@@ -13,8 +13,10 @@
 #   ./scripts/review.sh --spec docs/specs/foo.md   # review a spec, not code
 #   ./scripts/review.sh --lenses security,contracts
 #   ./scripts/review.sh --effort medium --confidence 0.7
+#   ./scripts/review.sh --archive-verdicts       # file the verdicts in the review history
 #
 # Exit codes: 0 ok · 1 setup/runtime error · 2 findings at/above --fail-on
+#   --archive-verdicts: 0 archived · 1 not archived · 3 no verdict file
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
@@ -27,6 +29,11 @@ cd "$REPO_ROOT" || exit 1
 . "$REPO_ROOT/scripts/lib/common.sh"
 # shellcheck source=lib/path-rules.sh
 . "$REPO_ROOT/scripts/lib/path-rules.sh"
+
+if [ "${1:-}" = --archive-verdicts ]; then
+  [ $# -eq 1 ] || die "--archive-verdicts takes no other argument"
+  archive_verdicts_now; exit
+fi
 
 # --- defaults (override in .review/config.sh or via flags) -----------------
 LENSES="correctness,security,contracts,resources,tests,scope"
@@ -94,7 +101,7 @@ while [ $# -gt 0 ]; do
     --fail-on)      FAIL_ON="$2"; shift ;;
     --no-analyzers) RUN_ANALYZERS="0" ;;
     --parallel)     MAX_PARALLEL="$2"; shift ;;
-    -h|--help)      sed -n '2,18p' "$0"; exit 0 ;;
+    -h|--help)      sed -n '2,20p' "$0"; exit 0 ;;
     -*)             die "unknown flag: $1" ;;
     *)              [ -n "$1" ] || die "empty base ref — name a branch or commit, or omit it to diff against the default base"
                     BASE="$1" ;;

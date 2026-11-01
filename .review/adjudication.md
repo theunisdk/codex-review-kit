@@ -165,10 +165,25 @@ Lenses: <list> · Effort: <effort> · Secrets: <secrets_scan> · Path rules: <pa
 <test / typecheck / lint + analyzer results after fixes>
 ```
 
+Then archive it, and again after every later edit of either verdict file:
+
+```bash
+./scripts/review.sh --archive-verdicts
+```
+
+The verdict files are gitignored, so this copy in
+`<git common dir>/review-history/` is the only one that survives the worktree's
+removal. Each line it prints starts `review-archive:`. `archived` and
+`already archived` mean the verdict is kept. `failed` (exit 1) means it is not,
+and `nothing` (exit 3) means no verdict file was found where you wrote one.
+
 ## 6 — Report back
 
 In chat: the counts, every ESCALATE in full, and any REJECT you are less than
-certain about. Do not re-narrate the fixes — the verdict file has them.
+certain about. Do not re-narrate the fixes — the verdict file has them. If the
+archive step did not exit 0, put its `review-archive:` lines first: the verdict
+is not in the review history, and `/review-postmortem` and `/review-tune` will
+not find it once the worktree is gone.
 
 CodeRabbit still runs as the final gate on the PR. The goal is for it to find
 nothing, not to substitute for it. In a repo that declares `CodeRabbit: none`
@@ -189,6 +204,7 @@ everything that changes something:
 - **Step 4** is skipped. Apply no fix, commit nothing, and run no re-review. A
   finding you would fix stays FIX.
 - **Step 5:** the header names the replayed commit. Print the verdict as your
-  final message instead of writing the file. Its Verification section says
-  `replay: no fixes applied, tests not run`.
+  final message instead of writing the file, and do not run the archive step:
+  a replay's record is kept apart from the review history. Its Verification
+  section says `replay: no fixes applied, tests not run`.
 - **Step 6** is skipped.

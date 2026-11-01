@@ -193,6 +193,15 @@ The record so far, all found before the first paid review ran:
   recorded nothing — so the suite reported "all tests passed" with 17
   assertions missing, and CI agreed. The runner now fails on a listed test it
   cannot find.
+- Verdicts reached `review-history/` only when a later `review.sh` run or a
+  push through the pre-push hook copied them. A clone without the hook, a
+  `--no-verify` push, or a verdict rewritten after the last push lost the
+  worktree's final verdict when the worktree was removed, and the postmortem
+  then found no local verdict. The adjudicator now archives each verdict as it
+  writes it, with `./scripts/review.sh --archive-verdicts`, and a `failed` line
+  from it goes into its report. Check that a reviewed PR's verdict is in
+  `$(git rev-parse --git-common-dir)/review-history/` before removing its
+  worktree.
 
 The pattern: broken looks identical to clean. Treat an empty findings list on
 a substantial diff as suspicious, not reassuring, and check the raw logs. A
@@ -331,7 +340,8 @@ Discipline mirrors the code side: one pass per spec, adjudicate (FIXes edit
 the spec; ambiguities usually ESCALATE — that question list is the main
 deliverable), resolve, build. No loops. The verdict goes to
 `.review/spec-verdict.md`, which the pre-push hook never gates on — a spec review
-does not clear the code-review gate.
+does not clear the code-review gate. It is archived to `review-history/` as soon
+as it is written, like a code verdict.
 
 ## The one habit
 

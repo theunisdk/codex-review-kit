@@ -29,8 +29,10 @@ of a rework. Target: $ARGUMENTS
 
 3. Write `.review/spec-verdict.md` per adjudication.md step 5 — never
    `.review/verdict.md`, which holds the code review the pre-push hook
-   checks. Then report: the escalated decision
-   list in full, what was edited in the spec, and anything logged.
+   checks — and archive it with `./scripts/review.sh --archive-verdicts`, as
+   that step says. Then report: the escalated decision
+   list in full, what was edited in the spec, and anything logged, with the
+   `review-archive:` lines first if the archive did not exit 0.
 
 **One pass, no loop.** Review once, adjudicate, resolve the escalated
 decisions with the user, and start building. Do not re-run on the amended
