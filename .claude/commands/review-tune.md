@@ -138,6 +138,8 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
 
    ```bash
    start=<the value step 1 noted>
+   printf '%s\n' "$start" | grep -Eqx '[0-9]{12}[.][0-9]{2}' \
+     || { echo "tune marker NOT written: start time '$start' is not YYYYMMDDhhmm.SS"; exit 1; }
    common="$(git rev-parse --path-format=absolute --git-common-dir)" && [ -d "$common" ] \
      || { echo "tune marker NOT written: no git common dir"; exit 1; }
    hist="$common/review-history" marker="$common/review-history/tune-last"

@@ -4044,8 +4044,8 @@ test_review_tune_marker_failures_are_reported() {
   rmdir "$hist/tune-last"
 
   ( cd "$repo" && bash -c "$(tune_marker_snippet 'not a time')" ) > "$out" 2>&1; rc=$?
-  assert "tm2: a start time touch cannot read fails the write" test "$rc" -ne 0
-  assert "tm2: … reported as not written" grep -qF "tune marker NOT written: cannot stamp it with start time 'not a time'" "$out"
+  assert "tm2: a malformed start time fails the write" test "$rc" -ne 0
+  assert "tm2: … reported as not written" grep -qF "tune marker NOT written: start time 'not a time' is not YYYYMMDDhhmm.SS" "$out"
   assert_not "tm2: … leaving no marker and no temporary file" sh -c 'ls -A "$1" | grep -q "tune-last"' _ "$hist"
 
   if [ "$(id -u)" != 0 ]; then
