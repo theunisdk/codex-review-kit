@@ -3989,36 +3989,40 @@ test_review_tune_docs_read_postmortem_records() {
 # because only a commit to learnings.md recorded one. /review-tune now touches
 # review-history/tune-last at the end of every run that read all stores, and a
 # failed write must say so rather than look like a finished tune.
-tune_marker_snippet() { # the doc's marker-writing block
-  awk '/^   ```bash$/ { f = 1; b = ""; next } f && /^   ```$/ { if (b ~ /^common=/) { printf "%s", b; exit } f = 0; next }
-       f { sub(/^   /, ""); b = b $0 "\n" }' "$KIT/.claude/commands/review-tune.md"
+tune_marker_snippet() { # tune_marker_snippet <start> — the doc's marker-writing block, filled in
+  awk '/^   ```bash$/ { f = 1; b = ""; next } f && /^   ```$/ { if (b ~ /^start=/) { printf "%s", b; exit } f = 0; next }
+       f { sub(/^   /, ""); b = b $0 "\n" }' "$KIT/.claude/commands/review-tune.md" | sed "1s|^start=.*|start='$1'|"
 }
 
 test_review_tune_writes_the_tune_marker() {
   local repo="$WORK/tm1" wt="$WORK/tm1-wt" snippet hist marker rc out="$WORK/tm1.out"
   make_repo "$repo"
-  snippet="$(tune_marker_snippet)"
+  snippet="$(tune_marker_snippet 202001020000.00)"
   assert "tm1: /review-tune has a marker-writing block" test -n "$snippet"
+  assert "tm1: … that tells you to note the start time first" \
+    grep -qF 'Before reading any store, run' "$KIT/.claude/commands/review-tune.md"
+  touch -t 202001010000 "$WORK/tm1.before"; touch -t 202001030000 "$WORK/tm1.after"
   hist="$(history_dir "$repo")"; marker="$hist/tune-last"
 
   ( cd "$repo" && bash -c "$snippet" ) > "$out" 2>&1; rc=$?
   assert "tm1: writing the marker succeeds" test "$rc" -eq 0
   assert "tm1: … creating an empty review-history/tune-last" sh -c 'test -f "$1" && ! test -s "$1"' _ "$marker"
+  assert "tm1: … stamped with the run's start, not its end" \
+    sh -c 'test "$1" -nt "$2" && test "$3" -nt "$1"' _ "$marker" "$WORK/tm1.before" "$WORK/tm1.after"
   assert "tm1: … and says where" grep -qE '^tune marker written: /.*/review-history/tune-last$' "$out"
   assert_not "tm1: … leaving no temporary file" sh -c 'ls -A "$1" | grep -q "^\.tune-last\."' _ "$hist"
 
-  touch -t 202001010000 "$marker"; touch -t 202001020000 "$WORK/tm1.ref"
   git -C "$repo" worktree add -q "$wt" -b tm1-wt >/dev/null 2>&1
-  ( cd "$wt" && bash -c "$snippet" ) > "$out" 2>&1; rc=$?
+  ( cd "$wt" && bash -c "$(tune_marker_snippet 202001040000.00)" ) > "$out" 2>&1; rc=$?
   assert "tm1: a run from a linked worktree succeeds" test "$rc" -eq 0
-  assert "tm1: … and refreshes the clone's one marker" test "$marker" -nt "$WORK/tm1.ref"
+  assert "tm1: … and refreshes the clone's one marker" test "$marker" -nt "$WORK/tm1.after"
   assert_not "tm1: … which is never in a worktree's status" \
     sh -c 'git -C "$1" status --porcelain --ignored | grep -q tune-last' _ "$wt"
 }
 
 test_review_tune_marker_failures_are_reported() {
   local repo="$WORK/tm2" snippet hist rc out="$WORK/tm2.out"
-  snippet="$(tune_marker_snippet)"
+  snippet="$(tune_marker_snippet 202001020000.00)"
 
   mkdir -p "$WORK/tm2-nogit"
   ( cd "$WORK/tm2-nogit" && GIT_CEILING_DIRECTORIES="$WORK" bash -c "$snippet" ) > "$out" 2>&1; rc=$?
@@ -4038,6 +4042,11 @@ test_review_tune_marker_failures_are_reported() {
   assert "tm2: … reported as not written" grep -qE '^tune marker NOT written: /.*/review-history/tune-last is a directory$' "$out"
   assert_not "tm2: … and nothing is moved into it" sh -c 'ls -A "$1" | grep -q .' _ "$hist/tune-last"
   rmdir "$hist/tune-last"
+
+  ( cd "$repo" && bash -c "$(tune_marker_snippet 'not a time')" ) > "$out" 2>&1; rc=$?
+  assert "tm2: a start time touch cannot read fails the write" test "$rc" -ne 0
+  assert "tm2: … reported as not written" grep -qF "tune marker NOT written: cannot stamp it with start time 'not a time'" "$out"
+  assert_not "tm2: … leaving no marker and no temporary file" sh -c 'ls -A "$1" | grep -q "tune-last"' _ "$hist"
 
   if [ "$(id -u)" != 0 ]; then
     chmod 555 "$hist"
