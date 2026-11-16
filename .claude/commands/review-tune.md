@@ -24,6 +24,8 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
      holds `/review-postmortem` records, `postmortem-pr<n>.md`. They are not
      verdicts: read them in the next store. Its `runs/` directory holds each
      run's raw lens output for `/review-postmortem`, not verdicts: skip it.
+     So are `lessons-harvested`, `lessons-plan-*.json`, `lesson-*.md` and
+     `.lessons-lock`, which step 4 writes and reads.
    - The postmortem records. Each `postmortem-pr<n>.md` ends in a JSON block
      (`"schema": "review-postmortem/v1"`) listing every CodeRabbit finding on
      that PR, how it compared with the local verdict, and the author's
@@ -109,16 +111,65 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
    - **Generic or stack-level** (would hold in any repo, or any repo on this
      stack) → it belongs in the kit hub's `learnings-shared.md` instead.
      Propose it alongside the local edits. After approval, file it as an
-     issue on the hub, never as a commit in a local hub clone. Follow step 6
-     of `.claude/commands/review-postmortem.md`: check the hub's current file, reuse an open
-     `lesson` issue, create the `lesson` label or say you filed without it,
-     and report `hub lesson NOT filed` with the saved body if `gh` fails. The
-     hub is PUBLIC: strip anything that identifies a repo, client, schema, or
-     incident.
+     issue on the hub, never as a commit in a local hub clone. First check
+     the hub's current file
+     (`gh api -H 'Accept: application/vnd.github.raw' repos/theunisdk/codex-review-kit/contents/.review/learnings-shared.md`)
+     and its open and closed `lesson` issues for the same line; if one
+     proposes it, comment there instead. If either check fails, do not
+     file: save the body and report `hub lesson NOT filed` with the error.
+     File it with `gh issue create -R theunisdk/codex-review-kit --label lesson`,
+     creating the label first if the hub has none. If the label cannot be
+     confirmed or created, do not file: an issue without it is invisible to
+     the harvest below. The hub is PUBLIC: strip anything that identifies a
+     repo, client, schema, or incident.
    - Never edit `.review/learnings-shared.md` in this repo directly — the
      next sync overwrites it.
+   - **Harvest the postmortems' hub lessons.** An unattended
+     `/review-postmortem --record-only` files nothing: it keeps each hub
+     lesson it proposes in its record's `proposals`. Collect them with
+     `bash scripts/lib/review-lessons.sh plan`, from the repo root. It reads
+     every postmortem record in this clone's review history and drops each
+     hub proposal the ledger `review-history/lessons-harvested` already
+     holds, one an issue on the hub already carries, one near-identical to
+     an open or closed `lesson` issue or to the hub's current file, and one
+     repeated by another record. It holds back as `recorded` each one whose
+     record lists issues an interactive postmortem filed, since the list
+     does not say which proposal each issue is: open them and set the entry
+     to `duplicate` or `file`. It prints what it would file and writes the
+     plan to a new `review-history/lessons-plan-<time>-<pid>.json`, named on
+     its last line, filing nothing: note that path, since another worktree's
+     tune writes its own. Its first
+     line is the status: `plan` (exit 2 when a record could not be read:
+     name each `unread` line), `no-history`, or `failed` with the step and
+     error. On `failed`, file nothing and report that line: a failed issue
+     lookup is never "no issues".
+     The plan's dedupe compares words, so it catches a lesson repeated
+     nearly word for word, not one reworded. Read each entry still marked
+     `file` against the hub's `lesson` issues
+     (`gh issue list -R theunisdk/codex-review-kit --label lesson --state all`)
+     and the hub's current file. Where one already proposes the same line,
+     set the entry's `decision` to `duplicate` with
+     `"duplicate_of": {"issue": <n>}`; where the hub's file already says it,
+     set it to `in-hub`. Where two entries say the same thing,
+     set the later one to `repeated` with `"same_as": "<key>"`. Edit an
+     entry's `title` or `lines` to strip anything that identifies a repo,
+     client, schema or incident. Show the plan in step 5 with the other
+     proposals.
 
-5. Show me the proposed diffs and wait for my approval before writing. Never
+5. Show me the proposed diffs and the harvest plan, and wait for my approval
+   before writing or filing. Set each harvest entry I decline to `decline`,
+   and one I want left for later to `skip`. Then file the plan with
+   `bash scripts/lib/review-lessons.sh file <the plan's path>`. It takes a
+   lock shared by the clone's worktrees, re-reads the hub's `lesson` issues, files each entry still marked
+   `file` with the `lesson` label, and records every entry but a `skip` in
+   the ledger, so the next harvest offers none of them again. If the label
+   or issue lookup fails it files nothing; if a filing fails it stops there,
+   saving that body to `review-history/lesson-<key>.md`. A `failed — lock`
+   means another harvest is filing; wait for it, or remove the lock it names
+   if none is running. Report its status
+   line and each issue URL it prints. A failed harvest does not hold back
+   the tune marker: the ledger, not the marker, says what was filed, so the
+   next tune retries the rest. Never
    suppress a class that produced a genuine FIX at any point. That includes a
    postmortem finding classed `missed` or `rejected-wrongly`, or one the
    author `fixed` after CodeRabbit raised it. If I decline, or there is
