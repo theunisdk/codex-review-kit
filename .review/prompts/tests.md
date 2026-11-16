@@ -16,7 +16,11 @@ Hunt specifically for:
   lookup that accepts any match by name, an error check that accepts a whole
   class where one error was meant, a list of cases (forbidden names, secret
   fields) that omits members its sibling tests or the code cover, a negative
-  substring check that can fail or pass on unrelated text.
+  substring check that can fail or pass on unrelated text, an ordering test that
+  polls until the step happens (`waitFor`, retry-until) and so passes when it runs
+  late, an assertion about what a child process saw with no channel the child can
+  report through (its environment scrubbed), a setup chain `a && b` followed by a
+  command that succeeds, so the chain's failure never reaches the exit status.
 - **Tautological tests** — asserting on a value the test itself just set;
   asserting a mock was called rather than that the behaviour happened; snapshot
   tests over volatile output; `expect(result).toBeDefined()` as the only assertion.
