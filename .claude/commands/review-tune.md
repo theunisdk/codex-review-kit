@@ -117,7 +117,33 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
 5. Show me the proposed diffs and wait for my approval before writing. Never
    suppress a class that produced a genuine FIX at any point. That includes a
    postmortem finding classed `missed` or `rejected-wrongly`, or one the
-   author `fixed` after CodeRabbit raised it.
+   author `fixed` after CodeRabbit raised it. If I decline, or there is
+   nothing to propose, go to step 7.
 
 6. If `learnings.md` is over ~60 lines after the edit, consolidate overlapping
    entries — a bloated learnings file dilutes every lens prompt.
+
+7. Record the tune. Write the marker only when step 1 read every store, none
+   of them unread or partly unread, and every approved edit to this repo was
+   written. It is written whether you proposed edits, I declined them, or
+   there was nothing to tune: it tells `tdk-2-push-review` that the history
+   up to now has been tuned, so its `review-tune: due` notice clears. A run
+   that stopped early writes none. The marker is an empty file in the review
+   history, never committed; its mtime is the time of the last tune:
+
+   ```bash
+   common="$(git rev-parse --path-format=absolute --git-common-dir)" && [ -d "$common" ] \
+     || { echo "tune marker NOT written: no git common dir"; exit 1; }
+   hist="$common/review-history" marker="$common/review-history/tune-last"
+   mkdir -p "$hist" || { echo "tune marker NOT written: cannot create $hist"; exit 1; }
+   [ ! -d "$marker" ] || { echo "tune marker NOT written: $marker is a directory"; exit 1; }
+   tmp="$(mktemp "$hist/.tune-last.XXXXXX")" || { echo "tune marker NOT written: cannot create a file in $hist"; exit 1; }
+   mv -f "$tmp" "$marker" || { rm -f "$tmp"; echo "tune marker NOT written: cannot replace $marker"; exit 1; }
+   echo "tune marker written: $marker"
+   ```
+
+   End the run with the line it prints. A `NOT written` line, or a non-zero
+   exit with no line, is a failure: report it as `tune marker NOT written`
+   with the error, never as a finished tune. When no marker is written
+   because a store was unread or the run stopped early, say
+   `tune marker NOT written: <reason>`.

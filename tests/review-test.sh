@@ -3985,6 +3985,86 @@ test_review_tune_docs_read_postmortem_records() {
     grep -qF '`/review-postmortem` reads it to find the verdict' "$KIT/REVIEW.md"
 }
 
+# tdk-2-push-review kept saying a tune was due after a tune that changed nothing,
+# because only a commit to learnings.md recorded one. /review-tune now touches
+# review-history/tune-last at the end of every run that read all stores, and a
+# failed write must say so rather than look like a finished tune.
+tune_marker_snippet() { # the doc's marker-writing block
+  awk '/^   ```bash$/ { f = 1; b = ""; next } f && /^   ```$/ { if (b ~ /^common=/) { printf "%s", b; exit } f = 0; next }
+       f { sub(/^   /, ""); b = b $0 "\n" }' "$KIT/.claude/commands/review-tune.md"
+}
+
+test_review_tune_writes_the_tune_marker() {
+  local repo="$WORK/tm1" wt="$WORK/tm1-wt" snippet hist marker rc out="$WORK/tm1.out"
+  make_repo "$repo"
+  snippet="$(tune_marker_snippet)"
+  assert "tm1: /review-tune has a marker-writing block" test -n "$snippet"
+  hist="$(history_dir "$repo")"; marker="$hist/tune-last"
+
+  ( cd "$repo" && bash -c "$snippet" ) > "$out" 2>&1; rc=$?
+  assert "tm1: writing the marker succeeds" test "$rc" -eq 0
+  assert "tm1: … creating an empty review-history/tune-last" sh -c 'test -f "$1" && ! test -s "$1"' _ "$marker"
+  assert "tm1: … and says where" grep -qE '^tune marker written: /.*/review-history/tune-last$' "$out"
+  assert_not "tm1: … leaving no temporary file" sh -c 'ls -A "$1" | grep -q "^\.tune-last\."' _ "$hist"
+
+  touch -t 202001010000 "$marker"; touch -t 202001020000 "$WORK/tm1.ref"
+  git -C "$repo" worktree add -q "$wt" -b tm1-wt >/dev/null 2>&1
+  ( cd "$wt" && bash -c "$snippet" ) > "$out" 2>&1; rc=$?
+  assert "tm1: a run from a linked worktree succeeds" test "$rc" -eq 0
+  assert "tm1: … and refreshes the clone's one marker" test "$marker" -nt "$WORK/tm1.ref"
+  assert_not "tm1: … which is never in a worktree's status" \
+    sh -c 'git -C "$1" status --porcelain --ignored | grep -q tune-last' _ "$wt"
+}
+
+test_review_tune_marker_failures_are_reported() {
+  local repo="$WORK/tm2" snippet hist rc out="$WORK/tm2.out"
+  snippet="$(tune_marker_snippet)"
+
+  mkdir -p "$WORK/tm2-nogit"
+  ( cd "$WORK/tm2-nogit" && GIT_CEILING_DIRECTORIES="$WORK" bash -c "$snippet" ) > "$out" 2>&1; rc=$?
+  assert "tm2: outside a repository the write fails" test "$rc" -ne 0
+  assert "tm2: … and says the marker was not written" grep -qF "tune marker NOT written" "$out"
+
+  make_repo "$repo"; hist="$(history_dir "$repo")"
+  printf 'x\n' > "$hist"
+  ( cd "$repo" && bash -c "$snippet" ) > "$out" 2>&1; rc=$?
+  assert "tm2: a review-history that is a file fails the write" test "$rc" -ne 0
+  assert "tm2: … reported as not written" grep -qE '^tune marker NOT written: cannot create /.*/review-history$' "$out"
+  rm -f "$hist"
+
+  mkdir -p "$hist/tune-last"
+  ( cd "$repo" && bash -c "$snippet" ) > "$out" 2>&1; rc=$?
+  assert "tm2: a tune-last that is a directory fails the write" test "$rc" -ne 0
+  assert "tm2: … reported as not written" grep -qE '^tune marker NOT written: /.*/review-history/tune-last is a directory$' "$out"
+  assert_not "tm2: … and nothing is moved into it" sh -c 'ls -A "$1" | grep -q .' _ "$hist/tune-last"
+  rmdir "$hist/tune-last"
+
+  if [ "$(id -u)" != 0 ]; then
+    chmod 555 "$hist"
+    ( cd "$repo" && bash -c "$snippet" ) > "$out" 2>&1; rc=$?
+    chmod 755 "$hist"
+    assert "tm2: an unwritable review-history fails the write" test "$rc" -ne 0
+    assert "tm2: … reported as not written" grep -qE '^tune marker NOT written: cannot create a file in /.*/review-history$' "$out"
+    assert_not "tm2: … and no marker appears" test -e "$hist/tune-last"
+  else
+    skip_test "tm2: running as root, chmod 555 does not stop writes"
+  fi
+}
+
+test_review_tune_docs_name_the_marker() {
+  local tune="$KIT/.claude/commands/review-tune.md"
+  assert "tm3: the marker is written only when every store was read" \
+    grep -qF 'step 1 read every store, none' "$tune"
+  assert "tm3: … whether edits were proposed, declined, or there were none" \
+    grep -qF 'whether you proposed edits, I declined them, or' "$tune"
+  assert "tm3: … a declined tune still reaches the marker step" grep -qF 'If I decline, or there is' "$tune"
+  assert "tm3: … never on a run that stopped early" grep -qF 'that stopped early writes none' "$tune"
+  assert "tm3: … and a failed write is reported" grep -qF 'report it as `tune marker NOT written`' "$tune"
+  assert "tm3: REVIEW.md names the marker" grep -qF '`review-history/tune-last`' "$KIT/REVIEW.md"
+  assert "tm3: … as the last tune once it exists, before any learnings.md commit" \
+    grep -qF 'Once the marker exists it alone is the last tune' "$KIT/REVIEW.md"
+}
+
 # A plateau in `missed` was read as proof of value the pipeline cannot reproduce,
 # before anyone had classified the misses by cause (#43).
 test_postmortem_plateau_is_a_hypothesis() {
@@ -5637,6 +5717,9 @@ run_tests \
   test_expanded_files_hold_no_positional_refs \
   test_postmortem_docs_record_and_route \
   test_review_tune_docs_read_postmortem_records \
+  test_review_tune_writes_the_tune_marker \
+  test_review_tune_marker_failures_are_reported \
+  test_review_tune_docs_name_the_marker \
   test_postmortem_plateau_is_a_hypothesis \
   test_replay_scores_reports_and_writes_nothing_else \
   test_replay_reads_check_runs \
