@@ -5,8 +5,12 @@ allowed-tools: Bash, Read, Grep, Glob, Edit, Write
 
 Reduce false-positive noise in the Codex review by learning from what we rejected.
 
-1. Gather rejection history. You need the verdict BODIES — commit subjects say
-   nothing about what was rejected. Read every verdict in the stores below.
+1. Gather rejection history. Before reading any store, run
+   `TZ=UTC0 date +%Y%m%d%H%M.%S` and note the literal value it prints: step 7
+   stamps the marker with it, so history archived while this run is open
+   still counts toward the next tune. You need the verdict BODIES — commit
+   subjects say nothing about what was rejected. Read every verdict in the
+   stores below.
    Report what each held: a file count, empty, missing, or unread with the
    error. An unread store means the history is unknown, not empty.
    - The clone's review history, shared by every worktree. Run
@@ -117,7 +121,38 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
 5. Show me the proposed diffs and wait for my approval before writing. Never
    suppress a class that produced a genuine FIX at any point. That includes a
    postmortem finding classed `missed` or `rejected-wrongly`, or one the
-   author `fixed` after CodeRabbit raised it.
+   author `fixed` after CodeRabbit raised it. If I decline, or there is
+   nothing to propose, go to step 7.
 
 6. If `learnings.md` is over ~60 lines after the edit, consolidate overlapping
    entries — a bloated learnings file dilutes every lens prompt.
+
+7. Record the tune. Write the marker only when step 1 read every store, none
+   of them unread or partly unread, and every approved edit to this repo was
+   written. It is written whether you proposed edits, I declined them, or
+   there was nothing to tune: it tells `tdk-2-push-review` that the history
+   up to now has been tuned, so its `review-tune: due` notice clears. A run
+   that stopped early writes none. The marker is an empty file in the review
+   history, never committed; its mtime is the time the last tune started.
+   Fill in `start` with the value step 1 noted:
+
+   ```bash
+   start=<the value step 1 noted>
+   printf '%s\n' "$start" | grep -Eqx '[0-9]{12}[.][0-9]{2}' \
+     || { echo "tune marker NOT written: start time '$start' is not YYYYMMDDhhmm.SS"; exit 1; }
+   common="$(git rev-parse --path-format=absolute --git-common-dir)" && [ -d "$common" ] \
+     || { echo "tune marker NOT written: no git common dir"; exit 1; }
+   hist="$common/review-history" marker="$common/review-history/tune-last"
+   mkdir -p "$hist" || { echo "tune marker NOT written: cannot create $hist"; exit 1; }
+   [ ! -d "$marker" ] || { echo "tune marker NOT written: $marker is a directory"; exit 1; }
+   tmp="$(mktemp "$hist/.tune-last.XXXXXX")" || { echo "tune marker NOT written: cannot create a file in $hist"; exit 1; }
+   TZ=UTC0 touch -t "$start" "$tmp" || { rm -f "$tmp"; echo "tune marker NOT written: cannot stamp it with start time '$start'"; exit 1; }
+   mv -f "$tmp" "$marker" || { rm -f "$tmp"; echo "tune marker NOT written: cannot replace $marker"; exit 1; }
+   echo "tune marker written: $marker"
+   ```
+
+   End the run with the line it prints. A `NOT written` line, or a non-zero
+   exit with no line, is a failure: report it as `tune marker NOT written`
+   with the error, never as a finished tune. When no marker is written
+   because a store was unread or the run stopped early, say
+   `tune marker NOT written: <reason>`.

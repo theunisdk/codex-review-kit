@@ -367,6 +367,17 @@ reviewed, and writes its own records there. `/review-tune` reads the verdicts
 and those records.
 `/review-tune` also reads `.review/archive/`, the store it read before v1.2.2,
 and counts a verdict found in more than one store once.
+At the end of a run that read every store, `/review-tune` touches the empty
+file `review-history/tune-last`, whether it proposed edits, they were
+declined, or there was nothing to tune. Its mtime is the time that run
+started, so history archived while it waited for approval still counts. It is
+the last tune, which
+`tdk-2-push-review` compares with the history to decide whether a tune is due.
+Once the marker exists it alone is the last tune; the last commit touching
+`.review/learnings.md` counts only in a clone with no marker, because other
+commits touch that file too.
+A run that stopped early or left a store unread does not touch it, and a
+failed write is reported as `tune marker NOT written`.
 
 **Coverage up** (`/review-postmortem <PR>`): CodeRabbit's findings are scored
 against the local verdict for the **first commit CodeRabbit reviewed**. It is
