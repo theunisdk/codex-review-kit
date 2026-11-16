@@ -12,8 +12,11 @@
 # routed to the hub, and drops the ones that are:
 #   - harvested: already in the ledger, review-history/lessons-harvested;
 #   - filed:     an issue on the hub, open or closed, carries its key;
-#   - recorded:  its record's `lessons` lists issues an interactive
-#                postmortem filed (once without the label, before this script);
+#   - recorded:  held back, not filed: its record's `lessons` lists issues an
+#                interactive postmortem filed, once without the label. `lessons`
+#                does not say which proposal each one is, so whoever approves
+#                the plan sets it to `duplicate` or `file`; until then every
+#                run offers it again and `file` neither files nor ledgers it;
 #   - duplicate: an open or closed `lesson` issue already holds the same line
 #                (word overlap >= the threshold);
 #   - in-hub:    the hub's current version of the file already holds it;
@@ -229,7 +232,10 @@ EOF
     | ($ledger[0] | map({(.): true}) | add // {}) as $done
     | reduce .[] as $p ({entries: [], seen: {}};
         if .seen[$p.key] then
-          .entries |= map(if .key == $p.key then .prs += [$p.pr] | .prs |= unique else . end)
+          .entries |= map(if .key == $p.key
+                          then .prs += [$p.pr] | .prs |= unique | .recorded = (.recorded + $p.recorded | unique)
+                               | if .decision == "file" and (.recorded | length) > 0 then .decision = "recorded" else . end
+                          else . end)
         else
           ($p.lines | toks) as $pt
           | ($iss | map(select(.keys | index($p.key)))[0]) as $marked
@@ -337,18 +343,17 @@ cmd_file() {
           || fail "ledger: filed $url but cannot record $k in $ledger — add it by hand, or the next run files it again"
         printf 'filed     %s %s\n' "$k" "$url" >> "$TMP/report"
         filed=$((filed + 1)) ;;
-      filed|recorded|duplicate|in-hub|repeated|decline)
+      filed|duplicate|in-hub|repeated|decline)
         local why
         why="$(printf '%s' "$e" | jq -r --arg d "$decision" --arg u "$url" '
           if $d == "filed" then "filed " + (if $u != "" then $u else .duplicate_of.url end)
           elif $d == "duplicate" then "duplicate " + (.duplicate_of.url // ("#" + (.duplicate_of.issue | tostring)))
           elif $d == "in-hub" then "in-hub " + .file
           elif $d == "decline" then "declined"
-          elif $d == "recorded" then "recorded " + (.recorded | map(tostring) | join(" "))
           else "repeated " + (.same_as // "?") end')" || fail "plan: cannot read entry $k"
         printf '%s\t%s\t%s\n' "$k" "$why" "$now" >> "$ledger" || fail "ledger: cannot record $k in $ledger"
         marked=$((marked + 1)) ;;
-      harvested|skip) skipped=$((skipped + 1)) ;;
+      harvested|skip|recorded) skipped=$((skipped + 1)) ;;
       *) fail "plan: entry $k has unknown decision '$decision'" ;;
     esac
   done < "$TMP/entries.jsonl"

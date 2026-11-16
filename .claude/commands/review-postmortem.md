@@ -429,7 +429,9 @@ reports its own update of the record on a third line,
      and the hub's current file. If one already proposes the same line, set
      the entry's `decision` to `duplicate` with `"duplicate_of": {"issue": <n>}`,
      and comment on that issue instead if this PR adds evidence. If the
-     hub's file already says it, set it to `in-hub`. Edit an
+     hub's file already says it, set it to `in-hub`. An entry `recorded`
+     comes from a record whose `lessons` already lists issues: open them and
+     set it to `duplicate` or `file`. Edit an
      entry's `title` or `lines` to strip anything that identifies a repo.
      Show me the plan with the other proposals. Set an entry I decline to
      `decline`, so no later harvest offers it again.

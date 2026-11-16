@@ -4124,7 +4124,8 @@ ls_world() { # ls_world <id> — a repo whose history holds seven records; $LS, 
   ls_record "$LSHIST" 2 '[{"route": "hub", "file": ".review/learnings-shared.md", "lines": "## WATCH  a retry loop that counts attempts but promises a time bound in its message ", "cause": "tracing"},
                           {"route": "hub", "file": "prompts/scope.md", "lines": "Hunt specifically for: a markdown anchor link that matches no heading in its target file", "cause": "wrong_lens"}]'
   ls_record "$LSHIST" 3 '[{"route": "hub", "file": "learnings-shared.md", "lines": "## WATCH a cache key built from the user id alone serves one tenant the data of another tenant", "cause": "tracing"},
-                          {"route": "hub", "file": "learnings-shared.md", "lines": "## WATCH an env file read to predict another process: the last assignment wins", "cause": "tracing"}]'
+                          {"route": "hub", "file": "learnings-shared.md", "lines": "## WATCH an env file read to predict another process: the last assignment wins", "cause": "tracing"},
+                          {"route": "hub", "file": "learnings-shared.md", "lines": "## WATCH a today judgement made with a clock captured before an await", "cause": "tracing"}]'
   ls_record "$LSHIST" 4 '[{"route": "hub", "file": "learnings-shared.md", "lines": "## WATCH (2026-10-27) a markdown anchor link that matches no heading in its target file", "cause": "tracing"}]'
   printf 'not a record\n' > "$LSHIST/postmortem-pr5.md"
   ls_record "$LSHIST" 6 '[{"route": "hub", "file": "../../user", "lines": "anything", "cause": "tracing"}]'
@@ -4148,7 +4149,7 @@ test_lessons_plan_dedupes_and_files_nothing() {
   run_lessons plan --out "$plan"; rc=$?
   assert "ls1: a plan with an unread record exits 2" test "$rc" -eq 2
   assert "ls1: … names the unread record" grep -qE '^unread .*/postmortem-pr5\.md: no JSON block$' "$LOG"
-  assert "ls1: … and its status line comes first" sh -c 'head -n1 "$1" | grep -q "^review-lessons: plan — records 7 (unread 2), hub proposals 7 (distinct 6)"' _ "$LOG"
+  assert "ls1: … and its status line comes first" sh -c 'head -n1 "$1" | grep -q "^review-lessons: plan — records 7 (unread 2), hub proposals 8 (distinct 6)"' _ "$LOG"
   assert "ls1: a proposal whose file is not a hub path never reaches gh" \
     sh -c 'grep -q "^unread .*/postmortem-pr6\.md: skipped a hub proposal whose file is not a hub path: ../../user" "$1" && ! grep -q "user" "$2"' _ "$LOG" "$LS/calls"
   assert "ls1: repo-routed proposals are not harvested" sh -c '! jq -e ".entries[] | select(.lines | contains(\"billing\"))" "$1"' _ "$plan"
@@ -4161,8 +4162,10 @@ test_lessons_plan_dedupes_and_files_nothing() {
   assert "ls1: a near-identical line in another record is repeated" test "$(ls_decision "$plan" '(2026-10-27) a markdown')" = repeated
   assert "ls1: the first of them is to be filed" test "$(ls_decision "$plan" 'Hunt specifically')" = file
   assert "ls1: … titled for its lens" jq -e '.entries[] | select(.lens == "scope") | .title | startswith("lesson(scope): a markdown anchor link")' "$plan"
-  assert "ls1: a record whose step 6 filed lessons is recorded, never refiled" \
+  assert "ls1: a record whose step 6 filed lessons is held back as recorded" \
     test "$(ls_decision "$plan" 'clock captured')" = recorded
+  assert "ls1: … and so is the same line from an earlier record that lists none" \
+    jq -e '[.entries[] | select(.lines | contains("clock captured"))] | length == 1 and .[0].prs == [3, 7] and .[0].decision == "recorded"' "$plan"
   assert_not "ls1: a plan files nothing" grep -q '^issue create' "$LS/calls"
   assert_not "ls1: … and writes no ledger" test -e "$LSHIST/lessons-harvested"
   run_lessons plan
@@ -4226,20 +4229,21 @@ test_lessons_file_once() {
   assert "ls3: … with the lesson label and its lens in the title" grep -qF 'issue create -R o/h --label lesson --title lesson(scope): ' "$LS/calls"
   assert "ls3: … a body naming the hub file and carrying its key" \
     jq -e '.[-1].body | contains("**Hub file:** `.review/prompts/scope.md`") and test("<!-- review-lesson: [0-9a-f]{16} -->")' "$LS/issues.json"
-  assert "ls3: every entry but a skip is in the ledger" test "$(wc -l < "$LSHIST/lessons-harvested")" -eq 6
+  assert "ls3: every entry but a recorded one is in the ledger" test "$(wc -l < "$LSHIST/lessons-harvested")" -eq 5
   assert "ls3: … the filed one with its URL" grep -qE $'\tfiled https://github.com/o/h/issues/501\t' "$LSHIST/lessons-harvested"
   assert "ls3: … and the declined one as declined" grep -qE $'\tdeclined\t' "$LSHIST/lessons-harvested"
 
   : > "$LS/calls"; cp "$LSHIST/lessons-harvested" "$WORK/ls3-ledger"
-  run_lessons file "$plan"
-  assert "ls3: filing the same approved plan again files nothing" sh -c '! grep -q "^issue create" "$1"' _ "$LS/calls"
+  run_lessons file "$plan"; rc=$?
+  assert "ls3: filing the same approved plan again succeeds" test "$rc" -eq 0
+  assert "ls3: … files nothing" sh -c '! grep -q "^issue create" "$1"' _ "$LS/calls"
   assert "ls3: … and adds nothing to the ledger" cmp -s "$LSHIST/lessons-harvested" "$WORK/ls3-ledger"
   rm "$LSHIST/lessons-harvested"
-  run_lessons file "$plan"
+  run_lessons file "$plan"; rc=$?
   assert "ls3: without the ledger, the issue's key still stops a refile of that plan" \
-    sh -c '! grep -q "^issue create" "$1" && grep -qE "	filed https://github.com/o/h/issues/501	" "$2"' _ "$LS/calls" "$LSHIST/lessons-harvested"
+    sh -c 'test "$3" -eq 0 && ! grep -q "^issue create" "$1" && grep -qE "	filed https://github.com/o/h/issues/501	" "$2"' _ "$LS/calls" "$LSHIST/lessons-harvested" "$rc"
   run_lessons plan --out "$plan"
-  assert "ls3: a second plan finds everything harvested" grep -q 'harvested 6, filed 0, recorded 0, duplicate 0, in-hub 0, repeated 0, to file 0' "$LOG"
+  assert "ls3: a second plan finds everything harvested but the recorded one" grep -q 'harvested 5, filed 0, recorded 1, duplicate 0, in-hub 0, repeated 0, to file 0' "$LOG"
   rm "$LSHIST/lessons-harvested"
   run_lessons plan --out "$plan"
   assert "ls3: … and with no ledger, a plan reads the key off the issue" \

@@ -132,8 +132,10 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
      hub proposal the ledger `review-history/lessons-harvested` already
      holds, one an issue on the hub already carries, one near-identical to
      an open or closed `lesson` issue or to the hub's current file, and one
-     repeated by another record, or whose record lists issues an interactive
-     postmortem already filed. It prints what it would file and writes the
+     repeated by another record. It holds back as `recorded` each one whose
+     record lists issues an interactive postmortem filed, since the list
+     does not say which proposal each issue is: open them and set the entry
+     to `duplicate` or `file`. It prints what it would file and writes the
      plan to a new `review-history/lessons-plan-<time>-<pid>.json`, named on
      its last line, filing nothing: note that path, since another worktree's
      tune writes its own. Its first
