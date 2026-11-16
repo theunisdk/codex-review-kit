@@ -430,7 +430,7 @@ hold in another repo goes to the hub as an issue labelled `lesson` on
 `theunisdk/codex-review-kit`, never as a commit in a local hub clone, and
 scrubbed of repo and client specifics since the hub is public. An unattended
 postmortem (`--record-only`) files nothing: it keeps its hub proposals in the
-record, and `/review-tune` harvests them with `scripts/review-lessons.sh`, which
+record, and `/review-tune` harvests them with `scripts/lib/review-lessons.sh`, which
 files each one once, after approval, and records it in
 `review-history/lessons-harvested`. The hub folds
 lessons into `learnings-shared.md` or a base prompt in a release. That routing
@@ -472,11 +472,11 @@ scripts/               all synced
   review.sh            the runner
   review-update.sh     pull the shared half from the hub
   review-sync.sh       open a sync PR when a newer release exists (run by the workflow)
-  review-lessons.sh    file postmortem hub proposals as hub `lesson` issues (run by /review-tune)
   review-install.sh    idempotent per-machine setup
   lib/common.sh        portable helpers (macOS bash 3.2 safe)
   lib/analyzers.sh     generic analyzer collection; defers to analyzers.local.sh
   lib/path-rules.sh    the CodeRabbit path_instructions that match the diff, for the lenses
+  lib/review-lessons.sh file postmortem hub proposals as hub `lesson` issues (run by /review-tune)
 .claude/               synced: /review, /review-tune, /review-postmortem + skill
 .codex/                synced: optional interactive-Codex skill
 .claude-plugin/        synced: plugin manifests

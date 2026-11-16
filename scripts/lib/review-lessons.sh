@@ -4,20 +4,23 @@
 # into `lesson` issues on the kit hub. /review-tune runs it; so does
 # /review-postmortem step 6 for one PR.
 #
-#   ./scripts/review-lessons.sh plan [--pr <n>] [--out <plan.json>]   # dry run
-#   ./scripts/review-lessons.sh file <plan.json>                      # file it
+#   ./scripts/lib/review-lessons.sh plan [--pr <n>] [--out <plan.json>]   # dry run
+#   ./scripts/lib/review-lessons.sh file <plan.json>                      # file it
 #
 # `plan` reads every postmortem record in this clone's review history
 # (<git common dir>/review-history/postmortem-pr*.md), takes each proposal
 # routed to the hub, and drops the ones that are:
 #   - harvested: already in the ledger, review-history/lessons-harvested;
 #   - filed:     an issue on the hub, open or closed, carries its key;
+#   - recorded:  its record's `lessons` lists issues an interactive
+#                postmortem filed (once without the label, before this script);
 #   - duplicate: an open or closed `lesson` issue already holds the same line
 #                (word overlap >= the threshold);
 #   - in-hub:    the hub's current version of the file already holds it;
 #   - repeated:  another proposal in this run says the same thing.
-# What is left is to be filed. It prints the plan and writes it as JSON; it
-# files nothing and writes no ledger. The plan's `title` and `lines` may be
+# What is left is to be filed. It prints the plan and writes it as JSON, to
+# --out or a new review-history/lessons-plan-<time>-<pid>.json named on its
+# last line; it files nothing and writes no ledger. The plan's `title` and `lines` may be
 # edited before `file`, to strip anything that identifies a repo.
 #
 # Word overlap finds a lesson repeated nearly word for word, not one reworded,
@@ -27,9 +30,10 @@
 # `decline` (never file it), or `skip`
 # (not this time: it comes back next run).
 #
-# `file` re-reads the hub's `lesson` issues, files each entry still marked
-# `file` whose key no issue carries yet, and appends every other entry's
-# outcome but `skip` to the ledger, so a second run files nothing new. Each
+# `file` takes a per-clone lock, re-reads the hub's `lesson` issues, files
+# each entry still marked `file` whose key no issue carries yet, and appends
+# every other entry's outcome but `skip` to the ledger, so a second run files
+# nothing new. Each
 # issue's body ends in `<!-- review-lesson: <key> -->`, which is how every
 # clone sees it.
 #
@@ -57,14 +61,16 @@ usage() { sed -n '7,8p' "$0" | sed 's/^# *//' >&2; exit 64; }
 command -v jq >/dev/null 2>&1 || fail "setup: jq is not on PATH"
 command -v gh >/dev/null 2>&1 || fail "setup: gh (GitHub CLI) is not on PATH"
 printf '%s\n' "$HUB" | grep -Eqx '[A-Za-z0-9._-]+/[A-Za-z0-9._-]+' || fail "setup: REVIEW_KIT_REPO '$HUB' is not owner/name"
-printf '%s\n' "$THRESHOLD" | grep -Eqx '0?\.[0-9]+|1(\.0+)?' || fail "setup: REVIEW_LESSONS_THRESHOLD '$THRESHOLD' is not a number in (0, 1]"
+printf '%s\n' "$THRESHOLD" | grep -Eqx '0?\.[0-9]+|1(\.0+)?' && awk -v t="$THRESHOLD" 'BEGIN { exit !(t + 0 > 0) }' \
+  || fail "setup: REVIEW_LESSONS_THRESHOLD '$THRESHOLD' is not a number in (0, 1]"
 
 if command -v sha256sum >/dev/null 2>&1; then sha() { sha256sum | cut -c1-16; }
 elif command -v shasum >/dev/null 2>&1; then sha() { shasum -a 256 | cut -c1-16; }
 else fail "setup: neither sha256sum nor shasum is on PATH"; fi
 
 TMP="$(mktemp -d)" || fail "setup: no temp dir"
-trap 'rm -rf "$TMP"' EXIT
+LOCK=""
+trap 'rm -rf "$TMP"; [ -z "$LOCK" ] || rmdir "$LOCK" 2>/dev/null' EXIT
 
 history_dir() {
   if [ -n "${REVIEW_LESSONS_HISTORY:-}" ]; then printf '%s\n' "$REVIEW_LESSONS_HISTORY"; return 0; fi
@@ -118,7 +124,7 @@ cmd_plan() {
     printf 'review-lessons: no-history — %s does not exist; nothing to harvest\n' "$hist"; exit 0
   fi
   [ -d "$hist" ] && [ -r "$hist" ] && [ -x "$hist" ] || fail "history: $hist is not a readable directory"
-  [ -n "$out" ] || out="$hist/lessons-plan.json"
+  [ -n "$out" ] || out="$hist/lessons-plan-$(TZ=UTC0 date +%Y%m%dT%H%M%SZ)-$$.json"
 
   # Records: each one's JSON block, or a reason it could not be read.
   local recs="$TMP/records.jsonl" unread="$TMP/unread" f j nrec=0
@@ -136,8 +142,9 @@ cmd_plan() {
     [ -n "$j" ] || { printf '%s\tno JSON block\n' "$f" >> "$unread"; continue; }
     printf '%s\n' "$j" | jq -ce --arg f "$f" '
         select(.schema == "review-postmortem/v1")
-        | if (.proposals // []) | type == "array" then {file: $f, pr, proposals: (.proposals // [])}
-          else error("proposals is not a list") end' >> "$recs" 2>/dev/null \
+        | if ((.proposals // []) | type == "array") and ((.lessons // []) | type == "array")
+          then {file: $f, pr, proposals: (.proposals // []), lessons: (.lessons // [])}
+          else error("proposals or lessons is not a list") end' >> "$recs" 2>/dev/null \
       || printf '%s\tJSON does not parse or is not a review-postmortem/v1 record\n' "$f" >> "$unread"
   done <<EOF
 $list
@@ -150,12 +157,19 @@ EOF
   local props="$TMP/props.jsonl" k p
   : > "$props"
   jq -sc 'sort_by(.pr | numbers) | .[] | . as $r | .proposals[] | select(type == "object" and .route == "hub")
-         | {pr: $r.pr, record: $r.file, file: (.file // "" | tostring),
+         | {pr: $r.pr, record: $r.file, recorded: $r.lessons, file: (.file // "" | tostring),
             lines: (.lines // "" | tostring), cause: (.cause // "" | tostring)}' "$recs" > "$TMP/raw.jsonl" \
     || fail "records: cannot read the proposals"
   while IFS= read -r p; do
     [ -n "$p" ] || continue
-    f="$(hub_file_path "$(printf '%s' "$p" | jq -r .file)")"
+    f="$(hub_file_path "$(printf '%s' "$p" | jq -r .file)")" || fail "records: cannot read a proposal"
+    # the path reaches `gh api`: a hub file path, never an API path of its own
+    if ! printf '%s\n' "$f" | grep -Eqx '[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*' || printf '%s\n' "$f" | grep -q '\.\.'; then
+      printf '%s\tskipped a hub proposal whose file is not a hub path: %s\n' "$(printf '%s' "$p" | jq -r .record)" "$f" >> "$unread"; continue
+    fi
+    if [ -z "$(printf '%s' "$p" | jq -r '.lines | gsub("\\s"; "")')" ]; then
+      printf '%s\tskipped a hub proposal with no lines for %s\n' "$(printf '%s' "$p" | jq -r .record)" "$f" >> "$unread"; continue
+    fi
     k="$(printf '%s' "$p" | jq -r --arg f "$f" '$f + "\n" + (.lines | ascii_downcase | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" "))' | sha)" \
       || fail "records: cannot key a proposal"
     printf '%s' "$p" | jq -c --arg k "$k" --arg f "$f" '. + {key: $k, file: $f}' >> "$props" || fail "records: cannot key a proposal"
@@ -229,6 +243,7 @@ EOF
                           hub_file_missing: ($hub[0] | has($p.file) and .[$p.file] == null),
                           decision: (if $done[$p.key] then "harvested"
                                      elif $marked then "filed"
+                                     elif ($p.recorded | length) > 0 then "recorded"
                                      elif ($near.score // 0) >= $t then "duplicate"
                                      elif $inhub >= $t then "in-hub"
                                      elif ($twin.score // 0) >= $t then "repeated"
@@ -236,7 +251,8 @@ EOF
                           duplicate_of: (if $marked then {issue: $marked.number, url: $marked.url}
                                          elif ($near.score // 0) >= $t then $near else null end),
                           hub_score: $inhub,
-                          same_as: (if ($twin.score // 0) >= $t then $twin.key else null end)}]
+                          same_as: (if ($twin.score // 0) >= $t then $twin.key else null end),
+                          recorded: $p.recorded}]
         end)
     | {schema: "review-lessons/v1", hub: $hubrepo, history: $hist, threshold: $t,
        records: $nrec, unread: ($unread | split("\n") | map(select(length > 0) | split("\t") | {file: .[0], why: .[1]})),
@@ -247,7 +263,7 @@ EOF
 
   jq -r '
     def n($d): [.entries[] | select(.decision == $d)] | length;
-    "review-lessons: plan — records \(.records) (unread \(.unread | length)), hub proposals \([.entries[].prs | length] | add // 0) (distinct \(.entries | length)): harvested \(n("harvested")), filed \(n("filed")), duplicate \(n("duplicate")), in-hub \(n("in-hub")), repeated \(n("repeated")), to file \(n("file"))",
+    "review-lessons: plan — records \(.records) (unread \(.unread | length)), hub proposals \([.entries[].prs | length] | add // 0) (distinct \(.entries | length)): harvested \(n("harvested")), filed \(n("filed")), recorded \(n("recorded")), duplicate \(n("duplicate")), in-hub \(n("in-hub")), repeated \(n("repeated")), to file \(n("file"))",
     (.unread[] | "unread \(.file): \(.why)"),
     (.entries[] | select(.decision == "file")
       | "file      \(.key) \(.title)  [PR \(.prs | map("#\(.)") | join(" "))]"
@@ -255,6 +271,7 @@ EOF
         + (if .hub_file_missing then "  (hub has no \(.file))" else "" end)),
     (.entries[] | select(.decision == "duplicate" or .decision == "filed")
       | "\(.decision) \(.key) = #\(.duplicate_of.issue)" + (if .duplicate_of.score then " \(.duplicate_of.score * 100 | floor)%" else "" end) + "  \(.title)"),
+    (.entries[] | select(.decision == "recorded") | "recorded  \(.key) its record lists \(.recorded | map(tostring) | join(" "))  \(.title)"),
     (.entries[] | select(.decision == "in-hub") | "in-hub    \(.key) \(.hub_score * 100 | floor)% in \(.file)  \(.title)"),
     (.entries[] | select(.decision == "repeated") | "repeated  \(.key) = \(.same_as)  \(.title)")
   ' "$out" || fail "plan: cannot print $out"
@@ -273,6 +290,10 @@ cmd_file() {
   local hist; hist="$(jq -r .history "$plan")"
   [ -d "$hist" ] && [ -w "$hist" ] || fail "ledger: $hist is not a writable directory"
   local ledger="$hist/lessons-harvested"
+  # one filer per clone: two worktrees filing at once would both see a key unfiled
+  mkdir "$hist/.lessons-lock" 2>/dev/null \
+    || fail "lock: another harvest is filing from this clone (if none is, remove $hist/.lessons-lock)"
+  LOCK="$hist/.lessons-lock"
   read_ledger "$hist" > "$TMP/ledger" || fail "ledger: $ledger exists but cannot be read"
 
   # The label lookup reads the same list the dedupe reads: an issue filed
@@ -312,17 +333,18 @@ cmd_file() {
         url="$(gh issue create -R "$HUB" --label "$LABEL" --title "$title" --body-file "$TMP/body.md" 2> "$TMP/create.err")" \
           || { cp "$TMP/body.md" "$hist/lesson-$k.md" 2>/dev/null
                fail "file: gh issue create for $k: $(head -n1 "$TMP/create.err" | cut -c1-200) (filed $filed before it; body saved to $hist/lesson-$k.md)"; }
-        printf '%s\tfiled %s\t%s\n' "$k" "$url" "$now" >> "$ledger" \
+        printf '%s\tfiled %s\t%s\n' "$k" "${url:-(gh printed no URL)}" "$now" >> "$ledger" \
           || fail "ledger: filed $url but cannot record $k in $ledger — add it by hand, or the next run files it again"
         printf 'filed     %s %s\n' "$k" "$url" >> "$TMP/report"
         filed=$((filed + 1)) ;;
-      filed|duplicate|in-hub|repeated|decline)
+      filed|recorded|duplicate|in-hub|repeated|decline)
         local why
         why="$(printf '%s' "$e" | jq -r --arg d "$decision" --arg u "$url" '
           if $d == "filed" then "filed " + (if $u != "" then $u else .duplicate_of.url end)
           elif $d == "duplicate" then "duplicate " + (.duplicate_of.url // ("#" + (.duplicate_of.issue | tostring)))
           elif $d == "in-hub" then "in-hub " + .file
           elif $d == "decline" then "declined"
+          elif $d == "recorded" then "recorded " + (.recorded | map(tostring) | join(" "))
           else "repeated " + (.same_as // "?") end')" || fail "plan: cannot read entry $k"
         printf '%s\t%s\t%s\n' "$k" "$why" "$now" >> "$ledger" || fail "ledger: cannot record $k in $ledger"
         marked=$((marked + 1)) ;;

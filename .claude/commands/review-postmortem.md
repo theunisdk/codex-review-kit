@@ -411,10 +411,10 @@ reports its own update of the record on a third line,
    stack-level lesson is a **hub lesson**: an issue on the kit hub, never a
    commit in a local hub clone. The hub is PUBLIC, so strip anything that
    identifies a repo, client, schema or incident. Hub lessons are filed by
-   `scripts/review-lessons.sh`, the same harvest `/review-tune` runs, so each
+   `scripts/lib/review-lessons.sh`, the same harvest `/review-tune` runs, so each
    one is filed once, whichever command gets to it first:
    - Before asking for approval, run
-     `bash scripts/review-lessons.sh plan --pr <n> --out <file>`. It reads
+     `bash scripts/lib/review-lessons.sh plan --pr <n> --out <file>`. It reads
      this PR's record, takes its hub proposals, and drops each one the
      ledger `review-history/lessons-harvested` already holds, one an issue on
      the hub already carries, one near-identical to an open or closed
@@ -433,7 +433,7 @@ reports its own update of the record on a third line,
      entry's `title` or `lines` to strip anything that identifies a repo.
      Show me the plan with the other proposals. Set an entry I decline to
      `decline`, so no later harvest offers it again.
-   - After approval, run `bash scripts/review-lessons.sh file <file>`. It
+   - After approval, run `bash scripts/lib/review-lessons.sh file <file>`. It
      re-reads the hub's `lesson` issues, files each entry still marked
      `file` with the `lesson` label (creating the label if the hub has
      none), and records every entry in the ledger. If the label or issue

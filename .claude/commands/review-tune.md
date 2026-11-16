@@ -24,8 +24,8 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
      holds `/review-postmortem` records, `postmortem-pr<n>.md`. They are not
      verdicts: read them in the next store. Its `runs/` directory holds each
      run's raw lens output for `/review-postmortem`, not verdicts: skip it.
-     So are `lessons-harvested`, `lessons-plan.json` and `lesson-*.md`,
-     which step 4 writes and reads.
+     So are `lessons-harvested`, `lessons-plan-*.json`, `lesson-*.md` and
+     `.lessons-lock`, which step 4 writes and reads.
    - The postmortem records. Each `postmortem-pr<n>.md` ends in a JSON block
      (`"schema": "review-postmortem/v1"`) listing every CodeRabbit finding on
      that PR, how it compared with the local verdict, and the author's
@@ -127,13 +127,16 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
    - **Harvest the postmortems' hub lessons.** An unattended
      `/review-postmortem --record-only` files nothing: it keeps each hub
      lesson it proposes in its record's `proposals`. Collect them with
-     `bash scripts/review-lessons.sh plan`, from the repo root. It reads
+     `bash scripts/lib/review-lessons.sh plan`, from the repo root. It reads
      every postmortem record in this clone's review history and drops each
      hub proposal the ledger `review-history/lessons-harvested` already
      holds, one an issue on the hub already carries, one near-identical to
      an open or closed `lesson` issue or to the hub's current file, and one
-     repeated by another record. It prints what it would file and writes the
-     plan to `review-history/lessons-plan.json`, filing nothing. Its first
+     repeated by another record, or whose record lists issues an interactive
+     postmortem already filed. It prints what it would file and writes the
+     plan to a new `review-history/lessons-plan-<time>-<pid>.json`, named on
+     its last line, filing nothing: note that path, since another worktree's
+     tune writes its own. Its first
      line is the status: `plan` (exit 2 when a record could not be read:
      name each `unread` line), `no-history`, or `failed` with the step and
      error. On `failed`, file nothing and report that line: a failed issue
@@ -154,12 +157,14 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
 5. Show me the proposed diffs and the harvest plan, and wait for my approval
    before writing or filing. Set each harvest entry I decline to `decline`,
    and one I want left for later to `skip`. Then file the plan with
-   `bash scripts/review-lessons.sh file <git common dir>/review-history/lessons-plan.json`.
-   It re-reads the hub's `lesson` issues, files each entry still marked
+   `bash scripts/lib/review-lessons.sh file <the plan's path>`. It takes a
+   lock shared by the clone's worktrees, re-reads the hub's `lesson` issues, files each entry still marked
    `file` with the `lesson` label, and records every entry but a `skip` in
    the ledger, so the next harvest offers none of them again. If the label
    or issue lookup fails it files nothing; if a filing fails it stops there,
-   saving that body to `review-history/lesson-<key>.md`. Report its status
+   saving that body to `review-history/lesson-<key>.md`. A `failed — lock`
+   means another harvest is filing; wait for it, or remove the lock it names
+   if none is running. Report its status
    line and each issue URL it prints. A failed harvest does not hold back
    the tune marker: the ledger, not the marker, says what was filed, so the
    next tune retries the rest. Never

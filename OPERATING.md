@@ -269,9 +269,9 @@ point of the design. Findings applied unverified are worse than no review.
   already has one, so hub improvements to it never arrive automatically. The
   same holds for the workflow: an existing copy is kept, edited or not.
 - **Everything else the kit installs is synced and will be overwritten** by the next
-  `review-update.sh`, silently: the six kit scripts (`scripts/review.sh`,
+  `review-update.sh`, silently: the five kit scripts (`scripts/review.sh`,
   `scripts/review-install.sh`, `scripts/review-update.sh`, `scripts/review-sync.sh`,
-  `scripts/review-lessons.sh`, `scripts/make-plugin.sh`) and
+  `scripts/make-plugin.sh`) and
   `scripts/lib/*.sh`; `.review/prompts/`, `.review/adjudication.md`,
   `.review/learnings-shared.md`, `.review/schema.json`, `.review/.gitignore`;
   `.claude/commands/`, `.claude/skills/pre-pr-review/`, `.codex/skills/`,

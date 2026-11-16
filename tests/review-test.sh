@@ -3963,7 +3963,7 @@ test_postmortem_docs_record_and_route() {
   assert "p2: a failed hub check files nothing" grep -qF 'On `failed`, do not file' "$pm"
   assert "p2: … with a local copy in the review history" grep -qF '<git common dir>/review-history/postmortem-pr<n>.md' "$pm"
   assert "p2: … recording findings the author rejected in a thread" grep -qF '`rejected` (a reply that' "$pm"
-  assert "p2: hub lessons are filed as issues, through the harvest" grep -qF 'bash scripts/review-lessons.sh file <file>' "$pm"
+  assert "p2: hub lessons are filed as issues, through the harvest" grep -qF 'bash scripts/lib/review-lessons.sh file <file>' "$pm"
   assert "p2: … creating the label when the hub has none" grep -qF 'creating the label if the hub has' "$pm"
   assert "p2: … and never filing without it" grep -qF 'an issue without the label is invisible' "$pm"
   assert_not "p2: no lesson is committed in a local hub clone" grep -qE 'Commit there|commit it in the hub' "$pm" "$tune"
@@ -4076,7 +4076,8 @@ test_review_tune_docs_name_the_marker() {
 # --record-only postmortems kept their hub proposals in the record and never
 # filed them. review-lessons.sh harvests them; a failed lookup must never read
 # as "no issues", and a second run must file nothing new.
-# gh stub: `issue list` prints $LS/issues.json (issues.err fails it);
+# gh stub: `issue list` prints $LS/issues.json, only its open issues unless
+# --state all (issues.err fails it);
 # `api …/contents/<path>` prints $LS/hub/<path>, else HTTP 404 (api.err fails
 # it); `label list` prints $LS/labels (label.err fails it); `issue create`
 # fails with create.err, else adds the issue to issues.json and prints its URL.
@@ -4085,7 +4086,10 @@ cat > "$WORK/ls-bin/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$LS/calls"
 case "$1 $2" in
-  "issue list") [ ! -f "$LS/issues.err" ] || { cat "$LS/issues.err" >&2; exit 1; }; cat "$LS/issues.json" ;;
+  "issue list")
+    [ ! -f "$LS/issues.err" ] || { cat "$LS/issues.err" >&2; exit 1; }
+    state=open prev=""; for a in "$@"; do [ "$prev" != --state ] || state="$a"; prev="$a"; done
+    case "$state" in all) cat "$LS/issues.json" ;; *) jq 'map(select(.state == "OPEN"))' "$LS/issues.json" ;; esac ;;
   "label list") [ ! -f "$LS/label.err" ] || { cat "$LS/label.err" >&2; exit 1; }; cat "$LS/labels" 2>/dev/null ;;
   "label create") echo lesson > "$LS/labels" ;;
   "issue create")
@@ -4112,7 +4116,7 @@ ls_record() { # ls_record <hist> <pr> <proposals JSON>
     printf '{"schema": "review-postmortem/v1", "pr": %s, "status": "scored", "proposals": %s, "lessons": []}\n' "$2" "$3"
     printf '```\n'; } > "$1/postmortem-pr$2.md"
 }
-ls_world() { # ls_world <id> — a repo whose history holds five records; $LS, $LSREPO, $LSHIST
+ls_world() { # ls_world <id> — a repo whose history holds seven records; $LS, $LSREPO, $LSHIST
   LSREPO="$WORK/$1"; LS="$WORK/$1-gh"
   make_repo "$LSREPO"; LSHIST="$(history_dir "$LSREPO")"; mkdir -p "$LSHIST" "$LS/hub/.review/prompts"
   ls_record "$LSHIST" 1 '[{"route": "hub", "file": "learnings-shared.md", "lines": "## WATCH a retry loop that counts attempts but promises a time bound in its message", "cause": "tracing"},
@@ -4123,75 +4127,98 @@ ls_world() { # ls_world <id> — a repo whose history holds five records; $LS, $
                           {"route": "hub", "file": "learnings-shared.md", "lines": "## WATCH an env file read to predict another process: the last assignment wins", "cause": "tracing"}]'
   ls_record "$LSHIST" 4 '[{"route": "hub", "file": "learnings-shared.md", "lines": "## WATCH (2026-10-27) a markdown anchor link that matches no heading in its target file", "cause": "tracing"}]'
   printf 'not a record\n' > "$LSHIST/postmortem-pr5.md"
+  ls_record "$LSHIST" 6 '[{"route": "hub", "file": "../../user", "lines": "anything", "cause": "tracing"}]'
+  ls_record "$LSHIST" 7 '[{"route": "hub", "file": "learnings-shared.md", "lines": "## WATCH a today judgement made with a clock captured before an await", "cause": "tracing"}]'
+  jq '.lessons = ["https://github.com/o/h/issues/90"]' <(sed -n '/^```json$/,/^```$/p' "$LSHIST/postmortem-pr7.md" | sed '1d;$d') > "$LS/r7.json"
+  { printf '```json\n'; cat "$LS/r7.json"; printf '```\n'; } > "$LSHIST/postmortem-pr7.md"
   jq -n '[{number: 77, title: "lesson(learnings-shared): cache keys", state: "CLOSED", url: "https://github.com/o/h/issues/77",
            body: "**Proposed line:**\n\n```markdown\n- a cache key built from the user id alone serves one tenant the data of another\n```\n"}]' > "$LS/issues.json"
   printf '## WATCH\n- an env file read to predict another process: the last assignment wins.\n' > "$LS/hub/.review/learnings-shared.md"
   printf '# scope\n' > "$LS/hub/.review/prompts/scope.md"
   echo lesson > "$LS/labels"
 }
-run_lessons() { # run_lessons <args…> — scripts/review-lessons.sh in $LSREPO; output in $LOG
+run_lessons() { # run_lessons <args…> — scripts/lib/review-lessons.sh in $LSREPO; output in $LOG
   LOG="$LS.log"
-  ( cd "$LSREPO" && PATH="$WORK/ls-bin:$PATH" LS="$LS" REVIEW_KIT_REPO=o/h bash "$KIT/scripts/review-lessons.sh" "$@" ) > "$LOG" 2>&1
+  ( cd "$LSREPO" && PATH="$WORK/ls-bin:$PATH" LS="$LS" REVIEW_KIT_REPO=o/h bash "$KIT/scripts/lib/review-lessons.sh" "$@" ) > "$LOG" 2>&1
 }
 ls_decision() { jq -r --arg l "$2" '.entries[] | select(.lines | contains($l)) | .decision' "$1"; }
 
 test_lessons_plan_dedupes_and_files_nothing() {
-  ls_world ls1; local plan="$LSHIST/lessons-plan.json" rc
-  run_lessons plan; rc=$?
+  ls_world ls1; local plan="$WORK/ls1-plan.json" rc
+  run_lessons plan --out "$plan"; rc=$?
   assert "ls1: a plan with an unread record exits 2" test "$rc" -eq 2
   assert "ls1: … names the unread record" grep -qE '^unread .*/postmortem-pr5\.md: no JSON block$' "$LOG"
-  assert "ls1: … and its status line comes first" sh -c 'head -n1 "$1" | grep -q "^review-lessons: plan — records 5 (unread 1), hub proposals 6 (distinct 5)"' _ "$LOG"
+  assert "ls1: … and its status line comes first" sh -c 'head -n1 "$1" | grep -q "^review-lessons: plan — records 7 (unread 2), hub proposals 7 (distinct 6)"' _ "$LOG"
+  assert "ls1: a proposal whose file is not a hub path never reaches gh" \
+    sh -c 'grep -q "^unread .*/postmortem-pr6\.md: skipped a hub proposal whose file is not a hub path: ../../user" "$1" && ! grep -q "user" "$2"' _ "$LOG" "$LS/calls"
   assert "ls1: repo-routed proposals are not harvested" sh -c '! jq -e ".entries[] | select(.lines | contains(\"billing\"))" "$1"' _ "$plan"
   assert "ls1: one line from two records is one entry naming both PRs" \
     jq -e '[.entries[] | select(.lines | contains("retry loop"))] | length == 1 and .[0].prs == [1, 2] and .[0].decision == "file"' "$plan"
   assert "ls1: a line a closed lesson issue holds is a duplicate" test "$(ls_decision "$plan" 'cache key')" = duplicate
   assert "ls1: … naming the issue" jq -e '.entries[] | select(.decision == "duplicate") | .duplicate_of.issue == 77' "$plan"
+  assert "ls1: … read with --state all" grep -q '^issue list .*--state all' "$LS/calls"
   assert "ls1: a line the hub file holds is in-hub" test "$(ls_decision "$plan" 'env file')" = in-hub
   assert "ls1: a near-identical line in another record is repeated" test "$(ls_decision "$plan" '(2026-10-27) a markdown')" = repeated
   assert "ls1: the first of them is to be filed" test "$(ls_decision "$plan" 'Hunt specifically')" = file
   assert "ls1: … titled for its lens" jq -e '.entries[] | select(.lens == "scope") | .title | startswith("lesson(scope): a markdown anchor link")' "$plan"
+  assert "ls1: a record whose step 6 filed lessons is recorded, never refiled" \
+    test "$(ls_decision "$plan" 'clock captured')" = recorded
   assert_not "ls1: a plan files nothing" grep -q '^issue create' "$LS/calls"
   assert_not "ls1: … and writes no ledger" test -e "$LSHIST/lessons-harvested"
+  run_lessons plan
+  assert "ls1: without --out the plan gets its own file, named on the last line" \
+    sh -c 'f="$(tail -n1 "$1" | sed -n "s/^plan written: //p")"; case "$f" in "$2"/lessons-plan-*.json) test -s "$f" ;; *) exit 1 ;; esac' _ "$LOG" "$LSHIST"
+  ( cd "$LSREPO" && PATH="$WORK/ls-bin:$PATH" LS="$LS" REVIEW_KIT_REPO=o/h REVIEW_LESSONS_THRESHOLD=.0 \
+      bash "$KIT/scripts/lib/review-lessons.sh" plan --out "$plan" ) > "$LOG" 2>&1; rc=$?
+  assert "ls1: a zero threshold, which would mark everything a duplicate, is refused" \
+    sh -c 'test "$1" -eq 1 && grep -q "failed — setup: REVIEW_LESSONS_THRESHOLD" "$2"' _ "$rc" "$LOG"
 }
 
 test_lessons_failed_lookups_file_nothing() {
-  ls_world ls2; local rc
+  ls_world ls2; local plan="$WORK/ls2-plan.json" rc
   echo "HTTP 502: Bad Gateway" > "$LS/issues.err"
-  run_lessons plan; rc=$?
+  run_lessons plan --out "$plan"; rc=$?
   assert "ls2: a failed issue list fails the plan" test "$rc" -eq 1
   assert "ls2: … saying so, never as no issues" grep -qx 'review-lessons: failed — issues: HTTP 502: Bad Gateway' "$LOG"
-  assert_not "ls2: … and writes no plan" test -e "$LSHIST/lessons-plan.json"
+  assert_not "ls2: … and writes no plan" test -e "$plan"
   rm "$LS/issues.err"
   jq -n '[range(1000) | {number: ., title: "t", body: "", state: "OPEN", url: "u"}]' > "$LS/many.json"
   cp "$LS/issues.json" "$LS/few.json"; cp "$LS/many.json" "$LS/issues.json"
-  run_lessons plan; rc=$?
+  run_lessons plan --out "$plan"; rc=$?
   assert "ls2: an issue list at its cap fails the plan" sh -c 'test "$1" -eq 1 && grep -q "failed — issues: .*cap" "$2"' _ "$rc" "$LOG"
   cp "$LS/few.json" "$LS/issues.json"
   echo "HTTP 403: rate limit" > "$LS/api.err"
-  run_lessons plan; rc=$?
+  run_lessons plan --out "$plan"; rc=$?
   assert "ls2: a failed hub-file read fails the plan" sh -c 'test "$1" -eq 1 && grep -q "^review-lessons: failed — hub file: " "$2"' _ "$rc" "$LOG"
   rm "$LS/api.err"; rm "$LS/hub/.review/prompts/scope.md"
-  run_lessons plan
+  run_lessons plan --out "$plan"
   assert "ls2: a hub file that does not exist is noted, not a failure" grep -q '(hub has no .review/prompts/scope.md)' "$LOG"
 
-  run_lessons plan
   echo "HTTP 502: Bad Gateway" > "$LS/issues.err"
-  run_lessons file "$LSHIST/lessons-plan.json"; rc=$?
+  run_lessons file "$plan"; rc=$?
   assert "ls2: a failed issue list at filing time files nothing" \
     sh -c 'test "$1" -eq 1 && ! grep -q "^issue create" "$2" && ! test -e "$3"' _ "$rc" "$LS/calls" "$LSHIST/lessons-harvested"
   rm "$LS/issues.err"; echo "HTTP 500" > "$LS/label.err"
-  run_lessons file "$LSHIST/lessons-plan.json"; rc=$?
+  run_lessons file "$plan"; rc=$?
   assert "ls2: a failed label lookup files nothing, never an unlabelled issue" \
     sh -c 'test "$1" -eq 1 && grep -q "failed — label: " "$2" && ! grep -q "^issue create" "$3"' _ "$rc" "$LOG" "$LS/calls"
+  rm "$LS/label.err"; mkdir "$LSHIST/.lessons-lock"
+  run_lessons file "$plan"; rc=$?
+  assert "ls2: a held lock files nothing" \
+    sh -c 'test "$1" -eq 1 && grep -q "failed — lock: another harvest is filing" "$2" && ! grep -q "^issue create" "$3"' _ "$rc" "$LOG" "$LS/calls"
+  assert "ls2: … and leaves the other filer's lock alone" test -d "$LSHIST/.lessons-lock"
+  rmdir "$LSHIST/.lessons-lock"
+  run_lessons file "$plan"
+  assert "ls2: a filing run releases its lock" sh -c '! test -e "$1/.lessons-lock"' _ "$LSHIST"
 
   mkdir -p "$WORK/ls2-none"; git init -q "$WORK/ls2-none"
-  ( cd "$WORK/ls2-none" && PATH="$WORK/ls-bin:$PATH" LS="$LS" REVIEW_KIT_REPO=o/h bash "$KIT/scripts/review-lessons.sh" plan ) > "$LOG" 2>&1; rc=$?
+  ( cd "$WORK/ls2-none" && PATH="$WORK/ls-bin:$PATH" LS="$LS" REVIEW_KIT_REPO=o/h bash "$KIT/scripts/lib/review-lessons.sh" plan ) > "$LOG" 2>&1; rc=$?
   assert "ls2: no review history is its own status" sh -c 'test "$1" -eq 0 && grep -q "^review-lessons: no-history — " "$2"' _ "$rc" "$LOG"
 }
 
 test_lessons_file_once() {
-  ls_world ls3; local plan="$LSHIST/lessons-plan.json" rc
-  run_lessons plan
+  ls_world ls3; local plan="$WORK/ls3-plan.json" rc
+  run_lessons plan --out "$plan"
   jq '(.entries[] | select(.lines | contains("retry loop")) | .decision) = "decline"' "$plan" > "$plan.tmp" && mv "$plan.tmp" "$plan"
   run_lessons file "$plan"; rc=$?
   assert "ls3: filing succeeds" test "$rc" -eq 0
@@ -4199,25 +4226,29 @@ test_lessons_file_once() {
   assert "ls3: … with the lesson label and its lens in the title" grep -qF 'issue create -R o/h --label lesson --title lesson(scope): ' "$LS/calls"
   assert "ls3: … a body naming the hub file and carrying its key" \
     jq -e '.[-1].body | contains("**Hub file:** `.review/prompts/scope.md`") and test("<!-- review-lesson: [0-9a-f]{16} -->")' "$LS/issues.json"
-  assert "ls3: every entry but a skip is in the ledger" test "$(wc -l < "$LSHIST/lessons-harvested")" -eq 5
+  assert "ls3: every entry but a skip is in the ledger" test "$(wc -l < "$LSHIST/lessons-harvested")" -eq 6
   assert "ls3: … the filed one with its URL" grep -qE $'\tfiled https://github.com/o/h/issues/501\t' "$LSHIST/lessons-harvested"
   assert "ls3: … and the declined one as declined" grep -qE $'\tdeclined\t' "$LSHIST/lessons-harvested"
-  : > "$LS/calls"
-  run_lessons plan
-  assert "ls3: a second plan finds everything harvested" grep -q 'harvested 5, filed 0, duplicate 0, in-hub 0, repeated 0, to file 0' "$LOG"
-  run_lessons file "$plan"
-  assert "ls3: … and a second filing files nothing" sh -c '! grep -q "^issue create" "$1"' _ "$LS/calls"
 
-  # another clone, with its own ledger, sees the issue by its key
+  : > "$LS/calls"; cp "$LSHIST/lessons-harvested" "$WORK/ls3-ledger"
+  run_lessons file "$plan"
+  assert "ls3: filing the same approved plan again files nothing" sh -c '! grep -q "^issue create" "$1"' _ "$LS/calls"
+  assert "ls3: … and adds nothing to the ledger" cmp -s "$LSHIST/lessons-harvested" "$WORK/ls3-ledger"
   rm "$LSHIST/lessons-harvested"
-  run_lessons plan
-  assert "ls3: without the ledger the issue's key still stops a refile" \
+  run_lessons file "$plan"
+  assert "ls3: without the ledger, the issue's key still stops a refile of that plan" \
+    sh -c '! grep -q "^issue create" "$1" && grep -qE "	filed https://github.com/o/h/issues/501	" "$2"' _ "$LS/calls" "$LSHIST/lessons-harvested"
+  run_lessons plan --out "$plan"
+  assert "ls3: a second plan finds everything harvested" grep -q 'harvested 6, filed 0, recorded 0, duplicate 0, in-hub 0, repeated 0, to file 0' "$LOG"
+  rm "$LSHIST/lessons-harvested"
+  run_lessons plan --out "$plan"
+  assert "ls3: … and with no ledger, a plan reads the key off the issue" \
     test "$(ls_decision "$plan" 'Hunt specifically')" = filed
 }
 
 test_lessons_failed_create_stops_and_keeps_the_body() {
-  ls_world ls4; local plan="$LSHIST/lessons-plan.json" rc
-  run_lessons plan
+  ls_world ls4; local plan="$WORK/ls4-plan.json" rc
+  run_lessons plan --out "$plan"
   echo "HTTP 422: Validation Failed" > "$LS/create.err"
   run_lessons file "$plan"; rc=$?
   assert "ls4: a failed create fails the run" test "$rc" -eq 1
@@ -4228,11 +4259,11 @@ test_lessons_failed_create_stops_and_keeps_the_body() {
 
 test_lessons_docs_wire_the_harvest() {
   local tune="$KIT/.claude/commands/review-tune.md" pm="$KIT/.claude/commands/review-postmortem.md"
-  assert "ls5: /review-tune harvests the postmortem proposals" grep -qF 'bash scripts/review-lessons.sh plan' "$tune"
-  assert "ls5: … files them only after approval" grep -qF 'bash scripts/review-lessons.sh file' "$tune"
+  assert "ls5: /review-tune harvests the postmortem proposals" grep -qF 'bash scripts/lib/review-lessons.sh plan' "$tune"
+  assert "ls5: … files them only after approval" grep -qF 'bash scripts/lib/review-lessons.sh file' "$tune"
   assert "ls5: … and a failed lookup is never no issues" grep -qF 'a failed issue' "$tune"
-  assert "ls5: postmortem step 6 files through the same script" grep -qF 'scripts/review-lessons.sh plan --pr <n>' "$pm"
-  assert "ls5: the updater syncs the script" grep -qF 'cp "$KIT"/scripts/review-lessons.sh scripts/' "$KIT/scripts/review-update.sh"
+  assert "ls5: postmortem step 6 files through the same script" grep -qF 'scripts/lib/review-lessons.sh plan --pr <n>' "$pm"
+  assert "ls5: the script ships where every released updater copies it" grep -qF 'cp "$KIT"/scripts/lib/*.sh scripts/lib/' "$KIT/scripts/review-update.sh"
 }
 
 # A plateau in `missed` was read as proof of value the pipeline cannot reproduce,
