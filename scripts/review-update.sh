@@ -8,6 +8,7 @@
 #
 #   synced (overwritten):  scripts/review.sh, scripts/review-install.sh,
 #                          scripts/review-update.sh, scripts/review-sync.sh,
+#                          scripts/review-lessons.sh,
 #                          scripts/make-plugin.sh, scripts/lib/*.sh,
 #                          .review/prompts/, schema.json, adjudication.md,
 #                          learnings-shared.md, .gitignore,
@@ -204,6 +205,10 @@ cp "$KIT"/scripts/review.sh "$KIT"/scripts/review-install.sh \
 if [ -f "$KIT"/scripts/review-sync.sh ]; then
   cp "$KIT"/scripts/review-sync.sh scripts/
   chmod +x scripts/review-sync.sh
+fi
+if [ -f "$KIT"/scripts/review-lessons.sh ]; then
+  cp "$KIT"/scripts/review-lessons.sh scripts/
+  chmod +x scripts/review-lessons.sh
 fi
 cp "$KIT"/scripts/lib/*.sh scripts/lib/
 cp "$KIT"/.review/prompts/*.md .review/prompts/

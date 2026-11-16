@@ -10,7 +10,8 @@ CodeRabbit has reviewed the PR: $ARGUMENTS
 The PR is `$ARGUMENTS` without `--record-only` and `--replay <dir>`; with no
 PR given, use this branch's PR. `--record-only` is for unattended callers: stop
 after step 5 and list the proposed edits in the report, without waiting for
-approval or filing anything. `--replay <dir>` is only for
+approval or filing anything; `/review-tune` later harvests the record's hub
+proposals. `--replay <dir>` is only for
 `scripts/review-replay.sh`, and implies `--record-only`: follow **Replay mode**
 at the end, which posts nothing.
 
@@ -409,26 +410,37 @@ reports its own update of the record on a third line,
    repo-specific lesson is an edit to this repo, as above. A generic or
    stack-level lesson is a **hub lesson**: an issue on the kit hub, never a
    commit in a local hub clone. The hub is PUBLIC, so strip anything that
-   identifies a repo, client, schema or incident. After approval, for each
-   hub lesson:
-   - Check the hub's current file so you do not propose a line it already has:
-     `gh api -H 'Accept: application/vnd.github.raw' repos/theunisdk/codex-review-kit/contents/<path>`.
-     Search for an existing issue with
-     `gh issue list -R theunisdk/codex-review-kit --label lesson --state open --search "<words>"`;
-     if one proposes the same line, comment on it instead. If either check
-     fails, do not file: a duplicate is worse than a delay. Save the body and
-     report `hub lesson NOT filed` with the error.
-   - Check the label with
-     `gh label list -R theunisdk/codex-review-kit --search lesson --json name -q '.[].name'`.
-     If the list has no `lesson`, run
-     `gh label create lesson -R theunisdk/codex-review-kit --description "Review lesson routed from a spoke"`.
-     If that fails, file the issue without a label and say so. If the list
-     call fails, that is a failed label lookup, not a missing label: say so,
-     and file without a label.
-   - File it: `gh issue create -R theunisdk/codex-review-kit --label lesson --title "lesson(<lens or learnings-shared>): <defect class>" --body-file <file>`.
-     Without the label, run the same command with no `--label lesson`. The body names the hub file and the proposed lines, the defect class, and
-     the cause. If filing fails, save the body to a file, print its path and
-     the command, and report `hub lesson NOT filed`.
+   identifies a repo, client, schema or incident. Hub lessons are filed by
+   `scripts/review-lessons.sh`, the same harvest `/review-tune` runs, so each
+   one is filed once, whichever command gets to it first:
+   - Before asking for approval, run
+     `bash scripts/review-lessons.sh plan --pr <n> --out <file>`. It reads
+     this PR's record, takes its hub proposals, and drops each one the
+     ledger `review-history/lessons-harvested` already holds, one an issue on
+     the hub already carries, one near-identical to an open or closed
+     `lesson` issue, and one already in the hub's current file. It prints
+     what it would file and writes the plan, filing nothing. Its first line
+     is the status. On `failed`, do not file: a duplicate is worse than a
+     delay. Report `hub lesson NOT filed` with that line.
+   - The plan catches a lesson repeated nearly word for word, not one
+     reworded. Read each entry still marked `file` against the hub's
+     `lesson` issues
+     (`gh issue list -R theunisdk/codex-review-kit --label lesson --state all`)
+     and the hub's current file. If one already proposes the same line, set
+     the entry's `decision` to `duplicate` with `"duplicate_of": {"issue": <n>}`,
+     and comment on that issue instead if this PR adds evidence. If the
+     hub's file already says it, set it to `in-hub`. Edit an
+     entry's `title` or `lines` to strip anything that identifies a repo.
+     Show me the plan with the other proposals. Set an entry I decline to
+     `decline`, so no later harvest offers it again.
+   - After approval, run `bash scripts/review-lessons.sh file <file>`. It
+     re-reads the hub's `lesson` issues, files each entry still marked
+     `file` with the `lesson` label (creating the label if the hub has
+     none), and records every entry in the ledger. If the label or issue
+     lookup fails, it files nothing: an issue without the label is invisible
+     to the next run's check. On `failed`, report `hub lesson NOT filed`
+     with that line; a filing that failed leaves its body in the review
+     history, and the line names the file.
 
    Add the filed issue URLs to `lessons` and update the PR comment and local
    copy the same way, then print the `lessons` line. The hub's maintainer

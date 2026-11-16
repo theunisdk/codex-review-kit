@@ -428,7 +428,11 @@ Both commands **route** each lesson before writing it: repo-specific lessons
 land in the repo's `learnings.md` or `prompts.local/`. Anything that would
 hold in another repo goes to the hub as an issue labelled `lesson` on
 `theunisdk/codex-review-kit`, never as a commit in a local hub clone, and
-scrubbed of repo and client specifics since the hub is public. The hub folds
+scrubbed of repo and client specifics since the hub is public. An unattended
+postmortem (`--record-only`) files nothing: it keeps its hub proposals in the
+record, and `/review-tune` harvests them with `scripts/review-lessons.sh`, which
+files each one once, after approval, and records it in
+`review-history/lessons-harvested`. The hub folds
 lessons into `learnings-shared.md` or a base prompt in a release. That routing
 is what makes a bug found in one repo teach every other repo on its first
 `review-update.sh` after that release.
@@ -468,6 +472,7 @@ scripts/               all synced
   review.sh            the runner
   review-update.sh     pull the shared half from the hub
   review-sync.sh       open a sync PR when a newer release exists (run by the workflow)
+  review-lessons.sh    file postmortem hub proposals as hub `lesson` issues (run by /review-tune)
   review-install.sh    idempotent per-machine setup
   lib/common.sh        portable helpers (macOS bash 3.2 safe)
   lib/analyzers.sh     generic analyzer collection; defers to analyzers.local.sh
