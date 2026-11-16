@@ -13,6 +13,18 @@ before this file dilutes the prompts it feeds.
 -->
 
 ## SUPPRESS
+- A finding that a change breaks already-installed clients, in-flight jobs, or
+  rows written under the old behaviour is a false positive when the function,
+  argument, field or state it names is absent from the target branch: it was
+  added on this branch and has never shipped. Check the target branch (e.g.
+  `git grep <name> origin/<default>`) before raising it. Scoped re-reviews diff
+  against an intermediate branch commit, so branch-new code looks pre-existing there.
+- When the branch is one task of a written multi-task plan and the PRs land in
+  the plan's order, a finding that this diff documents, calls or relies on a
+  command, check, file or behaviour that a later task of the same plan builds is
+  not a defect of this diff. Open the plan before raising it: report it only when
+  no task in the plan builds the missing piece, or the plan lets something deploy
+  before it.
 
 ## WATCH
 - stack:eslint9 — eslint 9 removed all non-core output formatters (`unix`,
@@ -62,3 +74,15 @@ before this file dilutes the prompts it feeds.
   that also admits a harmless no-op, a `file:line` citation the same diff moved.
   For every guarantee, cause or condition a doc or user-facing message states,
   list the code paths that produce it and check the claim holds on each.
+- 2026-11-16: docs, specs and messages stated an external system's facts from
+  memory: our own safety margin named as the service's limit, a granted OAuth
+  scope set equated with the APIs it reaches (a broad scope is accepted by
+  sibling APIs too), a payload field assumed present where the reference marks it
+  optional, an enum missing a documented alias. Check each limit, scope, field or
+  value attributed to a third party against that party's documented value.
+- 2026-11-16: values that must name the same thing were chosen independently: a
+  credential and the host or endpoint it is sent to, an ARN beside a URL for one
+  resource, a minted identity and the one expected. Find where each is chosen.
+  When one path (a deploy script) checks that they pair, every other path that
+  picks them needs the same check, and a broker that hands out a credential from
+  a store another party can re-provision checks the credential's identity first.

@@ -21,7 +21,11 @@ Hunt specifically for:
   an item or an explanatory caveat added to, removed from or reordered in one
   enumeration (a README list, CLI usage/help text, a menu, a dispatch table, a
   per-check doc) but not its parallel ones: find every place the set is spelled
-  out and compare them.
+  out and compare them. The same holds for siblings: a field added to one emitter
+  of an event or log line but not the others (early refusals, error paths), a
+  defect fixed in one of a family of rules but not in the others the change adds
+  or moves, an alias or old key accepted by one step but not by a later step that
+  looks the item up.
 - **Prose the change falsified** — for each behaviour the diff changes (a
   condition, exit code, permission, rollout order, the source of an event or
   log line), grep the docs, README, help text, specs and comments, the edited
@@ -29,7 +33,16 @@ Hunt specifically for:
   each still holds. Check each absolute claim a doc or message makes (only,
   every, never, no file, fails closed, costs less) against the code or values it
   describes and against the same document's other sections; a repair hint must
-  run as written.
+  run as written. A sentence that restates what code does (which items count,
+  which failures stop a service, what a check verifies) must name each of the
+  code's conditions, failure and override paths included, not a subset. When a
+  change adds a second variant (platform, provider, backend), find prose that
+  still describes one ("all of them", "the same steps") and check each step holds
+  for the new variant. In a plan, spec or prompt, check each example, recipe and
+  lenient rule (a warning, an exemption, a fallback, "empty means none") against
+  the strict rules the same document states for the same input, each signature or
+  type one section defines against every other section's use, and each command
+  example against its parser.
 - **Debug residue** — `console.log`, `print`, `dbg!`, commented-out code, a
   hardcoded local URL, credentials in a fixture, `.only` or `.skip` left on a test,
   a temporarily loosened timeout or assertion.

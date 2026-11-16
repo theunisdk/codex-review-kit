@@ -396,10 +396,14 @@ reports its own update of the record on a third line,
      create one: `gh pr comment <n> --body-file <file>`. If either lookup
      fails, do not create a comment, because it could duplicate one: the
      comment is `NOT posted`, with the error.
-   - **Local copy** for `/review-tune`: write the same body to
-     `<git common dir>/review-history/postmortem-pr<n>.md` through a temporary
-     file and `mv`, so a re-run replaces it. Create the directory if needed. If
-     it cannot be written, the local copy is `NOT written`, with the error.
+   - **Local copy** for `/review-tune`: resolve the common dir to an absolute
+     path first, with `git rev-parse --path-format=absolute --git-common-dir`
+     run on its own; if it fails, the local copy is `NOT written`, with the
+     error. Write the same body to `<that dir>/review-history/postmortem-pr<n>.md`
+     through `<that path>.tmp.$$`, written with a plain redirect so it takes
+     the umask's mode (not `mktemp`, which makes it `0600`), then `mv`, so a
+     re-run replaces it. Create the directory if needed. If it cannot be
+     written, the local copy is `NOT written`, with the error.
 
    Report both outcomes on the record line. One failing never cancels the
    other. Every proposed edit from step 4 is in `proposals`, so a

@@ -22,7 +22,12 @@ Hunt specifically for:
   caller-supplied keys copied or looked up unchecked (no bound, no redaction, no
   own-property guard) while only the values are sanitised, or a redaction or
   size check run over the joined output instead of on each segment before the
-  join, so one segment's result stands in for another's.
+  join, so one segment's result stands in for another's. List every form the
+  secret takes on its way to each sink and check the scrub matches it there:
+  nested deeper than a fixed-depth path rule reaches, escaped inside serialized
+  output, containing another secret replaced first (replace the longest first),
+  a URL's userinfo that is a bare token, a value that exists only once the parts
+  are joined, and content stored before the filter that guards its delivery runs.
 - **Crypto misuse** — hand-rolled crypto, ECB mode, static or reused IVs, weak
   hashes for passwords, non-constant-time comparison of secrets, predictable
   randomness (`Math.random`, unseeded PRNG) used for tokens, IDs, or nonces.
